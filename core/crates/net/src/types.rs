@@ -1,0 +1,172 @@
+//! Request and response types for the homeserver API.
+//!
+//! These are the client-side representations. Key material and ciphertext are
+//! raw bytes here; the `Client` methods handle base64 encoding/decoding for
+//! the wire format.
+
+use base64::prelude::*;
+use serde::Deserialize;
+
+use crate::error::NetError;
+
+// ── Registration ─────────────────────────────────────────────────────────────
+
+pub struct RegisterRequest {
+    pub identity_key: Vec<u8>,
+    pub registration_id: i32,
+    pub device_id: i32,
+    pub signed_prekey_id: i32,
+    pub signed_prekey_public: Vec<u8>,
+    pub signed_prekey_signature: Vec<u8>,
+    pub one_time_prekeys: Vec<(i32, Vec<u8>)>,
+    pub kyber_prekey_id: i32,
+    pub kyber_prekey_public: Vec<u8>,
+    pub kyber_prekey_signature: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterResponse {
+    pub did: String,
+    pub session_token: String,
+    pub expires_at: String,
+}
+
+// ── Authentication ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AuthResponse {
+    pub session_token: String,
+    pub expires_at: String,
+}
+
+// ── Prekeys ──────────────────────────────────────────────────────────────────
+
+/// Upload prekeys. All fields optional — upload only what you need to refresh.
+pub struct UploadPrekeysRequest {
+    /// (id, public_key, signature)
+    pub signed_prekey: Option<(i32, Vec<u8>, Vec<u8>)>,
+    /// Vec of (id, public_key)
+    pub one_time_prekeys: Option<Vec<(i32, Vec<u8>)>>,
+    /// (id, public_key, signature)
+    pub kyber_prekey: Option<(i32, Vec<u8>, Vec<u8>)>,
+}
+
+/// Decoded prekey bundle — bytes, not base64.
+pub struct PreKeyBundleResponse {
+    pub identity_key: Vec<u8>,
+    pub registration_id: i32,
+    pub signed_prekey_id: i32,
+    pub signed_prekey_public: Vec<u8>,
+    pub signed_prekey_signature: Vec<u8>,
+    pub one_time_prekey: Option<(i32, Vec<u8>)>,
+    pub kyber_prekey_id: i32,
+    pub kyber_prekey_public: Vec<u8>,
+    pub kyber_prekey_signature: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawPreKeyBundleResponse {
+    identity_key: String,
+    registration_id: i32,
+    signed_prekey: RawSignedPreKey,
+    one_time_prekey: Option<RawOneTimePreKey>,
+    kyber_prekey: RawKyberPreKey,
+}
+
+#[derive(Deserialize)]
+struct RawSignedPreKey {
+    id: i32,
+    public_key: String,
+    signature: String,
+}
+
+#[derive(Deserialize)]
+struct RawOneTimePreKey {
+    id: i32,
+    public_key: String,
+}
+
+#[derive(Deserialize)]
+struct RawKyberPreKey {
+    id: i32,
+    public_key: String,
+    signature: String,
+}
+
+impl RawPreKeyBundleResponse {
+    pub(crate) fn decode(self) -> Result<PreKeyBundleResponse, NetError> {
+        Ok(PreKeyBundleResponse {
+            identity_key: decode_b64(&self.identity_key)?,
+            registration_id: self.registration_id,
+            signed_prekey_id: self.signed_prekey.id,
+            signed_prekey_public: decode_b64(&self.signed_prekey.public_key)?,
+            signed_prekey_signature: decode_b64(&self.signed_prekey.signature)?,
+            one_time_prekey: self.one_time_prekey.map(|k| {
+                Ok::<_, NetError>((k.id, decode_b64(&k.public_key)?))
+            }).transpose()?,
+            kyber_prekey_id: self.kyber_prekey.id,
+            kyber_prekey_public: decode_b64(&self.kyber_prekey.public_key)?,
+            kyber_prekey_signature: decode_b64(&self.kyber_prekey.signature)?,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrekeyStatusResponse {
+    pub one_time_remaining: i64,
+    pub kyber_remaining: i64,
+}
+
+// ── Messages ─────────────────────────────────────────────────────────────────
+
+/// An outbound message to send via the server.
+pub struct OutboundMessage {
+    pub recipient_did: String,
+    pub recipient_device_id: i32,
+    pub ciphertext: Vec<u8>,
+    pub message_kind: i16,
+}
+
+/// An inbound message received from the server.
+pub struct InboundMessage {
+    pub id: i64,
+    pub ciphertext: Vec<u8>,
+    pub message_kind: i16,
+    pub enqueued_at: String,
+    pub sender_did: Option<String>,
+    pub sender_device_id: Option<i32>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawFetchResponse {
+    messages: Vec<RawInboundMessage>,
+}
+
+#[derive(Deserialize)]
+struct RawInboundMessage {
+    id: i64,
+    ciphertext: String,
+    message_kind: i16,
+    enqueued_at: String,
+    sender_did: Option<String>,
+    sender_device_id: Option<i32>,
+}
+
+impl RawFetchResponse {
+    pub(crate) fn decode(self) -> Result<Vec<InboundMessage>, NetError> {
+        self.messages.into_iter().map(|m| {
+            Ok(InboundMessage {
+                id: m.id,
+                ciphertext: decode_b64(&m.ciphertext)?,
+                message_kind: m.message_kind,
+                enqueued_at: m.enqueued_at,
+                sender_did: m.sender_did,
+                sender_device_id: m.sender_device_id,
+            })
+        }).collect()
+    }
+}
+
+fn decode_b64(s: &str) -> Result<Vec<u8>, NetError> {
+    BASE64_STANDARD.decode(s).map_err(|e| NetError::Base64(e.to_string()))
+}

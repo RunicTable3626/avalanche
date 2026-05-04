@@ -2,3 +2,21 @@
 name    = "app-core"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+name = "app_core"
+
+[dependencies]
+types              = { workspace = true }
+crypto             = { workspace = true }
+store              = { workspace = true }
+net                = { path = "../net" }
+libsignal-protocol = { workspace = true }
+rand               = { workspace = true }
+thiserror          = { workspace = true }
+uniffi             = { workspace = true, features = ["cli"] }
+tokio              = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

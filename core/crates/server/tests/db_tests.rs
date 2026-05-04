@@ -1,0 +1,315 @@
+//! Database layer tests using the transaction-rollback pattern.
+//!
+//! Each test begins a transaction, runs its assertions, then the transaction
+//! is dropped (rolled back) on exit. This means:
+//! - Tests are fast (no per-test DB setup/teardown).
+//! - Tests are isolated (writes never commit, so tests don't interfere).
+//! - Tests need a running Postgres with the schema already applied.
+//!
+//! Set `TEST_DATABASE_URL` to point at a test Postgres instance.
+//! The schema from `infra/migrations/001_initial.sql` must be applied first.
+
+use sqlx::PgPool;
+
+/// Connect to the test database. Panics if TEST_DATABASE_URL is not set.
+async fn test_pool() -> PgPool {
+    let url = std::env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL must be set to run server tests");
+    PgPool::connect(&url).await.expect("failed to connect to test database")
+}
+
+/// Begin a transaction that will be rolled back when dropped.
+/// Returns a connection usable as `&mut PgConnection` via `&mut *tx`.
+async fn begin_tx(pool: &PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    pool.begin().await.expect("failed to begin transaction")
+}
+
+// ── Account tests ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_account_returns_id() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let id = server::db::accounts::create(&mut *tx, "did:plc:testaccount1").await.unwrap();
+    assert!(id > 0);
+}
+
+#[tokio::test]
+async fn find_account_by_did() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let did = "did:plc:findme123456789012";
+    let id = server::db::accounts::create(&mut *tx, did).await.unwrap();
+
+    let found = server::db::accounts::find_by_did(&mut *tx, did).await.unwrap();
+    assert!(found.is_some());
+    let account = found.unwrap();
+    assert_eq!(account.id, id);
+    assert_eq!(account.did, did);
+}
+
+#[tokio::test]
+async fn find_account_nonexistent_returns_none() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let found = server::db::accounts::find_by_did(&mut *tx, "did:plc:doesnotexist0000").await.unwrap();
+    assert!(found.is_none());
+}
+
+// ── Device tests ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_and_find_device() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:devicetest00000001").await.unwrap();
+    let identity_key = vec![1u8; 33];
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &identity_key, 42).await.unwrap();
+    assert!(device_pk > 0);
+
+    let device = server::db::devices::find(&mut *tx, account_id, 1).await.unwrap().unwrap();
+    assert_eq!(device.id, device_pk);
+    assert_eq!(device.device_id, 1);
+    assert_eq!(device.identity_key, identity_key);
+    assert_eq!(device.registration_id, 42);
+}
+
+#[tokio::test]
+async fn find_device_by_did() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let did = "did:plc:devbydidtest000001";
+    let account_id = server::db::accounts::create(&mut *tx, did).await.unwrap();
+    let identity_key = vec![2u8; 33];
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &identity_key, 99).await.unwrap();
+
+    let device = server::db::devices::find_by_did(&mut *tx, did, 1).await.unwrap().unwrap();
+    assert_eq!(device.id, device_pk);
+}
+
+#[tokio::test]
+async fn list_devices_by_did() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let did = "did:plc:listdevtest0000001";
+    let account_id = server::db::accounts::create(&mut *tx, did).await.unwrap();
+    server::db::devices::create(&mut *tx, account_id, 1, &[1u8; 33], 10).await.unwrap();
+    server::db::devices::create(&mut *tx, account_id, 2, &[2u8; 33], 20).await.unwrap();
+
+    let devices = server::db::devices::list_by_did(&mut *tx, did).await.unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[0].device_id, 1);
+    assert_eq!(devices[1].device_id, 2);
+}
+
+// ── Session token tests ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_and_validate_session_token() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:sessiontest000001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[3u8; 33], 1).await.unwrap();
+
+    let token = "test-token-abc123";
+    let _expires = server::db::sessions::create(&mut *tx, token, device_pk, 3600).await.unwrap();
+
+    let validated = server::db::sessions::validate(&mut *tx, token).await.unwrap();
+    assert_eq!(validated, Some(device_pk));
+}
+
+#[tokio::test]
+async fn validate_invalid_token_returns_none() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let validated = server::db::sessions::validate(&mut *tx, "nonexistent-token").await.unwrap();
+    assert_eq!(validated, None);
+}
+
+#[tokio::test]
+async fn expired_token_returns_none() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:expiredtoken00001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[4u8; 33], 1).await.unwrap();
+
+    // Create a token with 0-second lifetime (already expired).
+    let token = "expired-token-xyz";
+    server::db::sessions::create(&mut *tx, token, device_pk, 0).await.unwrap();
+
+    let validated = server::db::sessions::validate(&mut *tx, token).await.unwrap();
+    assert_eq!(validated, None);
+}
+
+// ── DID document tests ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn upsert_and_find_did_document() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let did = "did:plc:diddoctest00000001";
+    let account_id = server::db::accounts::create(&mut *tx, did).await.unwrap();
+
+    let doc = serde_json::json!({
+        "id": did,
+        "verificationMethod": []
+    });
+    server::db::did::upsert_document(&mut *tx, account_id, &doc).await.unwrap();
+
+    let found = server::db::did::find_by_did(&mut *tx, did).await.unwrap().unwrap();
+    assert_eq!(found["id"], did);
+}
+
+// ── Prekey tests ─────────────────────────────────────────────────────────────
+
+async fn setup_device(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, did: &str) -> i64 {
+    let account_id = server::db::accounts::create(&mut **tx, did).await.unwrap();
+    server::db::devices::create(&mut **tx, account_id, 1, &[5u8; 33], 100).await.unwrap()
+}
+
+#[tokio::test]
+async fn upload_and_count_prekeys() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+    let device_pk = setup_device(&mut tx, "did:plc:prekeytest00000001").await;
+
+    // Upload signed prekey.
+    server::db::prekeys::upsert_signed(&mut *tx, device_pk, 1, &[10u8; 32], &[11u8; 64]).await.unwrap();
+
+    // Upload one-time prekeys.
+    let otpks = vec![
+        (1, vec![20u8; 32]),
+        (2, vec![21u8; 32]),
+        (3, vec![22u8; 32]),
+    ];
+    server::db::prekeys::insert_one_time_batch(&mut *tx, device_pk, &otpks).await.unwrap();
+
+    let count = server::db::prekeys::one_time_count(&mut *tx, device_pk).await.unwrap();
+    assert_eq!(count, 3);
+
+    // Upload Kyber prekey.
+    server::db::prekeys::upsert_kyber(&mut *tx, device_pk, 1, &[30u8; 32], &[31u8; 64]).await.unwrap();
+
+    let kyber_count = server::db::prekeys::kyber_count(&mut *tx, device_pk).await.unwrap();
+    assert_eq!(kyber_count, 1);
+}
+
+#[tokio::test]
+async fn fetch_bundle_consumes_one_time_prekey() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+    let device_pk = setup_device(&mut tx, "did:plc:bundletest00000001").await;
+
+    server::db::prekeys::upsert_signed(&mut *tx, device_pk, 1, &[10u8; 32], &[11u8; 64]).await.unwrap();
+    let otpks = vec![(1, vec![20u8; 32]), (2, vec![21u8; 32])];
+    server::db::prekeys::insert_one_time_batch(&mut *tx, device_pk, &otpks).await.unwrap();
+    server::db::prekeys::upsert_kyber(&mut *tx, device_pk, 1, &[30u8; 32], &[31u8; 64]).await.unwrap();
+
+    // First fetch should consume one OTP key.
+    let bundle = server::db::prekeys::fetch_bundle(&mut *tx, device_pk).await.unwrap().unwrap();
+    assert!(bundle.one_time_prekey.is_some());
+    assert_eq!(bundle.signed_prekey.id, 1);
+    assert_eq!(bundle.kyber_prekey.id, 1);
+
+    let remaining = server::db::prekeys::one_time_count(&mut *tx, device_pk).await.unwrap();
+    assert_eq!(remaining, 1);
+
+    // Second fetch consumes the last one.
+    let bundle2 = server::db::prekeys::fetch_bundle(&mut *tx, device_pk).await.unwrap().unwrap();
+    assert!(bundle2.one_time_prekey.is_some());
+
+    let remaining = server::db::prekeys::one_time_count(&mut *tx, device_pk).await.unwrap();
+    assert_eq!(remaining, 0);
+
+    // Third fetch has no one-time prekey.
+    let bundle3 = server::db::prekeys::fetch_bundle(&mut *tx, device_pk).await.unwrap().unwrap();
+    assert!(bundle3.one_time_prekey.is_none());
+}
+
+// ── Message queue tests ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn enqueue_and_fetch_messages() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:msgtest000000000001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[6u8; 33], 1).await.unwrap();
+
+    let _msg1 = server::db::messages::enqueue(&mut *tx, device_pk, Some(account_id), None, b"cipher1", 1, 86400).await.unwrap();
+    let _msg2 = server::db::messages::enqueue(&mut *tx, device_pk, Some(account_id), None, b"cipher2", 1, 86400).await.unwrap();
+
+    let queued = server::db::messages::fetch_for_device(&mut *tx, device_pk).await.unwrap();
+    assert_eq!(queued.len(), 2);
+    // Messages are ordered by enqueued_at ASC; verify content rather than IDs
+    // since sequence counters are shared with committed e2e test data.
+    assert_eq!(queued[0].ciphertext, b"cipher1");
+    assert_eq!(queued[1].ciphertext, b"cipher2");
+    assert!(queued[0].id < queued[1].id);
+}
+
+#[tokio::test]
+async fn acknowledge_deletes_messages() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:acktest0000000000001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[7u8; 33], 1).await.unwrap();
+
+    let msg1 = server::db::messages::enqueue(&mut *tx, device_pk, None, None, b"c1", 1, 86400).await.unwrap();
+    let msg2 = server::db::messages::enqueue(&mut *tx, device_pk, None, None, b"c2", 1, 86400).await.unwrap();
+
+    // Acknowledge only the first message.
+    let deleted = server::db::messages::acknowledge(&mut *tx, device_pk, &[msg1]).await.unwrap();
+    assert_eq!(deleted, 1);
+
+    let remaining = server::db::messages::fetch_for_device(&mut *tx, device_pk).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, msg2);
+}
+
+#[tokio::test]
+async fn acknowledge_scoped_to_device() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:scopetest00000000001").await.unwrap();
+    let device1 = server::db::devices::create(&mut *tx, account_id, 1, &[8u8; 33], 1).await.unwrap();
+    let device2 = server::db::devices::create(&mut *tx, account_id, 2, &[9u8; 33], 2).await.unwrap();
+
+    let msg1 = server::db::messages::enqueue(&mut *tx, device1, None, None, b"for-dev1", 1, 86400).await.unwrap();
+
+    // device2 trying to ack device1's message should have no effect.
+    let deleted = server::db::messages::acknowledge(&mut *tx, device2, &[msg1]).await.unwrap();
+    assert_eq!(deleted, 0);
+
+    // device1 can ack its own message.
+    let deleted = server::db::messages::acknowledge(&mut *tx, device1, &[msg1]).await.unwrap();
+    assert_eq!(deleted, 1);
+}
+
+#[tokio::test]
+async fn message_without_sender() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:nosender000000000001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[10u8; 33], 1).await.unwrap();
+
+    // sender_account_id = None (sealed sender future mode).
+    let msg_id = server::db::messages::enqueue(&mut *tx, device_pk, None, None, b"sealed", 1, 86400).await.unwrap();
+    assert!(msg_id > 0);
+
+    let queued = server::db::messages::fetch_for_device(&mut *tx, device_pk).await.unwrap();
+    assert_eq!(queued.len(), 1);
+}

@@ -1,0 +1,48 @@
+TEST_DATABASE_URL ?= postgres://actnet:actnet-dev@localhost/actnet
+
+.PHONY: test test-server test-core test-e2e check clippy db-up db-down bindings ios
+
+test: test-core test-server
+
+test-e2e:
+	cd core && cargo test -p app-core
+
+test-core:
+	cd core && cargo test -p crypto -p store -p types
+
+test-server:
+	cd core && TEST_DATABASE_URL=$(TEST_DATABASE_URL) cargo test -p server
+
+check:
+	cd core && cargo check
+
+clippy:
+	cd core && cargo clippy
+
+db-up:
+	docker compose -f infra/docker-compose.yml up -d
+
+db-down:
+	docker compose -f infra/docker-compose.yml down
+
+ios: bindings ios-xcframework
+	cd mobile/ios/Actnet && xcodegen generate
+
+ios-xcframework:
+	cd core && cargo build -p app-core --target aarch64-apple-ios --release
+	cd core && cargo build -p app-core --target aarch64-apple-ios-sim --release
+	mkdir -p mobile/ios/RustFramework/Headers
+	cp mobile/ios/Generated/app_coreFFI.h mobile/ios/RustFramework/Headers/
+	cp mobile/ios/Generated/app_coreFFI.modulemap mobile/ios/RustFramework/Headers/module.modulemap
+	rm -rf mobile/ios/AppCoreFFI.xcframework
+	xcodebuild -create-xcframework \
+		-library core/target/aarch64-apple-ios/release/libapp_core.a \
+		-headers mobile/ios/RustFramework/Headers \
+		-library core/target/aarch64-apple-ios-sim/release/libapp_core.a \
+		-headers mobile/ios/RustFramework/Headers \
+		-output mobile/ios/AppCoreFFI.xcframework
+
+bindings:
+	cd core && cargo build -p app-core
+	cd core && cargo run -p app-core --bin uniffi-bindgen generate --library target/debug/libapp_core.dylib --language swift --out-dir ../mobile/ios/Generated
+	cd core && cargo run -p app-core --bin uniffi-bindgen generate --library target/debug/libapp_core.dylib --language kotlin --out-dir ../mobile/android/Generated

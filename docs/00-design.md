@@ -226,6 +226,14 @@ A bot that answers participant questions by grounding its responses in a corpus 
 
 A sign-up and team-formation Project for actions where participants are divided into named, color-coded teams. The sign-up flow creates a full account on the homeserver and collects profile and contact info, storing it encrypted under the user's keys with the Project holding only scoped read access. On completion, participants are dropped into their team's action-bound encrypted group, which carries Signal-style guarantees. The Project adds a thin role layer on top — team leads get a scoped permission to see the roster and contact info; members only see who has posted. Team-level state (a checklist, capacity counts) lives in the Project's server-side store. Team reassignment works by matching swap requests bidirectionally; admins can approve one-sided moves and trigger full reshuffles.
 
+### Project: User Directory
+
+A list of users who are on the server. As a user, you can see the other users' profiles, initiate DMs with them, and search their profiles. You can also edit how your own profile appears to others in the directory. Admins can configure settings like whether users opt in or out of being listed, and what fields appear for users to configure. This would serve as the attendee directory for a conference.
+
+### Project: Shared Calendar
+
+A shared calendar of events by day and optionally by room/track. Anyone can view the events or export them. Admins can configure who has access to add or modify events, either directly or via calendar sync. You can also copy events to your personal calendar.
+
 ### Project: Action Day
 
 A situational-awareness feature for participants during an active action, centered on a map and an announcements feed rather than chat. The map shows admin-set destination markers (staging area, route, dispersal point), pushed to all participants via high-priority push and cached for offline use; participant location is uploaded to the homeserver and shown to other participants in real time, but is ephemeral — the homeserver discards location records on a short rolling window (e.g., a few minutes) and purges all location data when the action ends. Announcements are delivered through a dedicated action-bound encrypted group where members have receive-only access enforced at the protocol level — they cannot see the participant list or reply. Sender authenticity is verified by checking the sender's key against the group's admin keyset. Action Day can run standalone or be layered on top of Team Assignment, with participants enrolled in the announcement group as part of the Team Assignment sign-up flow.

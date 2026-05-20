@@ -444,3 +444,138 @@ async fn expired_project_token_returns_none() {
     let result = server::db::project_tokens::verify(&mut *tx, token).await.unwrap();
     assert!(result.is_none());
 }
+
+// ── Auth challenge tests ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_and_consume_challenge() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:challengetest000001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[11u8; 33], 1).await.unwrap();
+
+    let nonce = "test-nonce-consume-001";
+    server::db::challenges::create(&mut *tx, nonce, device_pk, 300).await.unwrap();
+
+    let result = server::db::challenges::consume(&mut *tx, nonce).await.unwrap();
+    assert_eq!(result, Some(device_pk));
+}
+
+#[tokio::test]
+async fn consume_expired_challenge_returns_none() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:challengeexpired001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[12u8; 33], 1).await.unwrap();
+
+    let nonce = "test-nonce-expired-001";
+    server::db::challenges::create(&mut *tx, nonce, device_pk, 0).await.unwrap();
+
+    let result = server::db::challenges::consume(&mut *tx, nonce).await.unwrap();
+    assert_eq!(result, None);
+}
+
+#[tokio::test]
+async fn consume_nonexistent_challenge_returns_none() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let result = server::db::challenges::consume(&mut *tx, "nonce-that-does-not-exist").await.unwrap();
+    assert_eq!(result, None);
+}
+
+#[tokio::test]
+async fn consume_is_one_time() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:challengeonetime001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[13u8; 33], 1).await.unwrap();
+
+    let nonce = "test-nonce-onetime-001";
+    server::db::challenges::create(&mut *tx, nonce, device_pk, 300).await.unwrap();
+
+    let first = server::db::challenges::consume(&mut *tx, nonce).await.unwrap();
+    assert_eq!(first, Some(device_pk));
+
+    let second = server::db::challenges::consume(&mut *tx, nonce).await.unwrap();
+    assert_eq!(second, None, "nonce must be single-use");
+}
+
+// ── Auth challenge + signature integration test ──────────────────────────────
+
+#[tokio::test]
+async fn full_auth_flow_valid_signature_accepted() {
+    use base64::prelude::*;
+    use libsignal_protocol as signal;
+    use rand::{Rng, TryRngCore as _};
+
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    // Register a device with a real Ed25519 identity key.
+    let keypair = signal::IdentityKeyPair::generate(&mut rand::rngs::OsRng.unwrap_err());
+    let identity_key_bytes = keypair.identity_key().serialize().to_vec();
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:authflowvalid00001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &identity_key_bytes, 1).await.unwrap();
+
+    // Issue a challenge nonce.
+    let nonce_bytes: [u8; 32] = rand::rng().random();
+    let nonce = BASE64_URL_SAFE_NO_PAD.encode(nonce_bytes);
+    server::db::challenges::create(&mut *tx, &nonce, device_pk, 300).await.unwrap();
+
+    // Client signs the raw nonce bytes.
+    let sig = keypair
+        .private_key()
+        .calculate_signature(&nonce_bytes, &mut rand::rngs::OsRng.unwrap_err())
+        .expect("signing failed");
+
+    // Consume the challenge and verify the signature — mirrors the handler logic.
+    let challenge_device_pk = server::db::challenges::consume(&mut *tx, &nonce)
+        .await.unwrap().expect("challenge should be present");
+    assert_eq!(challenge_device_pk, device_pk);
+
+    let device = server::db::devices::find(&mut *tx, account_id, 1)
+        .await.unwrap().unwrap();
+    let stored_key = signal::IdentityKey::decode(&device.identity_key).expect("decode");
+    let valid = stored_key.public_key().verify_signature(&nonce_bytes, &sig);
+    assert!(valid, "signature from the correct key should be accepted");
+}
+
+#[tokio::test]
+async fn full_auth_flow_wrong_signature_rejected() {
+    use base64::prelude::*;
+    use libsignal_protocol as signal;
+    use rand::{Rng, TryRngCore as _};
+
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let keypair = signal::IdentityKeyPair::generate(&mut rand::rngs::OsRng.unwrap_err());
+    let identity_key_bytes = keypair.identity_key().serialize().to_vec();
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:authflowwrong0001").await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &identity_key_bytes, 1).await.unwrap();
+
+    let nonce_bytes: [u8; 32] = rand::rng().random();
+    let nonce = BASE64_URL_SAFE_NO_PAD.encode(nonce_bytes);
+    server::db::challenges::create(&mut *tx, &nonce, device_pk, 300).await.unwrap();
+
+    // Sign with a different keypair — wrong key.
+    let wrong_keypair = signal::IdentityKeyPair::generate(&mut rand::rngs::OsRng.unwrap_err());
+    let bad_sig = wrong_keypair
+        .private_key()
+        .calculate_signature(&nonce_bytes, &mut rand::rngs::OsRng.unwrap_err())
+        .expect("signing failed");
+
+    server::db::challenges::consume(&mut *tx, &nonce).await.unwrap();
+
+    let device = server::db::devices::find(&mut *tx, account_id, 1)
+        .await.unwrap().unwrap();
+    let stored_key = signal::IdentityKey::decode(&device.identity_key).expect("decode");
+    let valid = stored_key.public_key().verify_signature(&nonce_bytes, &bad_sig);
+    assert!(!valid, "signature from a different key should be rejected");
+}

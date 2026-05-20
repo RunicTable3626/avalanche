@@ -2826,6 +2826,7 @@ dependencies = [
  "base32",
  "base64 0.22.1",
  "http-body-util",
+ "libsignal-protocol",
  "rand 0.9.4",
  "reqwest",
  "serde",

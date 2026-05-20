@@ -12,6 +12,7 @@ use axum::Router;
 
 use crate::state::AppState;
 
+mod accounts;
 mod auth;
 mod did;
 mod messages;
@@ -31,4 +32,5 @@ pub fn router() -> Router<AppState> {
         .merge(did::routes())
         .merge(projects::routes())
         .merge(push::routes())
+        .merge(accounts::routes())
 }

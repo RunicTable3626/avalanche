@@ -77,6 +77,8 @@ impl Client {
                 "public_key": BASE64_STANDARD.encode(&req.kyber_prekey_public),
                 "signature": BASE64_STANDARD.encode(&req.kyber_prekey_signature),
             },
+            "display_name": req.display_name,
+            "is_bot": req.is_bot,
         });
 
         let resp = self.http
@@ -308,6 +310,23 @@ impl Client {
         }
 
         Ok(())
+    }
+
+    // ── Account info ─────────────────────────────────────────────────────
+
+    /// Look up an account's display name and bot flag.
+    pub async fn get_account_info(&self, did: &str) -> Result<AccountInfoResponse, NetError> {
+        let resp = self
+            .authed_request(reqwest::Method::GET, &format!("/v1/accounts/{}", did))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+
+        Ok(resp.json().await?)
     }
 
     // ── DID ──────────────────────────────────────────────────────────────

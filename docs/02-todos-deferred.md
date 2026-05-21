@@ -1,7 +1,7 @@
 # Deferred TODOs
 
 ## Dev Infra
-- Make it super easy to launch Postgres, the main server & relevant Projects all at once in dev
+- Dev Infra: extend `dev.sh` to also start first-party Project services once Stage 6 lands (currently starts Postgres + server + relay only)
 
 ## Chatbot Project (finishing touches)
 - ~~Bot display name: conversations currently show raw DID instead of a friendly name~~ — implemented

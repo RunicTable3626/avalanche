@@ -94,6 +94,7 @@ pub fn spawn_all(state: AppState) {
         },
     ));
 
+
     let state_pv = state.clone();
     tokio::spawn(async move {
         let mut timer = tokio::time::interval(Duration::from_secs(60));

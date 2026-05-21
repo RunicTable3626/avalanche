@@ -28,6 +28,10 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         }
     }
 
+    func getAccountInfo(did: String) throws -> AccountInfoFfi {
+        AccountInfoFfi(did: did, displayName: nil, isBot: false)
+    }
+
     func fetchProjects() throws -> [ProjectInfoFfi] {
         [ProjectInfoFfi(name: "Testbot", url: "http://localhost:3001", description: "Chat with an AI bot")]
     }

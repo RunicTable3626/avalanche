@@ -205,12 +205,17 @@ async fn text_me(
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
 
-            let bot = app_core::AppCore::create_account_with_store(&homeserver_url, bot_store)
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "failed to create bot account");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+            let bot = app_core::AppCore::create_account_with_store(
+                &homeserver_url,
+                bot_store,
+                Some("Actbot".to_string()),
+                true,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed to create bot account");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
             let bot_did = bot.did_async().await;
             let bot_device_id = bot.device_id_async().await;

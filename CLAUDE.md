@@ -128,3 +128,11 @@ FFI constraints (do not violate):
 - `ServerError::RateLimited` — rate limit exceeded (HTTP 429)
 - `ServerError::Internal(msg)` — unexpected server-side failure; log with `tracing::error!`
 - Never expose DB details or internal state to the client; only log server-side
+
+## Contributing workflow
+
+When implementing a TODO item from `docs/02-todos-deferred.md`:
+
+1. Implement the feature on a dedicated branch (never directly on `main`).
+2. When asked to create a PR from the feature branch to the upstream remote, remove the corresponding item from `docs/02-todos-deferred.md` — but **always confirm with the user which item to remove before doing so**.
+3. Commit the removal as part of the same PR or as a follow-up on the same branch, as the user prefers.

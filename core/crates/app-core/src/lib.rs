@@ -129,6 +129,14 @@ pub struct DeliveryStatusUpdate {
     pub delivery_status: u8,
 }
 
+/// Public metadata for an account: display name and bot flag.
+#[derive(uniffi::Record)]
+pub struct AccountInfoFfi {
+    pub did: String,
+    pub display_name: Option<String>,
+    pub is_bot: bool,
+}
+
 /// The main client handle. Holds local state and a server connection.
 ///
 /// Thread-safe: all mutable state is behind an async Mutex, and the object
@@ -172,7 +180,7 @@ impl AppCore {
             &store::DatabaseKey::from_passphrase(db_key),
         )).map_err(AppError::from).map_err(AppErrorFfi::from)?;
 
-        let inner = rt.block_on(Self::create_inner(&server_url, store))
+        let inner = rt.block_on(Self::create_inner(&server_url, store, None, false))
             .map_err(AppErrorFfi::from)?;
 
         Ok(Arc::new(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) }))
@@ -352,6 +360,22 @@ impl AppCore {
         ffi_runtime().block_on(self.receive_messages_ws_async())
             .map_err(AppErrorFfi::from)
     }
+
+    /// Fetch public metadata for an account: display name and bot flag.
+    ///
+    /// Call from a background thread — this blocks until complete.
+    pub fn get_account_info(&self, did: String) -> Result<AccountInfoFfi, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            let info = inner.client.get_account_info(&did).await
+                .map_err(AppError::from)?;
+            Ok::<_, AppError>(AccountInfoFfi {
+                did: info.did,
+                display_name: info.display_name,
+                is_bot: info.is_bot,
+            })
+        }).map_err(AppErrorFfi::from)
+    }
 }
 
 // ── Internal async implementation (not exported via FFI) ────────────────────
@@ -360,6 +384,8 @@ impl AppCore {
     async fn create_inner(
         server_url: &str,
         store: store::Store,
+        display_name: Option<String>,
+        is_bot: bool,
     ) -> Result<AppCoreInner, AppError> {
         let identity = crypto::IdentityKeyPair::generate();
         let registration_id = rand::Rng::random::<u32>(&mut rand::rng()) & 0x3FFF;
@@ -381,6 +407,8 @@ impl AppCore {
             kyber_prekey_id: kyber.wire.id as i32,
             kyber_prekey_public: kyber.wire.public_key.clone(),
             kyber_prekey_signature: kyber.wire.signature.clone(),
+            display_name,
+            is_bot,
         }).await?;
 
         store.save_identity(&identity, registration_id).await?;
@@ -437,13 +465,15 @@ impl AppCore {
         })
     }
 
-    /// Create account with a pre-opened store (for tests that run inside
+    /// Create account with a pre-opened store (for tests and bots that run inside
     /// an existing tokio runtime).
     pub async fn create_account_with_store(
         server_url: &str,
         store: store::Store,
+        display_name: Option<String>,
+        is_bot: bool,
     ) -> Result<Self, AppError> {
-        let inner = Self::create_inner(server_url, store).await?;
+        let inner = Self::create_inner(server_url, store, display_name, is_bot).await?;
         Ok(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) })
     }
 

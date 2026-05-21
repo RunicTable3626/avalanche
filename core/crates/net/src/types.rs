@@ -22,6 +22,8 @@ pub struct RegisterRequest {
     pub kyber_prekey_id: i32,
     pub kyber_prekey_public: Vec<u8>,
     pub kyber_prekey_signature: Vec<u8>,
+    pub display_name: Option<String>,
+    pub is_bot: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +31,15 @@ pub struct RegisterResponse {
     pub did: String,
     pub session_token: String,
     pub expires_at: String,
+}
+
+// ── Account info ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AccountInfoResponse {
+    pub did: String,
+    pub display_name: Option<String>,
+    pub is_bot: bool,
 }
 
 // ── Authentication ───────────────────────────────────────────────────────────

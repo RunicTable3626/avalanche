@@ -38,6 +38,9 @@ struct RegisterRequest {
     signed_prekey: SignedPreKeyUpload,
     one_time_prekeys: Vec<OneTimePreKeyUpload>,
     kyber_prekey: KyberPreKeyUpload,
+    display_name: Option<String>,
+    #[serde(default)]
+    is_bot: bool,
 }
 
 #[derive(Deserialize)]
@@ -78,10 +81,17 @@ async fn register(
     // Generate a did:plc stub: hash identity_key + server_url + timestamp.
     let did = generate_did_plc(&identity_key, &state.config.server_url);
 
+    if let Some(name) = &req.display_name {
+        if name.len() > 100 {
+            return Err(ServerError::BadRequest("display_name too long".into()));
+        }
+    }
+
     let mut conn = state.db.acquire().await?;
 
     // Create account.
-    let account_id = db::accounts::create(&mut conn, &did).await?;
+    let account_id =
+        db::accounts::create(&mut conn, &did, req.display_name.as_deref(), req.is_bot).await?;
 
     // Create device.
     let device_pk = db::devices::create(

@@ -343,6 +343,35 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Mark messages as read up to (and including) the given sentAtMs timestamp.
+    /// Only marks received messages (not own outgoing). Sends read receipts for newly-read messages.
+    func markMessagesReadUpTo(sentAtMs threshold: Int64, conversationId: String, accountId: String) {
+        guard var messages = messagesByConversation[conversationId] else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        var readTimestampsBySender: [String: [Int64]] = [:]
+        var changed = false
+        for i in messages.indices {
+            let msg = messages[i]
+            guard msg.readAtMs == nil && msg.senderAccountId != accountId && msg.sentAtMs <= threshold else { continue }
+            messages[i].readAtMs = nowMs
+            changed = true
+            readTimestampsBySender[msg.senderAccountId, default: []].append(msg.sentAtMs)
+        }
+        guard changed else { return }
+        messagesByConversation[conversationId] = messages
+
+        if let core = cores[accountId] {
+            let convId = conversationId
+            let timestampsBySender = readTimestampsBySender
+            Task.detached {
+                try? core.markMessagesRead(conversationId: convId, upToSentAtMs: threshold)
+                for (senderDid, timestamps) in timestampsBySender {
+                    try? core.sendReadReceipt(recipientDid: senderDid, recipientDeviceId: 1, timestamps: timestamps)
+                }
+            }
+        }
+    }
+
     /// Load persisted messages from SQLCipher for a conversation.
     func loadMessagesFromStore(conversationId: String, accountId: String) {
         guard let core = cores[accountId] else { return }

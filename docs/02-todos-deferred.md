@@ -2,10 +2,8 @@
 
 ## Mobile app
 - Recovery key UI: setup and backup flows (banner currently always shows, hardcoded false)
-- Scroll-position-based read marking (see docs/31-read-tracking.md, Stage B)
 - Delivery receipts — auto-send on message receive (see docs/31-read-tracking.md, Stage D)
 - Read receipt user preference toggle (send_read_receipts setting)
-- Scroll position: remove invisible "bottom" anchor hack in ConversationView (Color.clear spacer) when scroll position saving is implemented
 
 ## Crypto / protocol
 - Kyber prekey pool: upload one-time Kyber prekeys with server-side atomic consumption (like EC one-time prekeys), keep one last-resort key. Currently only a single last-resort key is used.

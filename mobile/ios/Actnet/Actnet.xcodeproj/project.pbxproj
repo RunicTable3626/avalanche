@@ -349,6 +349,7 @@
 					"\"..\"",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = actnet;
 				INFOPLIST_KEY_CFBundleName = Actnet;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -496,6 +497,7 @@
 					"\"..\"",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = actnet;
 				INFOPLIST_KEY_CFBundleName = Actnet;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

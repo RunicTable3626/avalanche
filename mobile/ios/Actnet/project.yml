@@ -28,6 +28,7 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
     info:
+      path: Info.plist
       properties:
         CFBundleURLTypes:
           - CFBundleURLSchemes:

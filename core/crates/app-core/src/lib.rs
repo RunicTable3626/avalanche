@@ -348,6 +348,54 @@ impl AppCore {
             })
         }).map_err(AppErrorFfi::from)
     }
+
+    /// Register a push device token with the homeserver via a fresh pseudonym.
+    /// Generates a random pseudonym, persists it locally, and notifies the server.
+    ///
+    /// `platform` is `"apns"` (iOS) or `"fcm"` (Android).
+    ///
+    /// Call from a background thread — this blocks until complete.
+    pub fn register_push_token(&self, device_token: String, platform: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            let bytes: [u8; 32] = rand::Rng::random(&mut rand::rng());
+            let pseudonym = base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(bytes);
+            inner.store.save_push_state(store::push::PushState {
+                pseudonym: pseudonym.clone(),
+                device_token,
+                platform,
+            }).await.map_err(AppError::Store)?;
+            inner.client.register_push_pseudonym(&pseudonym).await
+                .map_err(AppError::Net)?;
+            Ok::<_, AppError>(())
+        }).map_err(AppErrorFfi::from)
+    }
+
+    /// Rotate the push pseudonym: register a new one, then unregister the old one.
+    /// The relay keeps the old pseudonym active for a 7-day grace period.
+    ///
+    /// Call from a background thread — this blocks until complete.
+    pub fn rotate_push_pseudonym(&self) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            let old = inner.store.load_push_state().await
+                .map_err(AppError::Store)?;
+            if let Some(old_state) = old {
+                let bytes: [u8; 32] = rand::Rng::random(&mut rand::rng());
+                let new_pseudonym = base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(bytes);
+                inner.store.save_push_state(store::push::PushState {
+                    pseudonym: new_pseudonym.clone(),
+                    device_token: old_state.device_token,
+                    platform: old_state.platform,
+                }).await.map_err(AppError::Store)?;
+                inner.client.register_push_pseudonym(&new_pseudonym).await
+                    .map_err(AppError::Net)?;
+                inner.client.unregister_push_pseudonym(&old_state.pseudonym).await
+                    .map_err(AppError::Net)?;
+            }
+            Ok::<_, AppError>(())
+        }).map_err(AppErrorFfi::from)
+    }
 }
 
 // ── Internal async implementation (not exported via FFI) ────────────────────

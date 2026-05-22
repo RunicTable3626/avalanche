@@ -1,8 +1,5 @@
 # Deferred TODOs
 
-## Dev Infra
-- Dev Infra: extend `dev.sh` to also start first-party Project services once Stage 6 lands (currently starts Postgres + server + relay only)
-
 ## Mobile app
 - Recovery key UI: setup and backup flows (banner currently always shows, hardcoded false)
 - Scroll-position-based read marking (see docs/31-read-tracking.md, Stage B)

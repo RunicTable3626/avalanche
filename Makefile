@@ -44,7 +44,7 @@ db-down:
 	docker compose -f infra/docker-compose.yml down
 
 dev-all:
-	bash dev.sh
+	python3 dev.py
 
 ios: bindings ios-xcframework
 	cd mobile/ios/Actnet && xcodegen generate

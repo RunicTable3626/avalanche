@@ -96,4 +96,6 @@ pub const ALTER_MIGRATIONS: &[&str] = &[
     // Add delivery_status column for outgoing message status tracking.
     // 0 = sending, 1 = sent, 2 = delivered, 3 = read
     "ALTER TABLE message_history ADD COLUMN delivery_status INTEGER NOT NULL DEFAULT 1",
+    // Recovery key storage for account backup.
+    "CREATE TABLE IF NOT EXISTS recovery_keys (\n        id           INTEGER PRIMARY KEY,\n        key_material BLOB NOT NULL,\n        created_at   INTEGER NOT NULL\n    )",
 ];

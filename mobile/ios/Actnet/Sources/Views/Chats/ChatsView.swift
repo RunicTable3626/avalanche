@@ -81,8 +81,7 @@ struct ChatsView: View {
     }
 
     private var hasRecoveryKey: Bool {
-        // TODO: Check via Rust core
-        false
+        appState.hasRecoveryKey
     }
 
     private func accountFor(_ conversation: Conversation) -> Account? {

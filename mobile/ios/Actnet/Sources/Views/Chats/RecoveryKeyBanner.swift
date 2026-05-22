@@ -1,29 +1,28 @@
 import SwiftUI
 
 struct RecoveryKeyBanner: View {
-    @State private var dismissed = true
+    @AppStorage("recoveryKeyBannerDismissed") private var dismissed = false
+    @State private var showingSetup = false
 
     var body: some View {
         if !dismissed {
             HStack {
-                Image(systemName: "exclamationmark.shield")
-                Text("Secure your account")
+                Image(systemName: "shield.lefthalf.filled")
+                Text("Set up your recovery key")
                     .font(.subheadline)
                 Spacer()
-                Button("Set up") {
-                    // TODO: Navigate to recovery key setup
+                Button { showingSetup = true } label: {
+                    Text("Set Up").font(.subheadline.bold())
                 }
-                .font(.subheadline.bold())
-                Button {
-                    dismissed = true
-                } label: {
+                Button { dismissed = true } label: {
                     Image(systemName: "xmark")
-                        .font(.caption)
                 }
             }
-            .padding(.horizontal)
-            .padding(.vertical, 10)
-            .background(.yellow.opacity(0.15))
+            .padding()
+            .background(Color.yellow.opacity(0.15))
+            .sheet(isPresented: $showingSetup) {
+                RecoveryKeySetupView()
+            }
         }
     }
 }

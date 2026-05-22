@@ -1,7 +1,6 @@
 # Deferred TODOs
 
 ## Mobile app
-- Recovery key UI: setup and backup flows (banner currently always shows, hardcoded false)
 - Scroll-position-based read marking (see docs/31-read-tracking.md, Stage B)
 - Delivery receipts — auto-send on message receive (see docs/31-read-tracking.md, Stage D)
 - Read receipt user preference toggle (send_read_receipts setting)

@@ -33,6 +33,7 @@ final class AppState: ObservableObject {
     @Published var serviceMode: ServiceMode
     @Published var selectedTab: Tab = .chats
     @Published var navigateToConversation: Conversation?
+    @Published var hasRecoveryKey = false
 
     enum Tab {
         case calls, chats, network
@@ -160,6 +161,17 @@ final class AppState: ObservableObject {
             }
 
             startMessagePolling()
+            refreshRecoveryKeyStatus()
+        }
+    }
+
+    func refreshRecoveryKeyStatus() {
+        guard let core = cores.first?.value else { return }
+        Task {
+            do {
+                let result = try await Task.detached { try core.hasRecoveryKey() }.value
+                await MainActor.run { self.hasRecoveryKey = result }
+            } catch {}
         }
     }
 
@@ -237,6 +249,7 @@ final class AppState: ObservableObject {
 
         isOnboarding = false
         startMessagePolling()
+        refreshRecoveryKeyStatus()
     }
 
     func joinServer(serverUrl: String, serverName: String, existingAccountId: String) async throws {

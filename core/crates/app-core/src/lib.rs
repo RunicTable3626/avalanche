@@ -321,6 +321,29 @@ impl AppCore {
         }).map_err(AppErrorFfi::from)
     }
 
+    pub fn has_recovery_key(&self) -> Result<bool, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.store.has_recovery_key().await
+                .map_err(AppError::from)
+        }).map_err(AppErrorFfi::from)
+    }
+
+    pub fn generate_recovery_key(&self) -> Result<Vec<u8>, AppErrorFfi> {
+        let mut key = vec![0u8; 32];
+        rand::rngs::OsRng.try_fill_bytes(&mut key)
+            .map_err(|e| AppError::Protocol(format!("RNG error: {e}")))
+            .map_err(AppErrorFfi::from)?;
+        let key_to_save = key.clone();
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.store.save_recovery_key(&key_to_save).await
+                .map_err(AppError::from)?;
+            Ok::<_, AppError>(())
+        }).map_err(AppErrorFfi::from)?;
+        Ok(key)
+    }
+
     /// Wait for the next message(s) via WebSocket, decrypt, and return.
     ///
     /// Lazily connects on first call. Blocks until at least one message

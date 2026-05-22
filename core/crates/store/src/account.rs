@@ -122,4 +122,38 @@ impl Store {
             registered_at: Timestamp(registered_at),
         }))
     }
+
+    pub async fn has_recovery_key(&self) -> Result<bool, StoreError> {
+        let count: i64 = self
+            .conn
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM recovery_keys",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .map_err(StoreError::Db)?;
+        Ok(count > 0)
+    }
+
+    pub async fn save_recovery_key(&self, key_material: &[u8]) -> Result<(), StoreError> {
+        let key_material = key_material.to_vec();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO recovery_keys (id, key_material, created_at) VALUES (1, ?1, ?2)",
+                    rusqlite::params![key_material, now],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(StoreError::Db)
+    }
 }

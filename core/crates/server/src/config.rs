@@ -17,6 +17,10 @@ pub struct Config {
     pub token_lifetime_secs: i64,
     /// Message expiry in seconds (default: 30 days).
     pub message_expiry_secs: i64,
+    /// Minimum allowed per-message expiry in seconds (default: 5 minutes).
+    pub message_expiry_min_secs: i64,
+    /// Maximum allowed per-message expiry in seconds (default: 30 days).
+    pub message_expiry_max_secs: i64,
     /// Prekey pool low-water mark (default: 10).
     pub prekey_low_threshold: i64,
     /// Project token lifetime in seconds (default: 1 hour).
@@ -41,6 +45,14 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(86400),
             message_expiry_secs: std::env::var("MESSAGE_EXPIRY_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30 * 86400),
+            message_expiry_min_secs: std::env::var("MESSAGE_EXPIRY_MIN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            message_expiry_max_secs: std::env::var("MESSAGE_EXPIRY_MAX_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30 * 86400),

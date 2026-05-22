@@ -9,7 +9,7 @@
 //! Set `TEST_DATABASE_URL` to point at a test Postgres instance.
 //! The schema from `infra/migrations/001_initial.sql` must be applied first.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 /// Connect to the test database. Panics if TEST_DATABASE_URL is not set.
 async fn test_pool() -> PgPool {
@@ -328,6 +328,70 @@ async fn message_without_sender() {
 
     let queued = server::db::messages::fetch_for_device(&mut *tx, device_pk).await.unwrap();
     assert_eq!(queued.len(), 1);
+}
+
+// ── Message expiry tests ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn send_with_custom_expiry_sets_expires_at() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:expirytest000000001", None, false).await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[20u8; 33], 1).await.unwrap();
+
+    // Enqueue with a 600-second expiry.
+    let expiry_secs: i64 = 600;
+    let _msg_id = server::db::messages::enqueue(
+        &mut *tx, device_pk, Some(account_id), None, b"cipher", 1, expiry_secs,
+    ).await.unwrap();
+
+    // Read back expires_at and verify it's approximately now + 600s.
+    let row = sqlx::query("SELECT expires_at FROM message_queue WHERE recipient_device_pk = $1")
+        .bind(device_pk)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let expires_at: time::OffsetDateTime = row.get("expires_at");
+    let now = time::OffsetDateTime::now_utc();
+    let diff = (expires_at - now).whole_seconds();
+    // Allow a 5-second tolerance for test execution time.
+    assert!(diff >= expiry_secs - 5 && diff <= expiry_secs + 5,
+        "expires_at should be ~{expiry_secs}s from now, got diff={diff}s");
+}
+
+#[tokio::test]
+async fn send_expiry_is_clamped_to_min() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:expiryclamped00001", None, false).await.unwrap();
+    let device_pk = server::db::devices::create(&mut *tx, account_id, 1, &[21u8; 33], 1).await.unwrap();
+
+    // The clamping is enforced at the route layer, not in db::messages::enqueue.
+    // Here we test the clamping logic directly with a 60s requested expiry and
+    // a 300s minimum — simulating what the route handler does before calling enqueue.
+    let requested: i64 = 60;
+    let min_secs: i64 = 300;
+    let max_secs: i64 = 2_592_000;
+    let clamped = requested.clamp(min_secs, max_secs);
+    assert_eq!(clamped, min_secs, "expiry below min should be clamped up to min");
+
+    // Verify enqueue with the clamped value stores the correct expires_at.
+    let _msg_id = server::db::messages::enqueue(
+        &mut *tx, device_pk, Some(account_id), None, b"cipher2", 1, clamped,
+    ).await.unwrap();
+
+    let row = sqlx::query("SELECT expires_at FROM message_queue WHERE recipient_device_pk = $1")
+        .bind(device_pk)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let expires_at: time::OffsetDateTime = row.get("expires_at");
+    let now = time::OffsetDateTime::now_utc();
+    let diff = (expires_at - now).whole_seconds();
+    assert!(diff >= min_secs - 5 && diff <= min_secs + 5,
+        "expires_at should reflect clamped min of {min_secs}s, got diff={diff}s");
 }
 
 // ── Prekey vacuum tests ──────────────────────────────────────────────────────

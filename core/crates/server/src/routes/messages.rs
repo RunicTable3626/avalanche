@@ -54,6 +54,7 @@ struct OutboundMessage {
     recipient_device_id: i32,
     ciphertext: String, // base64
     message_kind: i16,
+    expiry_secs: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -105,6 +106,10 @@ async fn send(
             .await?
             .ok_or(ServerError::NotFound)?;
 
+        let expiry = msg.expiry_secs
+            .map(|s| s.clamp(state.config.message_expiry_min_secs, state.config.message_expiry_max_secs))
+            .unwrap_or(state.config.message_expiry_secs);
+
         let msg_id = db::messages::enqueue(
             &mut conn,
             device.id,
@@ -112,7 +117,7 @@ async fn send(
             Some(auth.device_pk),
             &ciphertext,
             msg.message_kind,
-            state.config.message_expiry_secs,
+            expiry,
         )
         .await?;
 

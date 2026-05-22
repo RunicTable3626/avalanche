@@ -136,6 +136,8 @@ pub struct OutboundMessage {
     pub recipient_device_id: i32,
     pub ciphertext: Vec<u8>,
     pub message_kind: i16,
+    /// Per-message expiry in seconds. `None` means use the server's global default.
+    pub expiry_secs: Option<i64>,
 }
 
 /// An inbound message received from the server.

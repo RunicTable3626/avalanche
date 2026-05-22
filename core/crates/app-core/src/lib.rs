@@ -230,7 +230,7 @@ impl AppCore {
             let mut inner = self.inner.lock().await;
             let body = String::from_utf8_lossy(&plaintext);
             let envelope = Envelope::content(&body, sent_at_ms);
-            inner.send_dm(&recipient_did, recipient_device_id, &envelope.to_bytes()).await
+            inner.send_dm(&recipient_did, recipient_device_id, &envelope.to_bytes(), None).await
         }).map_err(AppErrorFfi::from)
     }
 
@@ -278,7 +278,7 @@ impl AppCore {
         ffi_runtime().block_on(async {
             let mut inner = self.inner.lock().await;
             let envelope = Envelope::read_receipt(timestamps);
-            inner.send_dm(&recipient_did, recipient_device_id, &envelope.to_bytes()).await
+            inner.send_dm(&recipient_did, recipient_device_id, &envelope.to_bytes(), None).await
         }).map_err(AppErrorFfi::from)
     }
 
@@ -492,7 +492,7 @@ impl AppCore {
     ) -> Result<(), AppError> {
         let mut inner = self.inner.lock().await;
         let envelope = Envelope::read_receipt(timestamps);
-        inner.send_dm(recipient_did, recipient_device_id, &envelope.to_bytes()).await
+        inner.send_dm(recipient_did, recipient_device_id, &envelope.to_bytes(), None).await
     }
 
     /// Async send_dm for use in tests running inside a tokio runtime.
@@ -507,7 +507,7 @@ impl AppCore {
         let mut inner = self.inner.lock().await;
         let body = String::from_utf8_lossy(plaintext);
         let envelope = Envelope::content(&body, sent_at_ms);
-        inner.send_dm(recipient_did, recipient_device_id, &envelope.to_bytes()).await
+        inner.send_dm(recipient_did, recipient_device_id, &envelope.to_bytes(), None).await
     }
 
     /// Async receive_messages for use in tests running inside a tokio runtime.
@@ -630,6 +630,7 @@ impl AppCore {
                         &decrypted.sender_did,
                         decrypted.sender_device_id,
                         &delivery.to_bytes(),
+                        None,
                     ).await;
                 }
 
@@ -654,6 +655,7 @@ impl AppCoreInner {
         recipient_did: &str,
         recipient_device_id: u32,
         plaintext: &[u8],
+        expiry_secs: Option<i64>,
     ) -> Result<(), AppError> {
         let recipient_addr = DeviceAddress::new(
             AccountId::new(recipient_did),
@@ -719,6 +721,7 @@ impl AppCoreInner {
                 MessageKind::PreKey => 0,
                 MessageKind::Whisper => 1,
             },
+            expiry_secs,
         }]).await?;
 
         Ok(())
@@ -749,6 +752,7 @@ impl AppCoreInner {
                             &raw.sender_did,
                             raw.sender_device_id,
                             &delivery.to_bytes(),
+                            None,
                         ).await;
                     }
                     decrypted.push(DecryptedMessage { plaintext: body.into_bytes(), sent_at_ms: sent_at, ..raw });

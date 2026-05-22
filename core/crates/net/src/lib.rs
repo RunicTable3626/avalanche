@@ -193,12 +193,18 @@ impl Client {
 
     /// Send encrypted messages to recipient devices.
     pub async fn send_messages(&self, messages: &[OutboundMessage]) -> Result<Vec<i64>, NetError> {
-        let wire: Vec<_> = messages.iter().map(|m| serde_json::json!({
-            "recipient_did": m.recipient_did,
-            "recipient_device_id": m.recipient_device_id,
-            "ciphertext": BASE64_STANDARD.encode(&m.ciphertext),
-            "message_kind": m.message_kind,
-        })).collect();
+        let wire: Vec<_> = messages.iter().map(|m| {
+            let mut obj = serde_json::json!({
+                "recipient_did": m.recipient_did,
+                "recipient_device_id": m.recipient_device_id,
+                "ciphertext": BASE64_STANDARD.encode(&m.ciphertext),
+                "message_kind": m.message_kind,
+            });
+            if let Some(secs) = m.expiry_secs {
+                obj["expiry_secs"] = serde_json::json!(secs);
+            }
+            obj
+        }).collect();
 
         let resp = self.authed_request(reqwest::Method::POST, "/v1/messages")
             .json(&serde_json::json!({"messages": wire}))

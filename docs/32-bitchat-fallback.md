@@ -8,29 +8,37 @@
 
 ## 1. Overview and Motivation
 
-actnet's threat model names homeserver seizure and disrupted connectivity as primary risks. The current transport — HTTP + WebSocket over TLS to a homeserver — has no fallback if the server is unreachable. This document specifies how the [BitChat](https://github.com/permissionlesstech/bitchat) mesh protocol can serve as a seamless, automatic fallback transport layer.
+actnet's threat model names homeserver seizure and disrupted connectivity as primary risks. The default transport — HTTP + WebSocket over TLS to a homeserver — has no fallback if the server is unreachable. This document specifies how the [BitChat](https://github.com/permissionlesstech/bitchat) mesh protocol can serve as a fallback transport layer for DMs, group messages, and a broadcast channel for local communication.
 
-**What BitChat provides:**
+**What BitChat's protocol designs for:**
 - Bluetooth LE mesh networking with multi-hop relay (up to 7 hops)
-- WiFi Direct (MultipeerConnectivity on iOS) for higher-bandwidth local delivery
-- Bloom-filter deduplication and TTL-based loop prevention
+- Noise e2e encryption protocol handshake between peers for transport-layer encryption
+- A reasonably efficient flood-based mesh chat protocol (Bloom-filter deduplication and TTL-based loop prevention)
 - Fully offline-capable; no accounts or central servers required
 - Public domain (Unlicense) — can be freely adapted
-- 98.5% Swift; iOS/macOS native
+- Swift + iOS native.
 
 **What actnet adds on top:**
-- actnet uses BitChat purely as a **transport layer**. The existing Signal Double Ratchet ciphertext is wrapped in BitchatPacket envelopes. Relay nodes see only opaque encrypted bytes — the same security guarantee as the homeserver path.
-- No new encryption layer: Signal E2E is preserved end-to-end regardless of transport.
+- For DMs and group chats: the existing Signal ciphertext is flooded through the BitChat mesh. Relay nodes see only opaque encrypted bytes — the same security guarantee as the homeserver path. No new encryption layer needed.
+- For broadcast: a plaintext local mesh channel, visible to all mesh participants. Useful for open coordination when E2E encryption isn't needed.
 
-**Goal:** zero UX interruption. A non-intrusive banner ("Using mesh network") is the only visible change when fallback activates. Messages appear in the same conversation view, with a small mesh indicator icon next to their timestamp.
+**Constraints:**
+- Mesh DMs and group messages only work with existing Signal sessions / group memberships established via the homeserver. New session establishment requires prekey exchange, which depends on the homeserver.
+- Mesh relay depends on iOS background BLE behavior. See section 6 for details.
 
 ---
 
-## 2. Design Decisions
+## 2. Core Design Decisions
 
-### 2.1 Identity
+### 2.1 Flooding, not routing
 
-BitChat identifies nodes by a Curve25519 Noise static key. Rather than generating a separate keypair, actnet derives it deterministically from the existing Ed25519 identity key:
+BitChat uses a flood protocol: every message is broadcast to all connected peers, who re-broadcast it (decrementing TTL, deduplicating via bloom filter). Recipients check if a message is addressed to them; relay nodes forward blindly.
+
+actnet adopts this model directly. There's no requirement to know whether a recipient is reachable before sending. Messages are flooded into the mesh and either arrive or don't. This matches BitChat's design and avoids the fragile liveness-tracking problem.
+
+### 2.2 Identity
+
+BitChat identifies nodes by a SHA-256 fingerprint of a Curve25519 public key. actnet derives this key deterministically from the existing Ed25519 identity key so that no separate keypair needs to be managed:
 
 ```
 HKDF-SHA256(
@@ -40,441 +48,157 @@ HKDF-SHA256(
 ) → 32-byte Curve25519 scalar
 ```
 
-This is implemented as `IdentityKeyPair::derive_mesh_noise_keypair()` in `core/crates/crypto/src/identity.rs`. The resulting scalar is passed to Swift as `Data` and loaded via `CryptoKit.Curve25519.KeyAgreement.PrivateKey(rawRepresentation:)`.
+Note: BitChat uses a Noise_XX handshake for transport-layer encryption between directly connected BLE peers. actnet does not use this in the initial implementation — DM/Group payloads are already Signal-encrypted end-to-end, and broadcast messages are intentionally plaintext. Noise_XX is listed as a deferred item for metadata protection (hiding sender DID from relay nodes).
 
-**Threat model:** mesh peers learn your DID fingerprint. This is no worse than the homeserver already knowing your DID — a deliberate design choice consistent with the existing threat model.
+### 2.3 Bluetooth mode is user-activated
 
-### 2.2 Activation
+Mesh mode is **not automatic by default**. It is an explicit feature the user turns on:
 
-Fallback activates **fully automatically** when the homeserver is unreachable. A 10-second grace period (`Degraded` state) absorbs transient network hiccups before BLE scanning starts; no false-positive banners. When the homeserver becomes reachable again, the app switches back automatically and shows a 2-second "Connected to server" toast.
+1. When the homeserver becomes unreachable, a banner appears: "Disconnected from server. Tap to enable Bluetooth mesh"
+2. The user toggles on the mesh (or sets a setting which means it auto-activates when server disconnected). This starts BLE scanning and advertising.
+3. Mesh mode stays on until either:
+   - The user manually turns it off, or
+   - The homeserver is reachable again and 4 hours elapse since the last message sent or received via mesh (auto-off to save battery and stop BLE advertising)
 
-### 2.3 Message Scope
+This avoids surprise BLE activity and gives users explicit control over when they're broadcasting their presence over Bluetooth.
 
-**In scope (initial implementation):**
-- 1:1 DMs (PreKey and Whisper messages)
-- Delivery and read receipts
-- Prekey bundle exchange (enabling new Signal sessions without the homeserver)
+### 2.4 Three message types
 
-**Deferred:**
-- Group messages (depends on Sender Keys, actnet Stage 4)
-- Nostr relay network (internet-based third-tier fallback)
+**DMs:** Signal Double Ratchet ciphertext, flooded through the mesh. Addressed by a short derived recipient tag (see section 2.5). Only works with existing Signal sessions. Same E2E security as the homeserver path.
+
+**Group messages:** Sender Key ciphertext, flooded through the mesh. Addressed by a short derived group tag (see section 2.5). Only works with groups you're already a member of.
+
+**Broadcast:** Plaintext messages visible to everyone on the mesh. A "local mesh" channel that appears alongside your conversations while in mesh mode. Useful for open coordination when E2E encryption isn't needed or when you need to reach people you don't have Signal sessions with.
+
+### 2.5 Addressing: derived tags
+
+Both DMs and group messages use short **tags** (8 bytes) derived via HMAC so that recipients can quickly identify messages for them without exposing stable identifiers to relay nodes. Tags rotate daily to limit traffic correlation.
+
+**DM recipient tag:**
+```
+recipient_tag = HMAC-SHA256(recipient_identity_key, "mesh-dm-tag" || epoch)[:8]
+```
+The sender computes this from the recipient's identity key (already known from the existing Signal session). The recipient precomputes their own tag for the current epoch and checks incoming packets against it.
+
+**Group tag:**
+```
+group_tag = HMAC-SHA256(sender_key, "mesh-group-tag" || epoch)[:8]
+```
+Each group member precomputes tags for all their groups and checks incoming mesh packets against a hash table — a fast lookup regardless of group count.
+
+The `epoch` is `unix_days` in both cases.
+
+**Metadata properties:**
+- Relay nodes see tags but cannot link them to identities or groups without the key material.
+- Within one epoch (one day), relay nodes can correlate messages to the same recipient or group and observe traffic volume and timing.
+- Across epochs, tags change, limiting long-term traffic analysis.
+
+**Known threat: forced mesh activation.** An adversary with physical proximity to suspected group members could degrade network connectivity (e.g. cell jammer) to force mesh activation, then passively observe mesh traffic. Within a single epoch, the adversary can confirm that devices are exchanging messages in the same group by correlating which group tags appear around which devices. The adversary cannot read message content (Signal E2E), but can confirm group co-membership.
+
+This is a real risk in the adversarial scenarios mesh is designed for. Mitigations to prioritize in future work:
+- **Per-recipient tag derivation** — derive a unique tag per group member, so no two members share the same observable tag. Increases packet count (one per member, like DMs) but eliminates correlation.
+- **Noise_XX channel encryption** — encrypting packet headers between BLE peers would hide tags from relay nodes, though a direct BLE neighbor could still observe.
+- **Dummy traffic** — periodic fake packets with random tags to obscure real group activity patterns.
 
 ---
 
 ## 3. Connectivity State Machine
 
 ```
-Online ──(WS drop or HTTP send failure)──► Degraded
+Online ──(WS drop or HTTP send failure)──► Disconnected
                                                │
-                                       10s deadline expires
-                                               │
-                                               ▼
-                                            Offline ◄── mesh transport active
-                                               │
-                                       homeserver probe succeeds (every 30s)
+                                     user enables mesh
                                                │
                                                ▼
-                                            Online
+                                           MeshActive ◄── BLE scanning, can send/receive
+                                               │
+                                     homeserver probe succeeds (every 30s)
+                                               │
+                                               ▼
+                                            Online (mesh stays on until user disables or 4h timeout)
 ```
-
-**State definitions:**
 
 | State | Meaning | UI |
 |-------|---------|-----|
 | `Online` | WS connected, HTTP sends succeeding | no indicator |
-| `Degraded` | WS dropped or HTTP failed; within grace period | no indicator (silent) |
-| `Offline` | Grace period elapsed; BLE/WiFi Direct scanning active | blue-gray mesh banner |
+| `Disconnected` | Server unreachable, mesh not enabled | banner with "Enable Bluetooth mesh?" prompt |
+| `MeshActive` | BLE scanning/advertising active | blue-gray mesh banner: "Bluetooth mesh active" |
 
-**Implementation:** `ConnectivityMonitor` in `core/crates/app-core/src/connectivity.rs` (new file). Runs as a background task spawned once in `AppCore`. Shares `Arc<Mutex<ConnectivityState>>` with `TransportDispatcher`.
-
-**New FFI methods on `AppCore`:**
-```rust
-#[uniffi::export]
-pub fn connectivity_state(&self) -> ConnectivityStateFfi
-
-#[uniffi::export]
-pub fn set_connectivity_override(&self, forced: Option<ConnectivityStateFfi>)
-// ^ dev/QA: force-trigger Offline mode without killing the network
-
-#[uniffi::export]
-pub fn inject_mesh_message(
-    &self,
-    ciphertext: Vec<u8>,
-    sender_did: String,
-    sender_device_id: u32,
-    message_kind: i16,
-) -> Result<(), AppErrorFfi>
-// ^ called from Swift MeshTransportManager when a mesh DM arrives
-//   feeds an mpsc channel merged into receive_messages_ws_async via tokio::select!
-```
-
-`ConnectivityStateFfi` is a `#[uniffi::Enum]` with variants `Online`, `Degraded`, `Offline`.
-
-`AppState.swift` polls connectivity state from the existing `messageWsLoop`:
-```swift
-@Published var connectivityState: ConnectivityStateFfi = .online
-
-// inside messageWsLoop, at each iteration:
-let state = core.connectivityState()
-await MainActor.run { self.connectivityState = state }
-```
+When the server comes back while mesh is active, DMs and group messages resume going through the server. Mesh stays on (BLE keeps scanning) so the broadcast channel remains available.
 
 ---
 
-## 4. Transport Abstraction
+## 4. Implementation Approach: Fork BitChat
 
-New file: `core/crates/app-core/src/transport.rs`
+BitChat is Unlicense (public domain). Rather than reimplementing BLE mesh networking from scratch, actnet forks the relevant BitChat source files directly and modifies them:
 
-```rust
-pub struct MeshOutbound {
-    pub recipient_did: String,
-    pub recipient_device_id: u32,
-    pub ciphertext: Vec<u8>,
-    pub message_kind: i16,
-}
+**Copied from BitChat** (stripped of BitChat UI, Nostr, and Tor code):
+- `BluetoothMeshManager` — BLE scanning, advertising, L2CAP CoC connection management, peer tracking
+- `BitchatPacket` — packet serialization, header format, TTL handling
+- Bloom filter — deduplication logic
+- Relay loop — receive, check bloom, decrement TTL, rebroadcast
 
-pub struct TransportDispatcher {
-    client: net::Client,
-    mesh_tx: Option<mpsc::Sender<MeshOutbound>>,
-    connectivity: Arc<Mutex<ConnectivityState>>,
-    backlog: Vec<MeshOutbound>,  // drained on Offline→Online
-}
-```
-
-Routing logic in `TransportDispatcher::send`:
-- `Online` → HTTP `client.send_messages(...)`
-- `Degraded` → HTTP send; also enqueue to mesh as redundant path (best-effort)
-- `Offline` → mesh only; on failure, push to `backlog`
-
-On `Offline → Online` transition, `backlog` is drained via HTTP.
-
-`AppCoreInner::send_dm` calls `self.dispatcher.send(...)` instead of `self.client.send_messages(...)` directly. All other uses of `self.client` (prekey fetch, auth, registration) remain HTTP-only and are not part of this abstraction.
+**Added by actnet:**
+- `ACTNET_DM`, `ACTNET_GROUP`, and `ACTNET_BROADCAST` payload types (three new type bytes in BitChat's packet format)
+- `MeshTransportManager` — coordinator that routes inbound DMs and group messages to the Rust core for decryption, manages broadcast channel, exposes `send(...)` for outbound
 
 ---
 
-## 5. BitchatPacket Wrapping
+## 5. UX
 
-BitChat's binary packet format (13-byte fixed header + variable payload) is reused as-is. actnet defines four new type bytes within the BitChat type space:
+### 5.1 Disconnected banner
 
-| Type byte | Name | Purpose |
-|-----------|------|---------|
-| `0x10` | `ACTNET_DM` | Encrypted DM (Signal Double Ratchet ciphertext) |
-| `0x11` | `ACTNET_ANNOUNCE` | DID → fingerprint identity advertisement |
-| `0x12` | `ACTNET_PREKEY_REQUEST` | Request a peer's prekey bundle |
-| `0x13` | `ACTNET_PREKEY_RESPONSE` | Deliver a prekey bundle |
+When the server is unreachable and mesh is not enabled:
+- Yellow/amber banner at the top: "Disconnected from server"
+- Button: "Enable Bluetooth mesh"
 
-### 5.1 ACTNET_DM payload
+### 5.2 Mesh active banner
 
-```
-[recipient_fingerprint: 32B]   SHA-256(recipient Noise static pubkey)
-[sender_did_len: 2B]           big-endian u16
-[sender_did: variable]         UTF-8 DID string
-[device_id: 4B]                big-endian u32
-[message_kind: 1B]             0 = PreKey, 1 = Whisper
-[nonce: 16B]                   deduplication nonce (OsRng)
-[ciphertext_len: 4B]           big-endian u32
-[ciphertext: variable]         Signal Double Ratchet ciphertext (opaque)
-```
+When mesh is active:
+- Blue-gray banner: "Bluetooth mesh active"
+- Antenna icon: `antenna.radiowaves.left.and.right`
+- Tap to access mesh settings (disable, see connected peer count)
+- If server is also connected: "Bluetooth mesh active — server connected"
 
-Overhead per message: ~75 bytes + DID length. Signal ciphertexts are typically 200–1500 bytes; total fits comfortably in BLE L2CAP CoC fragmentation.
+### 5.3 Local Mesh broadcast channel
 
-**TTL values:**
-- DMs: TTL = 7 (maximum BitChat hop count)
-- Receipts: TTL = 3 (conserve bandwidth)
-- Announces: TTL = 3
+- Appears in the chat list as "Local Mesh" when mesh is active
+- Disappears from the chat list when mesh is disabled
+- Messages are plaintext, show sender display name (unauthenticated — anyone can claim any name)
+- No read receipts, no delivery confirmation
+- Warning at the top of the channel: "Messages in this channel are not encrypted and visible to anyone on the mesh"
 
-### 5.2 ACTNET_ANNOUNCE payload
+### 5.4 Per-message transport indicator
 
-```
-[announce_version: 1B]         0x01
-[noise_static_pubkey: 32B]     Curve25519 public key
-[did_len: 2B]
-[did: variable]
-[identity_key: 33B]            compressed Signal Ed25519 identity pubkey
-[device_id: 4B]
-[timestamp_ms: 8B]             big-endian unix millis
-[signature: 64B]               Ed25519 sig over all preceding fields
-```
+We can integrate info about whether a message is going out via mesh using a small modification of the Signal style double checkmark system: if the message has gone out to at least one peer on the mesh it will show a # icon instead of a single checkmark; if the recipient has acknowledged / read then it will show double checkmark/double blue as normal.
 
-The signature is computed with the sender's actnet Ed25519 identity private key. Receivers verify it before trusting the DID → fingerprint binding.
-
-### 5.3 ACTNET_PREKEY_REQUEST payload
-
-```
-[requester_fingerprint: 32B]
-[requester_did_len: 2B]
-[requester_did: variable]
-[target_did_len: 2B]
-[target_did: variable]
-[nonce: 16B]                   echoed in response for correlation
-```
-
-### 5.4 ACTNET_PREKEY_RESPONSE payload
-
-```
-[nonce: 16B]                   echo of request nonce
-[bundle_version: 1B]           0x01
-[identity_key: 33B]            Signal identity pubkey (compressed)
-[registration_id: 4B]
-[device_id: 4B]
-[signed_prekey_id: 4B]
-[signed_prekey_public: 33B]
-[signed_prekey_signature: 64B]
-[has_one_time_prekey: 1B]
-[one_time_prekey_id: 4B]       present if has_one_time_prekey = 1
-[one_time_prekey_public: 33B]  present if has_one_time_prekey = 1
-[kyber_prekey_id: 4B]
-[kyber_prekey_public: 1568B]   ML-KEM-1024 public key
-[kyber_prekey_signature: 64B]
-[outer_signature: 64B]         Ed25519 sig over all preceding fields
-```
-
-Total response: ~1900 bytes. BLE L2CAP CoC handles fragmentation transparently.
+For DMs and group messages received via mesh, a subtle # icon next to the timestamp.
 
 ---
 
-## 6. BLE / WiFi Direct Integration (iOS)
+## 6. Background Behavior and Limitations
 
-### 6.1 New Swift files
-
-All files under `mobile/ios/Actnet/Sources/Mesh/`:
-
-| File | Responsibility |
-|------|----------------|
-| `MeshTransportManager.swift` | Top-level coordinator. Owns `BLEMeshTransport` and `WiFiDirectTransport`. Routes incoming `ACTNET_DM` packets to `AppState.handleMeshInbound()`. Exposes `send(...)` for outbound messages. |
-| `BLEMeshTransport.swift` | CoreBluetooth `CBCentralManager` + `CBPeripheralManager`. L2CAP CoC channels for large payloads. Multi-hop relay loop with bloom filter. Adapted from BitChat's `BluetoothMeshManager` (public domain). |
-| `WiFiDirectTransport.swift` | `MultipeerConnectivity` `MCSession`. Higher bandwidth, useful when both devices are on the same WiFi or in direct proximity. Adapted from BitChat's `MultipeerConnectivityManager`. |
-| `BitchatPacket.swift` | Binary serialization/deserialization for the BitchatPacket format and all actnet payload types. |
-| `MeshBloomFilter.swift` | Per-node bloom filter for deduplication. Prevents relay loops. Adapted from BitChat. |
-| `MeshFingerprintStore.swift` | DID → 32-byte fingerprint mapping. In-memory with UserDefaults persistence across app restarts. |
-| `MeshAnnounceManager.swift` | Broadcasts `ACTNET_ANNOUNCE` on scan start and every 5 minutes. Processes incoming announces. Handles `ACTNET_PREKEY_REQUEST/RESPONSE`. |
-
-### 6.2 Inbound routing (Swift → Rust)
-
-```swift
-// AppState.swift
-func handleMeshInbound(_ packet: BitchatPacket) {
-    guard let payload = packet.actnetDmPayload() else { return }
-    guard let core = cores[localAccountId] else { return }
-    Task.detached {
-        try? core.injectMeshMessage(
-            ciphertext: payload.ciphertext,
-            senderDid: payload.senderDid,
-            senderDeviceId: payload.deviceId,
-            messageKind: payload.messageKind
-        )
-    }
-}
-```
-
-### 6.3 Outbound routing (Swift → mesh)
-
-```swift
-// AppState.sendMessage, when connectivityState == .offline:
-guard let fingerprint = meshFingerprintStore.fingerprint(forDid: recipientDid) else {
-    // surface "contact not reachable on mesh" error
-    return
-}
-meshTransportManager.send(
-    recipientFingerprint: fingerprint,
-    ciphertext: encryptedBytes,
-    senderDid: myDid,
-    senderDeviceId: myDeviceId,
-    messageKind: kind
-)
-```
-
-### 6.4 Store table for fingerprint persistence
-
-Append to `MIGRATIONS` in `core/crates/store/src/schema.rs`:
-
-```sql
-CREATE TABLE IF NOT EXISTS mesh_fingerprints (
-    did          TEXT    NOT NULL PRIMARY KEY,
-    fingerprint  BLOB    NOT NULL,
-    identity_key BLOB    NOT NULL,
-    last_seen_ms INTEGER NOT NULL
-)
-```
+- **Existing p2p BLE connections** are maintained when the phone is locked. Relay continues to work through locked phones that already have connections, at least for a little while. **iOS can suspend the app** under memory pressure, which will cause it to stop relaying.
+- **New peer discovery** is degraded in the background. iOS throttles BLE scanning frequency, making it slower to find new peers.
 
 ---
 
-## 7. Contact Discovery Over Mesh
+## 8. Deferred Items
 
-### Problem
+### Prekey exchange over mesh
+Enabling new Signal sessions without the homeserver. Would allow messaging contacts you haven't previously communicated with. Deferred until core mesh flow is proven.
 
-Before routing a ciphertext to a peer over mesh, actnet needs the peer's 32-byte BitChat fingerprint (SHA-256 of their Noise static pubkey). This mapping isn't stored on the homeserver.
+### WiFi Direct (MultipeerConnectivity)
+Higher-bandwidth local transport, but suspended when the app is backgrounded, limiting its utility as a relay layer. Deferred.
 
-### Protocol
+### Group tag metadata hardening
+See threat analysis in section 2.5. Per-recipient tag derivation, Noise_XX channel encryption, and dummy traffic are all potential mitigations for the forced-mesh-activation attack. Should be prioritized once the core mesh flow is proven.
 
-`MeshAnnounceManager` broadcasts an `ACTNET_ANNOUNCE` packet:
-- On BLE/WiFi scan start
-- Every 5 minutes while mesh is active
-- Immediately on receiving a peer's announce (ensures mutual discovery)
-
-**On receipt of an announce:**
-1. Verify Ed25519 signature against the claimed `identity_key`.
-2. Verify `identity_key` matches the DID if already known locally; otherwise accept on first-seen.
-3. Compute `fingerprint = SHA-256(noise_static_pubkey)` and store in `MeshFingerprintStore`.
-
-**Privacy:** announces only fire when `connectivityState == .offline`. When the homeserver is reachable, no BLE identity broadcast occurs.
-
-**Unknown contacts:** if a contact's fingerprint has never been seen, `send` fails with "Contact not reachable on mesh" — the message is held until the contact appears on the mesh.
-
----
-
-## 8. Prekey Distribution Over Mesh
-
-New Signal sessions (PreKey messages) require a prekey bundle normally fetched from the homeserver. When offline, this exchange moves to the mesh.
-
-### Flow
-
-1. `AppCoreInner::send_dm` detects no session exists for the recipient → `TransportDispatcher` broadcasts `ACTNET_PREKEY_REQUEST` (target DID, requester fingerprint, 16-byte nonce).
-2. The outbound message is held in a `HashMap<nonce, PendingMessage>` with a 30-second timeout.
-3. Target peer receives request → `MeshAnnounceManager` calls `core.build_prekey_bundle_for_mesh()` → broadcasts `ACTNET_PREKEY_RESPONSE`.
-4. Requester receives response → Rust core calls existing X3DH session init with the bundle (same path as homeserver prekey fetch in `AppCoreInner::send_dm`).
-5. Pending message is retried via mesh.
-6. On timeout: error surfaced as "Contact not reachable on mesh".
-
-### New FFI method
-
-```rust
-#[uniffi::export]
-pub fn build_prekey_bundle_for_mesh(&self) -> Result<MeshPrekeyBundleFfi, AppErrorFfi>
-```
-
-Reads local store: signed prekey, pops one one-time prekey (marks consumed), packs Kyber prekey. Returns as a `#[uniffi::Record]`. Lives in `core/crates/app-core/src/lib.rs` alongside existing FFI methods.
-
----
-
-## 9. UX
-
-### 9.1 MeshModeBanner
-
-New file: `mobile/ios/Actnet/Sources/Views/Common/MeshModeBanner.swift`
-
-- Subdued blue-gray strip: `.systemBlue.opacity(0.12)` background
-- System icon: `antenna.radiowaves.left.and.right`
-- Text: "Using mesh network" (`.subheadline`)
-- No close button — auto-dismisses when connectivity returns to `Online`
-- Shown as `.overlay(alignment: .top)` in both `ChatsView` and `ConversationView`
-
-In `ChatsView.swift`, the existing recovery key banner overlay is extended:
-```swift
-.overlay(alignment: .top) {
-    VStack(spacing: 0) {
-        if appState.connectivityState == .offline {
-            MeshModeBanner()
-        } else if !appState.hasRecoveryKey {
-            RecoveryKeyBanner()
-        }
-    }
-}
-```
-
-`Degraded` state: no UI change. The 10-second grace period is invisible.
-
-### 9.2 Per-message transport indicator
-
-Extend `Message.swift`:
-```swift
-var transport: MessageTransport?
-
-enum MessageTransport {
-    case homeserver
-    case mesh
-}
-```
-
-In `MessageBubble.swift`, for `transport == .mesh` messages, add a small icon next to the timestamp:
-- System image: `dot.radiowaves.up.forward`
-- Font: `.caption2`
-- Color: `.secondary`
-
-This is intentionally subtle — it informs without alarming.
-
-### 9.3 Reconnect toast
-
-In `ChatsView.swift`:
-```swift
-@State private var showReconnectedToast = false
-```
-
-Fires on `Offline → Online` transition (observed via `onChange(of: appState.connectivityState)`). Auto-dismisses after 2 seconds. Text: "Connected to server".
-
----
-
-## 10. iOS Entitlements and Info.plist
-
-### Switch to explicit Info.plist
-
-`UIBackgroundModes` is an array and cannot be set via `GENERATE_INFOPLIST_FILE` build settings. Switch in `project.yml`:
-
-```yaml
-# Remove:
-GENERATE_INFOPLIST_FILE: YES
-# Add:
-INFOPLIST_FILE: Sources/Info.plist
-```
-
-Create `mobile/ios/Actnet/Sources/Info.plist` with all existing auto-generated keys plus:
-
-```xml
-<key>NSBluetoothAlwaysUsageDescription</key>
-<string>actnet uses Bluetooth to send and receive messages when the server is unavailable.</string>
-<key>NSLocalNetworkUsageDescription</key>
-<string>actnet uses the local network to send messages when the server is unavailable.</string>
-<key>UIBackgroundModes</key>
-<array>
-    <string>bluetooth-central</string>
-    <string>bluetooth-peripheral</string>
-</array>
-```
-
-**No special entitlements required.** CoreBluetooth peripheral mode and `MultipeerConnectivity` both work with a standard App Store provisioning profile.
-
-Note: `MultipeerConnectivity` connections are suspended when the app is backgrounded (no background mode for it). This is acceptable — MC is supplemental to BLE and only active while the app is foregrounded.
-
----
-
-## 11. Staged Milestones
-
-| Stage | Deliverables | Est. effort |
-|-------|-------------|------------|
-| **M1** | Rust: `ConnectivityMonitor`, `TransportDispatcher`, new FFI methods (`connectivity_state`, `inject_mesh_message`, `build_prekey_bundle_for_mesh`), `mesh_fingerprints` schema migration | 1–2 weeks |
-| **M2** | Swift: `BitchatPacket` serialization, `MeshBloomFilter`, `MeshFingerprintStore`, `MeshAnnounceManager` announce signing/verification (no BLE yet — tested in-process) | 1 week |
-| **M3** | Swift: `BLEMeshTransport` (CoreBluetooth), `MeshTransportManager` coordinator, `AppState` wiring, `project.yml` + `Info.plist` updates. Two-device E2E test: DM delivered over BLE with homeserver down. | 2–3 weeks |
-| **M4** | Swift: `WiFiDirectTransport` (MultipeerConnectivity). Test: DM via MC with homeserver down. | 1 week |
-| **M5** | UX: `MeshModeBanner`, per-message transport icon, reconnect toast. Prekey request/response over mesh (`ACTNET_PREKEY_REQUEST/RESPONSE`) — enables new sessions without homeserver. | 1–2 weeks |
-| **M6** | Reliability: backlog drain on `Offline → Online`, nonce deduplication in `inject_mesh_message`, delivery/read receipts via `TransportDispatcher`, 72-hour TTL for mesh messages (background cleanup in `AppCore`). | 1 week |
-
----
-
-## 12. Deferred Items
-
-### Nostr relay (M7+)
-
-When both homeserver AND local BLE/WiFi Direct mesh are unavailable (internet exists but homeserver is seized; contacts are geographically dispersed), Nostr relay network provides a third transport tier.
-
-Requires:
-- Nostr NIP-17 (sealed DM) client in the Rust core
-- A `NostrFallback` state in `ConnectivityMonitor`
-- Nostr relay address(es) configurable per-account
-
-Deferred because: the primary use case (server seizure during a local action) is fully served by BLE mesh; Nostr adds complexity without benefiting nearby users.
-
-### Group messages over mesh
-
-Once Sender Keys (actnet Stage 4) are implemented, group ciphertexts can be wrapped in `ACTNET_GROUP_DM` (type byte `0x14`) using the same scheme as DMs. Deferred until groups ship.
+### Nostr relay fallback
+Third transport tier for when both homeserver and local BLE mesh are unavailable (internet exists but homeserver is seized; contacts are geographically dispersed). Deferred.
 
 ### Android
+Rust core changes are platform-agnostic. BLE transport needs a separate Kotlin implementation. Deferred.
 
-The Rust core changes (M1) are platform-agnostic and will work on Android without modification. The BLE/WiFi Direct transport will need a separate Kotlin implementation using Android's `BluetoothLeScanner`, `BluetoothLeAdvertiser`, and `WifiP2pManager` APIs. Deferred.
-
-### Multi-hop prekey rate-limiting
-
-Prekey responses over mesh can be consumed by malicious relay nodes (repeated request injection depletes one-time prekey pools). Rate-limiting logic in `MeshAnnounceManager` (max N responses per requester fingerprint per time window) is deferred to M7+.
-
-### Noise_XX channel encryption for relay nodes
-
-BitChat uses `Noise_XX_25519_ChaChaPoly_SHA256` for node-to-node BLE channel encryption, preventing relay nodes from reading packet headers. In actnet's integration, Signal E2E encryption already protects message content end-to-end. Channel-level Noise handshake is a defence-in-depth improvement (protects metadata like sender DID from relay nodes) but is deferred given the complexity.
+### Noise_XX channel encryption
+Transport-layer encryption between directly connected BLE peers, protecting packet headers (sender DID, recipient/group tags) from relay nodes. Defence-in-depth; also a mitigation for the forced-mesh-activation attack (section 2.5). Deferred given complexity.

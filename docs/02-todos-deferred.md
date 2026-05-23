@@ -3,19 +3,12 @@
 ## Dev Infra
 - Make it super easy to launch Postgres, the main server & relevant Projects all at once in dev
 
-## Chatbot Project (finishing touches)
-- ~~Bot display name: conversations currently show raw DID instead of a friendly name~~ — implemented
-- ~~Bot account marking: flag someplace to distinguish bot accounts in member lists~~ — implemented
-
 ## Mobile app
 - Recovery key UI: setup and backup flows (banner currently always shows, hardcoded false)
 - Scroll-position-based read marking (see docs/31-read-tracking.md, Stage B)
 - Delivery receipts — auto-send on message receive (see docs/31-read-tracking.md, Stage D)
 - Read receipt user preference toggle (send_read_receipts setting)
 - Scroll position: remove invisible "bottom" anchor hack in ConversationView (Color.clear spacer) when scroll position saving is implemented
-
-## Auth
-- ~~Identity key signature verification on `POST /v1/auth/token`~~ — implemented: two-step challenge-response flow via `POST /v1/auth/challenge` + `POST /v1/auth/token` with Ed25519 nonce signature.
 
 ## Crypto / protocol
 - Kyber prekey pool: upload one-time Kyber prekeys with server-side atomic consumption (like EC one-time prekeys), keep one last-resort key. Currently only a single last-resort key is used.
@@ -40,46 +33,7 @@
 
 ## Mesh Fallback / BitChat protocol (optional — implement only after core features are stable)
 
-See `docs/32-bitchat-fallback.md` for the full design. BLE + WiFi Direct mesh transport as a
-seamless automatic fallback when the homeserver is unreachable. Signal E2E encryption is
-preserved; BitChat is used as a transport layer only.
-
-### M1 — Rust transport abstraction
-- [ ] `ConnectivityMonitor` state machine (`core/crates/app-core/src/connectivity.rs`)
-- [ ] `TransportDispatcher` with homeserver/mesh routing (`core/crates/app-core/src/transport.rs`)
-- [ ] FFI: `connectivity_state()`, `inject_mesh_message()`, `build_prekey_bundle_for_mesh()`
-- [ ] Store: `mesh_fingerprints` table migration
-
-### M2 — Swift packet layer
-- [ ] `BitchatPacket` serialization (`ACTNET_DM`, `ACTNET_ANNOUNCE`, `ACTNET_PREKEY_*`)
-- [ ] `MeshBloomFilter`, `MeshFingerprintStore`
-- [ ] `MeshAnnounceManager` with Ed25519 announce signing and verification
-
-### M3 — BLE transport
-- [ ] `BLEMeshTransport` (CoreBluetooth; adapted from BitChat open-source)
-- [ ] `MeshTransportManager` top-level coordinator
-- [ ] `AppState`: `connectivityState` `@Published`, mesh wiring in `messageWsLoop`
-- [ ] Switch to explicit `Info.plist`; add Bluetooth usage strings and `UIBackgroundModes`
-
-### M4 — WiFi Direct transport
-- [ ] `WiFiDirectTransport` (MultipeerConnectivity)
-
-### M5 — UX and prekey over mesh
-- [ ] `MeshModeBanner`, per-message transport indicator, reconnect toast
-- [ ] Prekey request/response over mesh (enables new sessions without homeserver)
-
-### M6 — Reliability
-- [ ] Backlog drain on `Offline → Online` transition
-- [ ] Nonce deduplication in `inject_mesh_message`
-- [ ] Delivery/read receipts routed through `TransportDispatcher`
-- [ ] 72-hour TTL for mesh-only messages; background cleanup task
-
-### Deferred mesh items
-- Nostr relay as third-tier fallback (M7+; for dispersed users when internet exists but homeserver is seized)
-- Group messages over mesh (after Sender Keys land in Stage 4)
-- Android BLE/WiFi Direct transport
-- Multi-hop prekey rate-limiting (prevent one-time prekey pool depletion by relay attackers)
-- Noise_XX channel encryption for relay node authentication (defence-in-depth)
+See `docs/32-bitchat-fallback.md` for the full design. BLE mesh transport as a fallback when the homeserver is unreachable. 
 
 ## Push Notifications
 

@@ -298,3 +298,76 @@ async fn auth_token_without_nonce_returns_422() {
 
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+// ── Profile blob tests ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn put_profile_blob_succeeds() {
+    let app = routes::router().with_state(test_state().await);
+
+    let reg = register_dummy(&app).await;
+    let did = reg["did"].as_str().unwrap();
+    let token = reg["session_token"].as_str().unwrap();
+
+    let blob = BASE64_STANDARD.encode([42u8; 64]);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/accounts/me/profile")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({ "profile_blob": blob })).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/accounts/{did}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["profile_blob"].as_str(), Some(blob.as_str()));
+}
+
+#[tokio::test]
+async fn get_account_without_profile_blob_returns_null() {
+    let app = routes::router().with_state(test_state().await);
+
+    let reg = register_dummy(&app).await;
+    let did = reg["did"].as_str().unwrap();
+    let token = reg["session_token"].as_str().unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/accounts/{did}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body["profile_blob"].is_null());
+}

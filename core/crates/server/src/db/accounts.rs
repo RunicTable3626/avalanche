@@ -11,6 +11,7 @@ pub struct Account {
     pub did: String,
     pub display_name: Option<String>,
     pub is_bot: bool,
+    pub profile_blob: Option<Vec<u8>>,
 }
 
 /// Create a new account and return its internal ID.
@@ -33,7 +34,7 @@ pub async fn create(
 
 /// Look up an account by DID.
 pub async fn find_by_did(conn: &mut PgConnection, did: &str) -> Result<Option<Account>, sqlx::Error> {
-    let row = sqlx::query("SELECT id, did, display_name, is_bot FROM accounts WHERE did = $1")
+    let row = sqlx::query("SELECT id, did, display_name, is_bot, profile_blob FROM accounts WHERE did = $1")
         .bind(did)
         .fetch_optional(&mut *conn)
         .await?;
@@ -42,5 +43,15 @@ pub async fn find_by_did(conn: &mut PgConnection, did: &str) -> Result<Option<Ac
         did: r.get("did"),
         display_name: r.get("display_name"),
         is_bot: r.get("is_bot"),
+        profile_blob: r.get("profile_blob"),
     }))
+}
+
+pub async fn update_profile_blob(conn: &mut PgConnection, account_id: i64, blob: &[u8]) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE accounts SET profile_blob = $1 WHERE id = $2")
+        .bind(blob)
+        .bind(account_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }

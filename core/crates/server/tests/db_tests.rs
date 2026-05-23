@@ -762,3 +762,78 @@ async fn full_auth_flow_wrong_signature_rejected() {
     let valid = stored_key.public_key().verify_signature(&nonce_bytes, &bad_sig);
     assert!(!valid, "signature from a different key should be rejected");
 }
+
+// ── Invite code tests ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_invite_code() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:invitetest00000001", None, false).await.unwrap();
+    let code = "invite-code-abc123";
+    server::db::invites::create(&mut *tx, code, account_id, "project", "proj-1", None).await.unwrap();
+
+    let found = server::db::invites::find_by_code(&mut *tx, code).await.unwrap();
+    assert!(found.is_some());
+    let invite = found.unwrap();
+    assert_eq!(invite.code, code);
+    assert_eq!(invite.created_by_account_id, account_id);
+    assert_eq!(invite.target_type, "project");
+    assert_eq!(invite.target_id, "proj-1");
+    assert!(invite.expires_at.is_none());
+    assert!(invite.used_by_account_id.is_none());
+    assert!(invite.used_at.is_none());
+}
+
+#[tokio::test]
+async fn find_expired_invite_returns_none() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let account_id = server::db::accounts::create(&mut *tx, "did:plc:inviteexpired00001", None, false).await.unwrap();
+    let code = "invite-code-expired001";
+    let past = time::OffsetDateTime::now_utc() - time::Duration::seconds(1);
+    server::db::invites::create(&mut *tx, code, account_id, "project", "proj-1", Some(past)).await.unwrap();
+
+    let found = server::db::invites::find_by_code(&mut *tx, code).await.unwrap();
+    assert!(found.is_none(), "expired invite should not be found");
+}
+
+#[tokio::test]
+async fn redeem_invite_succeeds() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let creator_id = server::db::accounts::create(&mut *tx, "did:plc:inviter00000000001", None, false).await.unwrap();
+    let redeemer_id = server::db::accounts::create(&mut *tx, "did:plc:redeemer0000000001", None, false).await.unwrap();
+    let code = "invite-code-redeem001";
+    server::db::invites::create(&mut *tx, code, creator_id, "project", "proj-1", None).await.unwrap();
+
+    let result = server::db::invites::redeem(&mut *tx, code, redeemer_id).await.unwrap();
+    assert!(result, "redeem should succeed");
+
+    let found = server::db::invites::find_by_code(&mut *tx, code).await.unwrap();
+    assert!(found.is_some());
+    let invite = found.unwrap();
+    assert_eq!(invite.used_by_account_id, Some(redeemer_id));
+    assert!(invite.used_at.is_some());
+}
+
+#[tokio::test]
+async fn redeem_already_used_invite_returns_false() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let creator_id = server::db::accounts::create(&mut *tx, "did:plc:inviter20000000001", None, false).await.unwrap();
+    let redeemer1_id = server::db::accounts::create(&mut *tx, "did:plc:redeemer1000000001", None, false).await.unwrap();
+    let redeemer2_id = server::db::accounts::create(&mut *tx, "did:plc:redeemer2000000001", None, false).await.unwrap();
+    let code = "invite-code-used00001";
+    server::db::invites::create(&mut *tx, code, creator_id, "project", "proj-1", None).await.unwrap();
+
+    let first = server::db::invites::redeem(&mut *tx, code, redeemer1_id).await.unwrap();
+    assert!(first, "first redeem should succeed");
+
+    let second = server::db::invites::redeem(&mut *tx, code, redeemer2_id).await.unwrap();
+    assert!(!second, "second redeem should fail");
+}

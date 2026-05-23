@@ -21,6 +21,7 @@ mod projects;
 mod push;
 mod registration;
 mod websocket;
+mod invites;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -33,4 +34,5 @@ pub fn router() -> Router<AppState> {
         .merge(projects::routes())
         .merge(push::routes())
         .merge(accounts::routes())
+        .merge(invites::routes())
 }

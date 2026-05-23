@@ -24,3 +24,4 @@ pub mod project_tokens;
 pub mod push;
 pub mod rate_limits;
 pub mod sessions;
+pub mod invites;

@@ -195,6 +195,11 @@ final class AppState: ObservableObject {
                         _ = displayName(for: did, accountId: conv.accountId)
                     }
                 }
+                // Rehydrate last-message previews from SQLCipher. Plaintext is
+                // deliberately excluded from UserDefaults persistence (it's not
+                // encrypted at rest), so on restart `conversation.lastMessage`
+                // is nil until we pull the most recent body from the store.
+                rehydrateLastMessages()
             }
 
             startMessagePolling()
@@ -475,6 +480,30 @@ final class AppState: ObservableObject {
     }
 
     /// Load persisted messages from SQLCipher for a conversation.
+    /// On restart, populate `lastMessage` for every restored conversation by
+    /// reading the most recent persisted message from SQLCipher. Cheap — one
+    /// indexed `ORDER BY sent_at DESC LIMIT 1` per conversation.
+    private func rehydrateLastMessages() {
+        let convs = conversations.map { ($0.id, $0.accountId) }
+        Task.detached { [weak self] in
+            for (convId, accountId) in convs {
+                guard let core = await self?.cores[accountId] else { continue }
+                let last = try? core.loadLastMessage(conversationId: convId)
+                guard let last else { continue }
+                await MainActor.run {
+                    guard let self else { return }
+                    guard let idx = self.conversations.firstIndex(where: { $0.id == convId }) else { return }
+                    self.conversations[idx].lastMessage = last.body
+                    // Keep the existing lastMessageDate if it's already set (it
+                    // was persisted); fall back to the message's sent_at if not.
+                    if self.conversations[idx].lastMessageDate == nil {
+                        self.conversations[idx].lastMessageDate = Date(timeIntervalSince1970: TimeInterval(last.sentAtMs) / 1000.0)
+                    }
+                }
+            }
+        }
+    }
+
     func loadMessagesFromStore(conversationId: String, accountId: String) {
         guard let core = cores[accountId] else { return }
         // Only load if we haven't already loaded for this conversation.

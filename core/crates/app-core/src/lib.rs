@@ -325,6 +325,28 @@ impl AppCore {
         }).map_err(AppErrorFfi::from)
     }
 
+    /// Load just the most recent message for a conversation. Returns `None`
+    /// if the conversation has no messages. Used to restore conversation list
+    /// previews after app restart — the plaintext body is encrypted-at-rest
+    /// in SQLCipher and isn't carried in iOS UserDefaults.
+    pub fn load_last_message(&self, conversation_id: String) -> Result<Option<StoredMessageFfi>, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            let msg = inner.store.load_last_message(&conversation_id).await
+                .map_err(AppError::from)?;
+            Ok::<_, AppError>(msg.map(|m| StoredMessageFfi {
+                id: m.id,
+                conversation_id: m.conversation_id,
+                sender_did: m.sender_did,
+                body: m.body,
+                sent_at_ms: m.sent_at.as_millis(),
+                edited_at_ms: m.edited_at.map(|t| t.as_millis()),
+                read_at_ms: m.read_at.map(|t| t.as_millis()),
+                delivery_status: m.delivery_status,
+            }))
+        }).map_err(AppErrorFfi::from)
+    }
+
     /// Mark messages as read up to a given sent_at timestamp.
     /// Returns the number of messages newly marked.
     pub fn mark_messages_read(&self, conversation_id: String, up_to_sent_at_ms: i64) -> Result<u64, AppErrorFfi> {

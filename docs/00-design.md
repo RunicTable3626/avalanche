@@ -38,7 +38,11 @@ Three core insights driving the design:
 
 ### Threat model
 
-The design is tuned for the most common infrastructure threat facing activist organizations: **server seizure**. Law enforcement or a hostile actor seizes or shuts down a homeserver. The network should ensure that event cannot roll up the contacts, group memberships, or message history of users on other servers, and that affected users can reconstitute their identity and connections elsewhere. The three main responses are: DID-based portable identity (your account isn't owned by the server), E2E encryption throughout (the server can't read your messages even while it hosts them), and per-server push pseudonyms (push metadata doesn't link your activity across servers).
+The two primary threats the design is tuned for:
+
+**Server seizure.** Law enforcement or a hostile actor seizes or shuts down a homeserver. A seized server should not yield the contacts, group memberships, message history, or real names of its users. Affected users should be able to reconstitute their identity and connections on another server.
+
+**Surveillance.** To what extent can adversaries leverage persistent identities against individuals? For example, can an adversary determine that a specific person is a member of a specific organization's server? If a person uses the same identity across servers, can an adversary on one server discover their membership on others? For activist groups this can be a core threat: membership lists can be used to target individuals. The attack surface includes server APIs, the PLC (public identity directory), network traffic analysis, push relay metadata, and federation metadata.
 
 The design is not currently hardened against state-actor surveillance of high-risk individuals (which would require onion routing, cover traffic, and a more aggressive identity story) or optimized purely against corporate data harvesting (which would require less). Either direction is possible from this foundation, but this is the target.
 
@@ -48,9 +52,24 @@ With E2E encryption, messages are encrypted on your device and only your recipie
 
 ### Identity: DIDs as the substrate primitive
 
-Normally when you sign up for a service, your account belongs to that service — if it disappears, so does your account. Here, your identity is a **DID** (decentralized identifier): a cryptographic identity you control, which a homeserver hosts but does not own. If a homeserver is seized or shut down, you move your DID to another server and bring your connections, group memberships, and credentials with you. We use `did:plc`, the same method Bluesky uses, which also means your identity works across both networks without migration.
+Normally when you sign up for a service, your account belongs to that service — if it disappears, so does your account. Here, your identity is a **DID** (decentralized identifier): a cryptographic identity you control, which a homeserver hosts but does not own. If a homeserver is seized or shut down, you move your DID to another server and bring your connections, group memberships, and credentials with you. We use `did:plc`, the same method Bluesky uses, which also means your identity could be ported across both networks without migration.
 
-Each DID has a minimal profile attached — display name (required), avatar, short bio. The profile is client-owned: stored locally and pushed as an encrypted blob to every server the DID is registered on. One DID, one name everywhere. Changing your name updates it on all servers. If you want different names in different contexts, you create separate accounts (separate DIDs). Like Signal, when you create your account, you'll be prompted to write down or store a recovery key someplace safe.
+Each DID has a minimal profile attached — display name (required), avatar, short bio. The profile is client-owned: stored locally and pushed as an encrypted blob to every server the DID is registered on (see `docs/35-profiles.md`). The server stores ciphertext it cannot read — a seized server yields DIDs but not real names. One DID, one name everywhere. Changing your name updates it on all servers. If you want different names in different contexts, you create separate accounts (separate DIDs). Like Signal, when you create your account, you'll be prompted to write down or store a recovery key someplace safe.
+
+### Membership privacy
+
+The network is designed to limit server membership being externally observable:
+
+- **There are no default ways to enumerate all DIDs on a server.** Some Projects may offer membership/attendee lists though.
+- **Server APIs do not confirm DID existence to unauthenticated parties.** Endpoints that could reveal whether a DID is registered (profile fetches, account lookups) require authentication. 
+    - Note, however, that anyone can join a server with open membership and confirm the existence of DIDs on that server, so if you want this form of privacy it requires closed membership and vetting of applicants.
+- **DID-to-server association is controlled.** The homeserver URL in PLC directory entries is optional. Servers that need membership privacy omit it, relying on invite links and contact exchange for discovery instead.
+- **Profiles are encrypted.** Display names, avatars, and bios are stored as encrypted blobs on the server, decryptable only by contacts who hold the user's profile key. A seized server knows which DIDs are registered but cannot produce real names. 
+    - Note, however, that some Projects may retain unencrypted membership/attendee lists.
+- **Push pseudonyms are per-server.** The push relay sees pseudonym-level timing but cannot link a user's activity across servers. Pseudonyms rotate periodically.
+- **Federation is selective.** Homeservers choose who they federate with. Security-sensitive orgs can federate narrowly or not at all, limiting cross-server metadata exposure.
+
+Network traffic analysis (which IPs connect to which servers) is not currently addressed beyond TLS — onion routing or VPN usage is left to the user.
 
 ### Federation model
 

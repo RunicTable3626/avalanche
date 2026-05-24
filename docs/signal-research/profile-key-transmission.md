@@ -19,8 +19,27 @@ A standalone `ProfileKeyMessage` (`SignalServiceKit/Messages/ProfileKeyMessage.s
 
 1. **Accepting a message request** (`ConversationViewController+MessageRequest.swift:245`) — when you unblock/accept a contact, you send them your profile key.
 2. **Unhiding a recipient** (`RecipientHidingManager.swift:408`) — when you un-hide a previously hidden contact.
-3. **Reactive profile key sharing** (`OWSMessageDecrypter.swift:111-144`) — when you receive a message from someone but they don't have your profile key, Signal reactively sends it. This is rate-limited per contact via `reactiveProfileKeyAttemptInterval` from RemoteConfig.
+3. **Reactive profile key sharing** (`OWSMessageDecrypter.swift:111-144`) — see dedicated section below.
 4. **Call link profile sharing** (`CallLinkProfileKeySharingManager.swift:67`) — sharing your profile key with call link participants.
+
+### Reactive profile key sharing (self-healing sealed sender)
+
+Reactive sharing (`OWSMessageDecrypter.swift:511-563`) is a self-healing mechanism for **sealed sender (Unidentified Delivery)**. The problem it solves:
+
+- Sealed sender requires the *sender* to know the *recipient's* profile key (to derive the UD access key).
+- Profile keys are distributed by attaching them to outgoing messages, but only to whitelisted contacts/groups.
+- If a contact somehow loses your profile key (reinstall, data loss, bug), they can no longer send you sealed sender messages and must fall back to **identified delivery** (a regular `.whisper` message where the server sees the sender).
+
+The trigger is in `OWSMessageDecrypter.swift:431`: when you receive an **identified (non-sealed-sender) `.whisper` message**, Signal checks (`OWSMessageDecrypter.swift:528-553`):
+
+1. Is this person in my **profile whitelist**? OR
+2. Am I in a **V2 group** with this person (where I'm a full member and the group isn't terminated)?
+
+If either is true, this person *should* have your profile key and *should* be sending via sealed sender — but they aren't. Signal reactively sends them a `ProfileKeyMessage` so sealed sender can resume.
+
+This is **not** triggered by sealed sender messages (the `decryptUnidentifiedSenderEnvelope` path doesn't call it) — only by identified messages, which is exactly the signal that something is wrong.
+
+Rate-limited per contact via `RemoteConfig.current.reactiveProfileKeyAttemptInterval` to avoid spamming (`OWSMessageDecrypter.swift:116`).
 
 ## Profile Key Reception (Incoming)
 
@@ -174,6 +193,41 @@ The server-side rate limit is a token bucket: bucket size 4320, refilling at 3/m
 ### Database-level caching
 
 Profile data is persisted in the `OWSUserProfile` database table. The `lastFetchDate` column is used by `StaleProfileFetcher` to identify profiles needing refresh (>1 day old). The `avatarUrlPath` column is compared against the server response to skip redundant avatar downloads.
+
+## Avatar Download and Caching
+
+Avatars are stored as encrypted blobs on Signal's CDN (CDN 0), separate from the profile metadata. The profile fetch response includes an `avatarUrlPath` pointing to the encrypted avatar.
+
+### Download decision (`ProfileFetcherJob.swift:347-411`)
+
+On every profile fetch, Signal decides whether to download the avatar:
+
+1. **Skip entirely** if this is the local user's profile (line 351-353) — local avatar is managed separately.
+2. **Skip entirely** if no profile key or no decryptable profile (line 355-359) — can't decrypt the avatar without the key.
+3. **No avatar on server** → clear any local avatar (line 361-363).
+4. **URL path matches cached + local file exists** → **skip download** (line 366-374). This is the primary caching mechanism.
+5. **Avatar download blocked** (e.g., blurred contact) → store the URL path but don't download the file (line 377-385).
+6. Otherwise → **download, decrypt, validate, and save** (line 388-411).
+
+### No HTTP-level caching
+
+There is no HTTP caching or CDN cache header logic. The "cache" is entirely client-side:
+
+- **`avatarUrlPath`** column in `OWSUserProfile` — the server-side CDN path from the last profile fetch
+- **`avatarFileName`** column — a random filename in the local `AppSharedData/ProfileAvatars/` directory (`OWSUserProfile.swift:591-598`)
+- A simple **equality check** between the stored URL path and the newly fetched one (`ProfileFetcherJob.swift:371`)
+
+When a user changes their avatar, the server assigns a **new URL path**, so the cached path won't match, triggering a fresh download. If the avatar hasn't changed, the same URL path persists and no download occurs — even across repeated profile re-fetches. Avatars are effectively cached **forever** until the URL path changes.
+
+### Download mechanics (`OWSProfileManager.swift:1635-1657`)
+
+The actual download:
+1. Fetches the encrypted blob from CDN 0 via a simple GET request
+2. Decrypts it locally using the profile key (AES-256-GCM)
+3. Validates it's a valid image
+4. Saves to a temporary file, then moves into `ProfileAvatars/` directory
+
+Downloads retry up to **4 times** with backoff on network failures.
 
 ## Summary: The Profile Change Flow
 

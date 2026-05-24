@@ -79,6 +79,11 @@ struct ConversationView: View {
         .onAppear {
             appState.loadMessagesFromStore(conversationId: conversation.id, accountId: conversation.accountId)
             appState.markAllMessagesRead(conversationId: conversation.id, accountId: conversation.accountId)
+            // Re-fetch the contact's encrypted profile and update the cached
+            // display name if it changed. Primary change-detection path.
+            if let recipientDid = conversation.recipientDid {
+                appState.refreshContactProfile(did: recipientDid, accountId: conversation.accountId)
+            }
         }
         .task(id: conversation.id) {
             // After messages load, scroll to first unread (or bottom if all read).

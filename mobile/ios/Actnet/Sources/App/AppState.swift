@@ -322,26 +322,64 @@ final class AppState: ObservableObject {
         return did
     }
 
-    /// Fetch display name from the server and update conversation titles.
+    /// Resolve a display name for a DID. Two sources, in order:
+    /// 1. Local SQLCipher `contact_profiles` cache — populated automatically by
+    ///    app-core when an inbound message carries the sender's profile_key.
+    ///    This is the path for human contacts.
+    /// 2. Server-side `/v1/accounts/{did}` lookup — only returns a name for
+    ///    bot accounts (humans never put a plaintext name on the server).
     private func resolveDisplayName(did: String, accountId: String) {
         guard !displayNameInFlight.contains(did) else { return }
         guard let core = cores[accountId] else { return }
         displayNameInFlight.insert(did)
         let targetDid = did
         Task.detached { [weak self] in
-            let info = try? core.getAccountInfo(did: targetDid)
+            // Local contact_profiles first — fast, no network.
+            let localName = (try? core.contactDisplayName(did: targetDid)) ?? ""
+            // Fall back to server lookup (bots) only if the local cache is empty.
+            let serverName: String? = localName.isEmpty
+                ? (try? core.getAccountInfo(did: targetDid))?.displayName
+                : nil
+            let resolved = !localName.isEmpty ? localName : (serverName ?? "")
+
             await MainActor.run {
                 guard let self else { return }
                 self.displayNameInFlight.remove(targetDid)
-                guard let name = info?.displayName, !name.isEmpty else { return }
-                self.displayNameCache[targetDid] = name
-                // Update titles of any conversations with this DID.
-                for i in self.conversations.indices {
-                    if self.conversations[i].recipientDid == targetDid && self.conversations[i].title == targetDid {
-                        self.conversations[i].title = name
-                    }
-                }
-                self.persistConversations()
+                guard !resolved.isEmpty else { return }
+                self.applyResolvedDisplayName(did: targetDid, name: resolved)
+            }
+        }
+    }
+
+    /// Cache a resolved name and update any conversation title that doesn't
+    /// already match. Handles both first-time resolution (title was the raw
+    /// DID) and refresh-after-rename (title was the old name).
+    private func applyResolvedDisplayName(did: String, name: String) {
+        displayNameCache[did] = name
+        var changed = false
+        for i in conversations.indices {
+            if conversations[i].recipientDid == did && conversations[i].title != name {
+                conversations[i].title = name
+                changed = true
+            }
+        }
+        if changed {
+            persistConversations()
+        }
+    }
+
+    /// Re-fetch a contact's encrypted profile from the homeserver and refresh
+    /// the cached display name if it changed. Called when a conversation opens
+    /// — the primary change-detection path, per `docs/35-profiles.md`.
+    func refreshContactProfile(did: String, accountId: String) {
+        guard let core = cores[accountId] else { return }
+        Task.detached { [weak self] in
+            let changed = (try? core.refreshContactProfile(did: did)) ?? false
+            guard changed else { return }
+            let newName = (try? core.contactDisplayName(did: did)) ?? ""
+            guard !newName.isEmpty else { return }
+            await MainActor.run {
+                self?.applyResolvedDisplayName(did: did, name: newName)
             }
         }
     }

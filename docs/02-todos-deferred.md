@@ -10,6 +10,10 @@
 - Delivery receipts — auto-send on message receive (see docs/31-read-tracking.md, Stage D)
 - Read receipt user preference toggle (send_read_receipts setting)
 - Scroll position: remove invisible "bottom" anchor hack in ConversationView (Color.clear spacer) when scroll position saving is implemented
+- Banner/notification for incoming messages while app is in foreground
+- Offline indicator (show when server is unreachable / WS disconnected)
+- Persist message history locally (currently messages are only in memory)
+- Account switcher UI for multi-account support
 
 ## Privacy / identity
 - PLC directory privacy: the DID document currently includes the homeserver URL as a service endpoint, which means anyone can resolve a DID and learn which server a user is on. For small servers this effectively leaks group membership. Consider removing the homeserver URL from the PLC document entirely and relying on out-of-band discovery (invite links, contact exchange). The PLC document would only contain the identity key for verification.

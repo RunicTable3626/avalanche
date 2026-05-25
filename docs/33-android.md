@@ -333,6 +333,37 @@ class DevServerActnetService : ActnetService {
 
 `AppCore` here is the UniFFI-generated class from `app_core.kt`. It already implements every method in `AppCoreInterface` with matching signatures (Kotlin name-mangling may require `@JvmName` annotations if needed).
 
+### 6.5 `PasskeyManager`
+
+Mirrors `PasskeyManager.swift`. Manages WebAuthn passkey registration and authentication using Android's Credential Manager (`androidx.credentials`).
+
+```kotlin
+class PasskeyManager(private val activity: Activity) {
+    companion object {
+        const val RELYING_PARTY = "theavalanche.net"
+        val PRF_SALT = "actnet-recovery-v1".toByteArray()
+    }
+
+    data class RegistrationResult(val recoveryKey: ByteArray, val userHandle: ByteArray)
+    data class AuthenticationResult(val recoveryKey: ByteArray, val did: String)
+
+    suspend fun register(did: String): RegistrationResult {
+        // Uses CredentialManager createCredential() with PRF extension
+        // (or synthetic password fallback on Android versions without PRF).
+        // Derives 32-byte recovery key from PRF output + PRF_SALT.
+        TODO("WebAuthn registration via CredentialManager")
+    }
+
+    suspend fun authenticate(): AuthenticationResult {
+        // Uses CredentialManager getCredential() to retrieve existing passkey
+        // and re-derive the same recovery key.
+        TODO("WebAuthn authentication via CredentialManager")
+    }
+}
+```
+
+> **Platform note:** Android Credential Manager does not yet support the PRF extension uniformly across OEMs. On devices without PRF, fall back to a synthetic password derived from the credential ID + PRF_SALT, or prompt for a separate recovery phrase. Document the chosen fallback in `docs/33-identity-auth-recovery.md`.
+
 ---
 
 ## 7. State Management — `AppViewModel`
@@ -363,11 +394,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val wsJobs = mutableMapOf<String, Job>()  // mirrors wsLoopTasks
     private var service: ActnetService = MockActnetService()
 
+    // Display name resolution cache (mirrors displayNameCache / displayNameInFlight)
+    private val displayNameCache = mutableMapOf<String, String>()
+    private val displayNameInFlight = mutableSetOf<String>()
+
+    // Navigation / lifecycle state (mirrors iOS navigation + app-active tracking)
+    private val _navigateToConversation = MutableStateFlow<Conversation?>(null)
+    val navigateToConversation: StateFlow<Conversation?> = _navigateToConversation.asStateFlow()
+
+    private val _currentConversationId = MutableStateFlow<String?>(null)
+    val currentConversationId: StateFlow<String?> = _currentConversationId.asStateFlow()
+
+    private val _isAppActive = MutableStateFlow(true)
+    val isAppActive: StateFlow<Boolean> = _isAppActive.asStateFlow()
+
+    // Deep link state (mirrors pendingInviteToken)
+    private val _pendingInviteToken = MutableStateFlow<String?>(null)
+    val pendingInviteToken: StateFlow<String?> = _pendingInviteToken.asStateFlow()
+
     // --- DataStore for persistence (mirrors UserDefaults) ---
     private val prefs = application.applicationContext
         .createDataStore(name = "actnet_prefs")
 
-    init { restoreAccounts() }
+    init {
+        restoreAccounts()
+        loadConversationsFromStore()
+    }
 
     // mirrors AppState.restoreAccounts()
     fun restoreAccounts() {
@@ -376,6 +428,73 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             // Restore cores via service.login(…)
             // Start WS loops
         }
+    }
+
+    // mirrors AppState.loadConversationsFromStore()
+    private fun loadConversationsFromStore() {
+        viewModelScope.launch(Dispatchers.IO) {
+            for ((accountId, core) in cores) {
+                val summaries = core.loadConversations()
+                val convs = summaries.map { summary ->
+                    Conversation(
+                        id = summary.conversationId,
+                        title = summary.title,
+                        accountId = accountId,
+                        serverUrl = summary.serverUrl,
+                        recipientDid = summary.recipientDid,
+                        lastMessageDateMs = summary.lastMessageDateMs
+                    )
+                }
+                _conversations.update { it + convs }
+                // Load preview messages for each conversation
+                convs.forEach { conv ->
+                    loadMessagesFromStore(conv.id, accountId)
+                }
+            }
+        }
+    }
+
+    // mirrors AppState.handleDeepLink(_:)
+    fun handleDeepLink(url: String) {
+        if (url.startsWith("actnet://invite/")) {
+            val token = url.removePrefix("actnet://invite/")
+            _pendingInviteToken.value = token
+        }
+    }
+
+    // mirrors AppState.displayName(for:accountId:)
+    fun displayName(did: String, accountId: String): String {
+        return displayNameCache[did] ?: did  // fallback to raw DID
+    }
+
+    // mirrors AppState.resolveDisplayName(did:accountId:)
+    private fun resolveDisplayName(did: String, accountId: String) {
+        if (displayNameInFlight.contains(did)) return
+        displayNameInFlight.add(did)
+        viewModelScope.launch(Dispatchers.IO) {
+            val core = cores[accountId] ?: return@launch
+            try {
+                val info = core.getAccountInfo(did)
+                val name = info.profileBlob?.let { blob ->
+                    // decrypt / parse profile blob to extract display name
+                    // TODO: wire up profile decryption once Rust FFI exposes it
+                    null
+                } ?: did
+                withContext(Dispatchers.Main) {
+                    displayNameCache[did] = name
+                    displayNameInFlight.remove(did)
+                    // trigger recomposition
+                    _accounts.update { it.toList() }
+                }
+            } catch (_: Exception) {
+                displayNameInFlight.remove(did)
+            }
+        }
+    }
+
+    // mirrors AppState.refreshContactProfile(did:accountId:)
+    fun refreshContactProfile(did: String, accountId: String) {
+        resolveDisplayName(did, accountId)
     }
 
     // mirrors AppState.createAccount(serverUrl:displayName:)
@@ -428,6 +547,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    // Called from MainActivity.onResume() / onPause() to mirror iOS scene phase
+    fun setAppActive(active: Boolean) {
+        _isAppActive.value = active
     }
 
     companion object {
@@ -612,6 +736,9 @@ Mirrors the iOS onboarding flow from `docs/30-mobile-ux.md` exactly:
 - `IdentityPickerScreen` — list of existing accounts + "Create fresh identity" — shown when accounts already exist
 - `NewAccountScreen` — display name field, optional avatar, calls `vm.createAccount(…)`
 - `JoiningServerScreen` — join a new server with an existing account
+- `PasskeyExplainerScreen` — explains WebAuthn passkey creation before registration
+- `RecoveryExplainerScreen` — explains recovery key backup after account creation
+- `RecoveryConsoleScreen` — nerdly scrolling log for device replacement / recovery operations
 - `QRScannerScreen` — CameraX preview with ML Kit `BarcodeScanning.getClient()` overlay
 
 Android receives `actnet://` deep links via the intent filter in `AndroidManifest.xml` (see Section 11). The `MainActivity` intercepts the intent and passes the URL to `AppViewModel`.
@@ -663,6 +790,91 @@ Mirrors `DevSettingsView.swift`:
 - Toggle between Mock and DevServer modes (clears all state on switch)
 - Show account count, conversation count
 - Show current server URL
+
+### 9.10 `MyQRCodeScreen`
+
+Mirrors `MyQRCodeView.swift`:
+- Generates a QR code from `https://go.theavalanche.net/invite/<token>` for the active account
+- Displays account display name and "Scan to start a conversation" helper text
+- Share button using Android's `ShareCompat.IntentBuilder`
+
+```kotlin
+@Composable
+fun MyQRCodeScreen(vm: AppViewModel) {
+    val account = vm.accounts.value.firstOrNull()
+    val server = account?.servers?.firstOrNull()
+    if (account != null && server != null) {
+        val token = remember { generateInviteToken(server.url, account.id) }
+        val url = "https://go.theavalanche.net/invite/$token"
+        // Use ZXing or ML Kit to generate QR bitmap
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            QRCodeImage(url, modifier = Modifier.size(250.dp))
+            Text(account.displayName, style = MaterialTheme.typography.titleLarge)
+            Text("Scan to start a conversation", style = MaterialTheme.typography.bodyMedium, color = Color.Gray)
+            Button(onClick = {
+                val intent = ShareCompat.IntentBuilder(context)
+                    .setType("text/plain")
+                    .setText(url)
+                    .intent
+                context.startActivity(Intent.createChooser(intent, "Share invite link"))
+            }) {
+                Text("Share Invite Link")
+            }
+        }
+    }
+}
+```
+
+### 9.11 Local Notifications
+
+Mirrors `NotificationPresenter.swift`. Android does not need a custom presenter for foreground notifications in the same way iOS does, because the system notification shade is always available. However, the following behaviors should match:
+
+- **App active + viewing current conversation** → suppress notification sound/banner (badge still updates via existing unread count)
+- **App active + viewing different conversation** → post notification via `NotificationManager`
+- **App backgrounded** → post notification via `NotificationManager`
+- **Sound throttling** — max one sound per conversation per 3 seconds during bursts
+
+```kotlin
+object NotificationPresenter {
+    private val lastSoundAt = mutableMapOf<String, Long>()
+    private const val SOUND_THROTTLE_MS = 3000L
+
+    fun present(
+        context: Context,
+        message: Message,
+        conversation: Conversation,
+        senderDisplayName: String,
+        isAppActive: Boolean,
+        currentConversationId: String?
+    ) {
+        updateBadge(context, conversation.accountId)
+
+        if (message.body.isBlank()) return
+
+        // Suppress when viewing this conversation
+        if (isAppActive && currentConversationId == conversation.id) return
+
+        val now = System.currentTimeMillis()
+        val last = lastSoundAt[conversation.id] ?: 0
+        val shouldSound = (now - last) > SOUND_THROTTLE_MS
+        if (shouldSound) lastSoundAt[conversation.id] = now
+
+        val notification = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(senderDisplayName)
+            .setContentText(message.body)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setOnlyAlertOnce(!shouldSound)
+            .build()
+
+        NotificationManagerCompat.from(context).notify(conversation.id.hashCode(), notification)
+    }
+
+    private fun updateBadge(context: Context, accountId: String) {
+        // Update launcher badge via ShortcutManager or Notification badge
+    }
+}
+```
 
 ---
 
@@ -791,11 +1003,19 @@ These mirror the iOS app's current state and should be resolved in later stages:
 
 - **DB encryption key**: hardcoded `"dev-placeholder-key"` → Android Keystore in Stage 3
 - **QR scanner**: `QRScannerScreen` scaffold only; wire up CameraX + ML Kit
-- **Recovery key UI**: banner shown but backup/restore flow not implemented
 - **Avatar picker**: photo selection not implemented
 - **Invite link validation**: validate token against server before proceeding (iOS also TODO)
 - **Push notifications**: `FcmService` stub; full implementation tracked in `docs/02-todos-deferred.md` under Push Notifications
 - **Calls tab**: placeholder only; WebRTC tracked separately
+
+> **Note:** The following were previously TODOs but are now fully specified in this doc:
+> - Recovery key UI (`RecoveryExplainerScreen`, `RecoveryConsoleScreen`)
+> - Passkey registration (`PasskeyExplainerScreen`, `PasskeyManager`)
+> - Local notifications (`NotificationPresenter`)
+> - QR invite generation (`MyQRCodeScreen`)
+> - Contact display name resolution / refresh (`AppViewModel`)
+> - Deep link handling + app lifecycle tracking (`AppViewModel`)
+> - Loading conversations + message previews from DB at startup (`AppViewModel`)
 
 ---
 

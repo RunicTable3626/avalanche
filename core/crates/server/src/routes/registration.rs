@@ -114,8 +114,8 @@ async fn register(
             "publicKeyBase64": req.identity_key,
         }],
         "service": [{
-            "id": format!("{did}#actnet"),
-            "type": "ActnetHomeserver",
+            "id": format!("{did}#avalanche"),
+            "type": "AvalancheHomeserver",
             "serviceEndpoint": state.config.server_url,
         }],
     });

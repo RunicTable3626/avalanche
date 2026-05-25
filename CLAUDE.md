@@ -108,8 +108,8 @@ The full cycle for adding a new feature that involves Rust + iOS:
 1. Add Rust FFI method to `core/crates/app-core/src/lib.rs` (sync, `#[uniffi::export]`)
 2. `make bindings` — regenerates `mobile/ios/Generated/app_core.swift`
 3. `make ios` — rebuilds XCFramework + regenerates Xcode project
-4. Add to `AppCoreProtocol` in `ActnetService.swift`
-5. Stub in `MockActnetService.swift`
+4. Add to `AppCoreProtocol` in `AvalancheService.swift`
+5. Stub in `MockAvalancheService.swift`
 6. Call from `AppState.swift` via `Task.detached { try core.methodName() }.value`
 
 Use `/new-ffi-method <name>` to scaffold steps 1, 4, 5, 6 as a single command.

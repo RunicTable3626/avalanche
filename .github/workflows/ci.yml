@@ -63,9 +63,9 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_DB: actnet
-          POSTGRES_USER: actnet
-          POSTGRES_PASSWORD: actnet-dev
+          POSTGRES_DB: avalanche
+          POSTGRES_USER: avalanche
+          POSTGRES_PASSWORD: avalanche-dev
         ports:
           - 5432:5432
         options: >-
@@ -75,8 +75,8 @@ jobs:
           --health-retries 5
 
     env:
-      TEST_DATABASE_URL: postgres://actnet:actnet-dev@localhost/actnet
-      PGPASSWORD: actnet-dev
+      TEST_DATABASE_URL: postgres://avalanche:avalanche-dev@localhost/avalanche
+      PGPASSWORD: avalanche-dev
 
     steps:
       - uses: actions/checkout@v4
@@ -94,7 +94,7 @@ jobs:
         run: |
           for f in $(ls infra/migrations/*.sql | sort); do
             echo "Applying $f"
-            psql -h localhost -U actnet -d actnet -f "$f"
+            psql -h localhost -U avalanche -d avalanche -f "$f"
           done
 
       - name: Run server tests

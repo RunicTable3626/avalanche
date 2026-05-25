@@ -101,7 +101,7 @@ async fn resolve_did_returns_document() {
 
     assert_eq!(doc["id"], did);
     assert_eq!(doc["verificationMethod"][0]["controller"], did);
-    assert_eq!(doc["service"][0]["type"], "ActnetHomeserver");
+    assert_eq!(doc["service"][0]["type"], "AvalancheHomeserver");
     assert_eq!(doc["service"][0]["serviceEndpoint"], "http://localhost:3000");
 }
 

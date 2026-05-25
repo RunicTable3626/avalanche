@@ -1,4 +1,4 @@
-//! On-device encrypted storage for the actnet mobile client.
+//! On-device encrypted storage for the Avalanche mobile client.
 //!
 //! This crate owns everything that touches the local SQLCipher database. It has
 //! two distinct responsibilities:

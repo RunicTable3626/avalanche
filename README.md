@@ -1,4 +1,4 @@
-# actnet
+# Avalanche
 
 The online+offline social network. We help people organize.
 

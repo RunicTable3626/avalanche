@@ -1,4 +1,4 @@
-//! Shared test helpers for the actnet workspace.
+//! Shared test helpers for the Avalanche workspace.
 //!
 //! Provides factory functions for creating test identities, prekey bundles,
 //! and paired client sessions so that integration tests across `crypto` and

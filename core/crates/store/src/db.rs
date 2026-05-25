@@ -50,7 +50,7 @@ pub struct DatabaseKey(pub(crate) String);
 impl DatabaseKey {
     /// A fixed development key. Never use in production.
     pub fn dev_key() -> Self {
-        Self("actnet-dev-placeholder-key".to_string())
+        Self("avalanche-dev-placeholder-key".to_string())
     }
 
     /// Construct from an arbitrary passphrase (e.g. derived from secure enclave).

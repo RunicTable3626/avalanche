@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct ActnetApp: App {
+struct AvalancheApp: App {
     @StateObject private var appState = AppState()
 
     var body: some Scene {

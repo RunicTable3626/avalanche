@@ -1,7 +1,7 @@
 import Foundation
 
 /// Service that hits a real locally-running homeserver via the Rust AppCore.
-struct DevServerActnetService: ActnetService {
+struct DevServerAvalancheService: AvalancheService {
     static let defaultServerUrl = "http://localhost:3000"
 
     func createAccount(serverUrl: String, dbPath: String, dbKey: String) throws -> any AppCoreProtocol {

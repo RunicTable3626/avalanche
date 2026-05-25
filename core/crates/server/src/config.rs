@@ -31,7 +31,7 @@ impl Config {
     pub fn from_env() -> Self {
         Self {
             database_url: std::env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://actnet:actnet-dev@localhost/actnet".to_string()),
+                .unwrap_or_else(|_| "postgres://avalanche:avalanche-dev@localhost/avalanche".to_string()),
             bind_addr: std::env::var("BIND_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:3000".to_string()),
             server_url: std::env::var("SERVER_URL")

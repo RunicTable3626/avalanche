@@ -36,9 +36,9 @@ final class AppState: ObservableObject {
     private var cores: [String: any AppCoreProtocol] = [:]
     /// Running WebSocket loop tasks, keyed by DID. Cancelled when account is removed.
     private var wsLoopTasks: [String: Task<Void, Never>] = [:]
-    private var _service: any ActnetService
+    private var _service: any AvalancheService
 
-    var service: any ActnetService { _service }
+    var service: any AvalancheService { _service }
 
     private static let serviceModeKey = "serviceMode"
     private static let accountsKey = "persistedAccounts"
@@ -142,18 +142,18 @@ final class AppState: ObservableObject {
         isOnboarding = true
     }
 
-    private static func makeService(mode: ServiceMode) -> any ActnetService {
+    private static func makeService(mode: ServiceMode) -> any AvalancheService {
         switch mode {
         case .mock:
-            return MockActnetService()
+            return MockAvalancheService()
         case .devServer:
-            return DevServerActnetService()
+            return DevServerAvalancheService()
         }
     }
 
     private var dbDir: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("actnet", isDirectory: true)
+            .appendingPathComponent("avalanche", isDirectory: true)
     }
 
     func createAccount(serverUrl: String, serverName: String, displayName: String) async throws {

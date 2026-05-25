@@ -1,4 +1,4 @@
-//! Testbot — the first Project on the actnet platform.
+//! Testbot — the first Project on the Avalanche platform.
 //!
 //! A standalone Axum service that serves a web UI and manages bot accounts.
 //! Each bot is a full Signal protocol participant: it registers on the
@@ -425,7 +425,7 @@ async fn generate_response(
     let body = serde_json::json!({
         "model": "claude-haiku-4-5-20251001",
         "max_tokens": 1024,
-        "system": "You are a friendly chatbot on the actnet platform. Keep your responses concise and conversational. You're chatting with an activist — be supportive and helpful.",
+        "system": "You are a friendly chatbot on the Avalanche platform. Keep your responses concise and conversational. You're chatting with an activist — be supportive and helpful.",
         "messages": messages,
     });
 

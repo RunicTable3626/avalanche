@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build the first Project on the actnet platform: a chatbot that users can talk to via encrypted DMs. This serves as both a useful dev tool (fake conversations for testing) and the proof-of-concept for the Project model.
+Build the first Project on the Avalanche platform: a chatbot that users can talk to via encrypted DMs. This serves as both a useful dev tool (fake conversations for testing) and the proof-of-concept for the Project model.
 
 ## What a "Project" is (minimal version)
 
@@ -72,7 +72,7 @@ When the user taps "Text Me", the page calls `POST /api/text-me` with the token 
 
 The bot calls the Anthropic API with a simple system prompt:
 
-> You are a friendly chatbot on the actnet platform. Keep your responses concise and conversational. You're chatting with an activist — be supportive and helpful.
+> You are a friendly chatbot on the Avalanche platform. Keep your responses concise and conversational. You're chatting with an activist — be supportive and helpful.
 
 Each bot maintains a conversation history (the decrypted messages it has sent and received) and passes the full history to Claude on each turn. The API key is provided via the `ANTHROPIC_API_KEY` environment variable.
 

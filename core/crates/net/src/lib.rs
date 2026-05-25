@@ -1,4 +1,4 @@
-//! HTTP and WebSocket client for the actnet homeserver API.
+//! HTTP and WebSocket client for the Avalanche homeserver API.
 //!
 //! This crate provides a typed client for every homeserver endpoint. It handles
 //! JSON serialization, base64 encoding of key material and ciphertext, and

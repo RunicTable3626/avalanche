@@ -1,6 +1,6 @@
 # Project Security Model
 
-This document describes the security model for Projects — standalone services that serve web UIs and operate bot accounts on the actnet platform.
+This document describes the security model for Projects — standalone services that serve web UIs and operate bot accounts on the Avalanche platform.
 
 ## What a Project is
 

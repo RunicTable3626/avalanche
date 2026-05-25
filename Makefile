@@ -1,4 +1,4 @@
-TEST_DATABASE_URL ?= postgres://actnet:actnet-dev@localhost/actnet
+TEST_DATABASE_URL ?= postgres://avalanche:avalanche-dev@localhost/avalanche
 
 .PHONY: test test-server test-core test-e2e check clippy fmt ci mobile-rebuild db-up db-down bindings ios dev testbot relay
 
@@ -35,7 +35,7 @@ db-up:
 	docker compose -f infra/docker-compose.yml up -d
 
 testbot:
-	cd core && RUST_LOG=actnet_testbot=debug,app_core=debug,tower_http=debug cargo run -p testbot
+	cd core && RUST_LOG=avalanche_testbot=debug,app_core=debug,tower_http=debug cargo run -p testbot
 
 relay:
 	cd core && RUST_LOG=relay=debug,tower_http=debug cargo run -p relay
@@ -44,7 +44,7 @@ db-down:
 	docker compose -f infra/docker-compose.yml down
 
 ios: bindings ios-xcframework
-	cd mobile/ios/Actnet && xcodegen generate
+	cd mobile/ios/Avalanche && xcodegen generate
 
 ios-xcframework:
 	cd core && cargo build -p app-core --target aarch64-apple-ios --release

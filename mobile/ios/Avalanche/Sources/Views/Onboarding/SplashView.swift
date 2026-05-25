@@ -10,7 +10,7 @@ struct SplashView: View {
             VStack(spacing: 32) {
                 Spacer()
 
-                Text("actnet")
+                Text("Avalanche")
                     .font(.largeTitle)
                     .fontWeight(.bold)
 

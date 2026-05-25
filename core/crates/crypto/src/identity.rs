@@ -1,6 +1,6 @@
 //! Long-term identity key pairs.
 //!
-//! Every actnet account has a single [`IdentityKeyPair`] generated at account
+//! Every Avalanche account has a single [`IdentityKeyPair`] generated at account
 //! creation and never replaced. The public half ([`IdentityKey`]) is published
 //! to the homeserver so other users can initiate encrypted sessions without the
 //! owner being online (X3DH). The private half never leaves the device.

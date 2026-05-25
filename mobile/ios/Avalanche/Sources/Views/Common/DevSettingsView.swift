@@ -36,7 +36,7 @@ struct DevSettingsView: View {
                         HStack {
                             Text("URL")
                             Spacer()
-                            Text(DevServerActnetService.defaultServerUrl)
+                            Text(DevServerAvalancheService.defaultServerUrl)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -70,7 +70,7 @@ struct DevSettingsView: View {
     private func subtitle(for mode: ServiceMode) -> String {
         switch mode {
         case .mock: return "In-memory, no server needed"
-        case .devServer: return "Connects to \(DevServerActnetService.defaultServerUrl)"
+        case .devServer: return "Connects to \(DevServerAvalancheService.defaultServerUrl)"
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Cryptographic operations for the actnet platform.
+//! Cryptographic operations for the Avalanche platform.
 //!
 //! This crate is a focused wrapper around [`libsignal_protocol`]. It does not
 //! implement any cryptographic primitives itself — all key agreement, ratcheting,

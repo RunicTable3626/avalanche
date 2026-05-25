@@ -130,7 +130,7 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
 }
 
 /// Mock service that creates fake accounts and seeds initial conversations.
-struct MockActnetService: ActnetService {
+struct MockAvalancheService: AvalancheService {
     func createAccount(serverUrl: String, dbPath: String, dbKey: String) throws -> any AppCoreProtocol {
         Thread.sleep(forTimeInterval: 0.5) // simulate network
         return MockAppCore()

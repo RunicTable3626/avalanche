@@ -1,4 +1,4 @@
-//! The actnet homeserver.
+//! The Avalanche homeserver.
 //!
 //! This crate is the HTTP/WebSocket server that activist organizations run.
 //! It handles account registration, prekey distribution, encrypted message

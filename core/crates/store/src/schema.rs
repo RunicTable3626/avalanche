@@ -105,4 +105,28 @@ pub const ALTER_MIGRATIONS: &[&str] = &[
         platform      TEXT    NOT NULL,\
         registered_at INTEGER NOT NULL\
     )",
+    // P-256 rotation key for DID operations and recovery.
+    // Constrained to one row. Private key is stored as SEC1 scalar bytes.
+    "CREATE TABLE IF NOT EXISTS rotation_key (\
+        id            INTEGER PRIMARY KEY CHECK (id = 1),\
+        private_key   BLOB    NOT NULL,\
+        public_key    BLOB    NOT NULL\
+    )",
+    // Local profile state: own profile key + cached display name.
+    // Constrained to one row.
+    "CREATE TABLE IF NOT EXISTS own_profile (\
+        id            INTEGER PRIMARY KEY CHECK (id = 1),\
+        profile_key   BLOB    NOT NULL,\
+        display_name  TEXT    NOT NULL\
+    )",
+    // Cached decrypted contact profiles, keyed by DID.
+    "CREATE TABLE IF NOT EXISTS contact_profiles (\
+        did           TEXT    PRIMARY KEY,\
+        display_name  TEXT    NOT NULL,\
+        profile_key   BLOB    NOT NULL,\
+        fetched_at    INTEGER NOT NULL\
+    )",
+    // Local device_id assigned to this client (defaults to 1 — single device).
+    // Persisted so login/recovery don't have to assume a fixed value.
+    "ALTER TABLE account ADD COLUMN device_id INTEGER NOT NULL DEFAULT 1",
 ];

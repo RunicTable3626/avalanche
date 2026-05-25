@@ -8,6 +8,7 @@
 //! 2. **Message history** — decrypted messages persisted for chat continuity
 //!    across app restarts. Stored encrypted-at-rest by SQLCipher.
 
+use rusqlite::OptionalExtension as _;
 use types::{MessageId, Timestamp};
 
 use crate::{db::Store, error::StoreError};
@@ -161,6 +162,86 @@ impl Store {
             .map_err(StoreError::Db)
     }
 
+    /// Enumerate every conversation that has at least one message, with that
+    /// conversation's most recent message attached. One row per
+    /// `conversation_id`, sorted newest-first. This is the single source of
+    /// truth for the chat list — the mobile layer derives its conversation
+    /// list from this rather than keeping a parallel store.
+    pub async fn load_conversations(&self) -> Result<Vec<ConversationSummary>, StoreError> {
+        self.conn
+            .call(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT m.conversation_id, m.id, m.sender_did, m.body, m.sent_at,
+                            m.edited_at, m.read_at, m.delivery_status
+                     FROM message_history m
+                     JOIN (
+                         SELECT conversation_id, MAX(sent_at) AS max_sent
+                         FROM message_history
+                         GROUP BY conversation_id
+                     ) latest
+                       ON m.conversation_id = latest.conversation_id
+                      AND m.sent_at = latest.max_sent
+                     ORDER BY m.sent_at DESC",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(ConversationSummary {
+                        conversation_id: row.get(0)?,
+                        last_message: HistoryMessage {
+                            id: row.get(1)?,
+                            conversation_id: row.get(0)?,
+                            sender_did: row.get(2)?,
+                            body: row.get(3)?,
+                            sent_at: Timestamp(row.get(4)?),
+                            edited_at: row.get::<_, Option<i64>>(5)?.map(Timestamp),
+                            read_at: row.get::<_, Option<i64>>(6)?.map(Timestamp),
+                            delivery_status: row.get::<_, i64>(7)? as u8,
+                        },
+                    })
+                })?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            })
+            .await
+            .map_err(StoreError::Db)
+    }
+
+    /// Load just the most recent message for a conversation. Returns `None`
+    /// if the conversation has no messages. Used for restoring conversation
+    /// list previews after app restart (the plaintext body lives only here,
+    /// not in UserDefaults).
+    pub async fn load_last_message(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<HistoryMessage>, StoreError> {
+        let conv_id = conversation_id.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT id, conversation_id, sender_did, body, sent_at, edited_at, read_at, delivery_status
+                     FROM message_history
+                     WHERE conversation_id = ?1
+                     ORDER BY sent_at DESC
+                     LIMIT 1",
+                    [&conv_id],
+                    |row| {
+                        Ok(HistoryMessage {
+                            id: row.get(0)?,
+                            conversation_id: row.get(1)?,
+                            sender_did: row.get(2)?,
+                            body: row.get(3)?,
+                            sent_at: Timestamp(row.get(4)?),
+                            edited_at: row.get::<_, Option<i64>>(5)?.map(Timestamp),
+                            read_at: row.get::<_, Option<i64>>(6)?.map(Timestamp),
+                            delivery_status: row.get::<_, i64>(7)? as u8,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(Into::into)
+            })
+            .await
+            .map_err(StoreError::Db)
+    }
+
     /// Mark all unread messages in a conversation as read up to a given timestamp.
     /// Sets `read_at` to `now` for matching messages. Returns the number of messages marked.
     pub async fn mark_messages_read(
@@ -239,6 +320,15 @@ impl Store {
             .await
             .map_err(StoreError::Db)
     }
+}
+
+/// One row per conversation that has at least one message: the conversation
+/// identifier plus the most recent message in it. The chat list is built
+/// directly from these rows.
+#[derive(Debug, Clone)]
+pub struct ConversationSummary {
+    pub conversation_id: String,
+    pub last_message: HistoryMessage,
 }
 
 /// A decrypted message stored in the local history.

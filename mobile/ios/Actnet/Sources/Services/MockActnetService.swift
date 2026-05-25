@@ -9,15 +9,18 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
     private var nextMessageId: Int64 = 1
     private let lock = NSLock()
     private var storedMessages: [String: [StoredMessageFfi]] = [:]  // keyed by conversation_id
+    private var ownDisplayName_: String
+    private var contactDisplayNames: [String: String] = [:]
 
-    init(did: String? = nil) {
+    init(did: String? = nil, displayName: String = "") {
         self.mockDid = did ?? "did:plc:mock\(UUID().uuidString.prefix(8).lowercased())"
+        self.ownDisplayName_ = displayName
     }
 
     func did() -> String { mockDid }
     func deviceId() -> UInt32 { mockDeviceId }
 
-    func sendDm(recipientDid: String, recipientDeviceId: UInt32, plaintext: Data, sentAtMs: Int64) throws {
+    func sendDm(recipientDid: String, plaintext: Data, sentAtMs: Int64) throws {
         // Simulate a slight network delay
         Thread.sleep(forTimeInterval: 0.1)
 
@@ -53,6 +56,24 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         return msgs.sorted { $0.sentAtMs < $1.sentAtMs }
     }
 
+    func loadLastMessage(conversationId: String) throws -> StoredMessageFfi? {
+        lock.lock()
+        let msgs = storedMessages[conversationId] ?? []
+        lock.unlock()
+        return msgs.max(by: { $0.sentAtMs < $1.sentAtMs })
+    }
+
+    func loadConversations() throws -> [ConversationSummaryFfi] {
+        lock.lock()
+        let snapshot = storedMessages
+        lock.unlock()
+        return snapshot.compactMap { (convId, msgs) -> ConversationSummaryFfi? in
+            guard let last = msgs.max(by: { $0.sentAtMs < $1.sentAtMs }) else { return nil }
+            return ConversationSummaryFfi(conversationId: convId, lastMessage: last)
+        }
+        .sorted { $0.lastMessage.sentAtMs > $1.lastMessage.sentAtMs }
+    }
+
     func markMessagesRead(conversationId: String, upToSentAtMs: Int64) throws -> UInt64 {
         lock.lock()
         defer { lock.unlock() }
@@ -76,7 +97,7 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         return count
     }
 
-    func sendReadReceipt(recipientDid: String, recipientDeviceId: UInt32, timestamps: [Int64]) throws {
+    func sendReadReceipt(recipientDid: String, timestamps: [Int64]) throws {
         // Mock: no-op
     }
 
@@ -91,6 +112,39 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
     func drainReceiptUpdates() -> [DeliveryStatusUpdate] {
         // Mock: no receipt updates
         []
+    }
+
+    func hasRecovery() -> Bool {
+        false
+    }
+
+    func updateRecoveryBlob(recoveryKey: Data, servers: [String]) throws {
+        // Mock: no-op
+    }
+
+    func ownDisplayName() throws -> String {
+        lock.lock(); defer { lock.unlock() }
+        return ownDisplayName_
+    }
+
+    func setDisplayName(displayName: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        ownDisplayName_ = displayName
+    }
+
+    func contactDisplayName(did: String) throws -> String {
+        lock.lock(); defer { lock.unlock() }
+        return contactDisplayNames[did] ?? ""
+    }
+
+    func refreshContactProfile(did: String) throws -> Bool {
+        // Mock: nothing to refresh from.
+        false
+    }
+
+    func primeContactProfile(did: String, displayName: String, profileKey: Data) throws {
+        lock.lock(); defer { lock.unlock() }
+        contactDisplayNames[did] = displayName
     }
 
     func unreadCount(conversationId: String) throws -> UInt64 {
@@ -141,15 +195,40 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
     }
 }
 
+/// Mock `PreparedAccountProtocol` that just hands back a fabricated DID.
+final class MockPreparedAccount: PreparedAccountProtocol, @unchecked Sendable {
+    private let storedDid: String
+
+    init() {
+        self.storedDid = "did:plc:mock\(UUID().uuidString.prefix(8).lowercased())"
+    }
+
+    func did() -> String { storedDid }
+}
+
 /// Mock service that creates fake accounts and seeds initial conversations.
 struct MockActnetService: ActnetService {
-    func createAccount(serverUrl: String, dbPath: String, dbKey: String) throws -> any AppCoreProtocol {
+    func createAccount(serverUrl: String, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol {
         Thread.sleep(forTimeInterval: 0.5) // simulate network
-        return MockAppCore()
+        return MockAppCore(displayName: displayName)
     }
 
     func login(dbPath: String, dbKey: String) throws -> any AppCoreProtocol {
         MockAppCore()
+    }
+
+    func prepareAccount(serverUrl: String) throws -> any PreparedAccountProtocol {
+        MockPreparedAccount()
+    }
+
+    func finalizeAccount(prepared: any PreparedAccountProtocol, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol {
+        Thread.sleep(forTimeInterval: 0.5)
+        return MockAppCore(did: prepared.did(), displayName: displayName)
+    }
+
+    func recoverFromBlob(serverUrl: String, did: String, recoveryKey: Data, dbPath: String, dbKey: String, displayName: String) throws -> any AppCoreProtocol {
+        Thread.sleep(forTimeInterval: 0.5)
+        return MockAppCore(did: did, displayName: displayName)
     }
 }
 

@@ -7,10 +7,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 All commands run from the repo root. The Rust workspace root is `core/`.
 
 ```bash
-make test            # run crypto + store + types + server tests (needs Postgres running)
+# Most-used
+make ios             # build the iOS app for the simulator (incremental)
+make xcode           # prepare bindings + xcframework + xcodeproj for an
+                     # already-open Xcode (no xcodebuild)
+make dev-all         # run homeserver + testbot + relay together (preferred)
+make test            # run crypto + store + types + server tests (needs Postgres)
+make test-e2e        # app-core integration tests (needs a running server)
+
+# Database
+make db-up           # start Postgres via docker-compose
+make db-down         # stop Postgres
+
+# Less common
 make test-core       # just crypto, store, types
 make test-server     # just server (needs TEST_DATABASE_URL)
-make test-e2e        # app-core integration tests (needs a running server)
+make bindings        # regenerate UniFFI Swift/Kotlin glue only (no xcframework)
+make dev             # run homeserver alone with debug logging
 make check           # cargo check
 make clippy          # cargo clippy
 
@@ -18,18 +31,10 @@ make clippy          # cargo clippy
 cd core && cargo test -p crypto
 # Single test
 cd core && cargo test -p crypto -- test_name
-
-# Dev server
-make dev             # run homeserver with debug logging (tower_http + server)
-
-# Database
-make db-up           # start Postgres via docker-compose
-make db-down         # stop Postgres
-
-# Mobile bindings (UniFFI → Swift + Kotlin)
-make bindings        # generate bindings
-make ios             # bindings + xcframework + xcodegen
 ```
+
+The iOS targets are file-dependency driven, so `make ios` does the right
+minimum work. See the header of `Makefile` for the build chain.
 
 ## Key Docs
 
@@ -104,13 +109,12 @@ Common pitfalls:
 The full cycle for adding a new feature that involves Rust + iOS:
 
 1. Add Rust FFI method to `core/crates/app-core/src/lib.rs` (sync, `#[uniffi::export]`)
-2. `make bindings` — regenerates `mobile/ios/Generated/app_core.swift`
-3. `make ios` — rebuilds XCFramework + regenerates Xcode project
-4. Add to `AppCoreProtocol` in `ActnetService.swift`
-5. Stub in `MockActnetService.swift`
-6. Call from `AppState.swift` via `Task.detached { try core.methodName() }.value`
+2. Add to `AppCoreProtocol` in `ActnetService.swift`
+3. Stub in `MockActnetService.swift`
+4. Call from `AppState.swift` via `Task.detached { try core.methodName() }.value`
+5. `make ios` — incremental: regenerates UniFFI bindings + XCFramework + Xcode project, then builds the app. Use `make xcode` instead if you'll click Run in Xcode yourself.
 
-Use `/new-ffi-method <name>` to scaffold steps 1, 4, 5, 6 as a single command.
+Use `/new-ffi-method <name>` to scaffold steps 1–4 as a single command.
 
 FFI constraints (do not violate):
 - FFI exports must be **synchronous** — they block on a global tokio runtime (`OnceLock<Runtime>`)

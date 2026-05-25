@@ -15,9 +15,7 @@ Invite links are web URLs on the homeserver's domain (e.g., `https://myorg.examp
 
 - Explains what's happening ("You've been invited to join [Org Name]")
 - Links to the App Store / Play Store if the app isn't installed
-- Has an "Open in actnet" button that fires a custom URL scheme (`actnet://invite/<server>/<token>`) to hand off to the app
-
-We use a custom URL scheme rather than Universal Links / App Links because those require a fixed domain hardcoded into the app binary at build time, which doesn't work when any homeserver can generate invite links.
+- Has an "Open in Avalanche" button that links to `https://go.theavalanche.net/invite/<server>/<token>`, which opens the app via Universal Links (iOS) / App Links (Android)
 
 ## Registration flow
 
@@ -51,9 +49,9 @@ When the app receives an invite and the user already has accounts:
 
 Creating a separate account is the right choice when you want to keep identities apart — e.g., organizing pseudonymously with one group while using your real name with another. Most users will just tap their existing name.
 
-## Recovery key
+## Account recovery (passkey)
 
-The app does not show the recovery key during initial onboarding. Instead, it displays a persistent banner ("Secure your account") in the Chats tab that links to the recovery key setup flow. This keeps the critical path fast while ensuring users are prompted to secure their account.
+During initial signup, after entering a display name, the app prompts the user to create a passkey. This is a single biometric prompt (Face ID / fingerprint) — the passkey is stored in the user's password manager or iCloud Keychain and syncs across their devices automatically. The passkey protects an encrypted recovery blob (containing the user's DID rotation key and identity keypair) stored on each homeserver the user is registered on. See `docs/33-identity-auth-recovery.md` for the full design.
 
 ## Display name
 

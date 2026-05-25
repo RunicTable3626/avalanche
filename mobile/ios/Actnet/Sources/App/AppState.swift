@@ -33,6 +33,15 @@ final class AppState: ObservableObject {
     @Published var serviceMode: ServiceMode
     @Published var selectedTab: Tab = .chats
     @Published var navigateToConversation: Conversation?
+    /// ID of the conversation currently visible on screen, or nil. Set by
+    /// `ConversationView.onAppear`/`onDisappear`. Used to suppress
+    /// notifications for the chat the user is actively reading.
+    @Published var currentConversationId: String?
+    /// Whether the app's scene is in the `.active` phase. Driven by
+    /// `ActnetApp`'s `onChange(of: scenePhase)`. Used to decide whether to
+    /// fire a banner (background/inactive → always show; active → suppress
+    /// only when viewing the relevant conversation).
+    @Published var isAppActive: Bool = true
 
     enum Tab {
         case calls, chats, network
@@ -52,9 +61,7 @@ final class AppState: ObservableObject {
 
     private static let serviceModeKey = "serviceMode"
     private static let accountsKey = "persistedAccounts"
-    private static let conversationsKey = "persistedConversations"
-    // TODO: Derive key from iOS Secure Enclave instead of hardcoded passphrase
-    private static let dbKey = "dev-placeholder-key"
+
 
     init(mode: ServiceMode? = nil) {
         let resolved = mode ?? {
@@ -71,24 +78,59 @@ final class AppState: ObservableObject {
 
     // MARK: - Deep linking
 
-    /// Handle an `actnet://` deep link URL.
-    /// Supported: `actnet://conversation/<recipient_did>`
+    /// Handle a deep link URL.
+    /// Supported:
+    /// - `https://go.theavalanche.net/conversation/<recipient_did>`
+    /// - `https://go.theavalanche.net/invite/<token>`
     func handleDeepLink(_ url: URL) {
         print("[DeepLink] handleDeepLink: \(url), scheme=\(url.scheme ?? "nil"), host=\(url.host ?? "nil"), path=\(url.path)")
-        guard url.scheme == "actnet" else { return }
-        guard url.host == "conversation" else { return }
+        guard Self.isDeepLink(url) else { return }
 
-        // Path is "/<recipient_did>"
-        let did = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !did.isEmpty, let accountId = accounts.first?.id else {
-            print("[DeepLink] failed: did='\(did)', accounts=\(accounts.count)")
-            return
+        let pathComponents = url.pathComponents.filter { $0 != "/" }
+        guard let action = pathComponents.first, pathComponents.count >= 2 else { return }
+
+        switch action {
+        case "conversation":
+            let did = pathComponents[1]
+            guard !did.isEmpty, let accountId = accounts.first?.id else {
+                print("[DeepLink] failed: did='\(did)', accounts=\(accounts.count)")
+                return
+            }
+            print("[DeepLink] navigating to conversation with \(did)")
+            let conv = findOrCreateDMConversation(recipientDid: did, accountId: accountId)
+            selectedTab = .chats
+            navigateToConversation = conv
+
+        case "invite":
+            let token = pathComponents[1]
+            print("[DeepLink] handling invite token")
+            // Try to decode the token locally to check if we're already on the server.
+            if let data = Data(base64URLEncoded: token),
+               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let serverUrl = payload["server_url"] as? String,
+               let inviterDid = payload["inviter_did"] as? String,
+               let account = accounts.first(where: { $0.servers.contains(where: { $0.url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == serverUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }) }) {
+                // Already registered on this server — skip to DM.
+                print("[DeepLink] already on server, opening DM with \(inviterDid)")
+                let conv = findOrCreateDMConversation(recipientDid: inviterDid, accountId: account.id)
+                selectedTab = .chats
+                navigateToConversation = conv
+            } else {
+                // Not on this server — start onboarding flow.
+                pendingInviteToken = token
+            }
+
+        default:
+            print("[DeepLink] unknown action: \(action)")
         }
+    }
 
-        print("[DeepLink] navigating to conversation with \(did)")
-        let conv = findOrCreateDMConversation(recipientDid: did, accountId: accountId)
-        selectedTab = .chats
-        navigateToConversation = conv
+    /// Pending invite token from a deep link, picked up by the onboarding flow.
+    @Published var pendingInviteToken: String?
+
+    /// Check if a URL is a deep link for this app.
+    static func isDeepLink(_ url: URL) -> Bool {
+        url.host == "go.theavalanche.net"
     }
 
     // MARK: - Unread count (derived from in-memory messages)
@@ -107,8 +149,12 @@ final class AppState: ObservableObject {
         guard !persisted.isEmpty else { return }
 
         let svc = _service
-        let dbKey = Self.dbKey
         let dir = dbDir
+
+        guard let dbKey = try? SecureEnclaveKeyManager.dbPassphrase() else {
+            print("Failed to retrieve DB encryption key, cannot restore accounts")
+            return
+        }
 
         for p in persisted {
             let dbPath = dir.appendingPathComponent(p.dbFilename).path
@@ -150,18 +196,29 @@ final class AppState: ObservableObject {
                     ))
                 }
             } else {
-                conversations = Self.loadPersistedConversations()
-                // Resolve display names for conversations that still show raw DIDs.
-                for conv in conversations {
-                    if let did = conv.recipientDid, conv.title == did {
-                        _ = displayName(for: did, accountId: conv.accountId)
-                    }
-                }
+                // Conversation list is derived from message_history in
+                // SQLCipher — no parallel UserDefaults state. One indexed
+                // query per account returns every conversation with at least
+                // one persisted message, already sorted newest-first.
+                await loadConversationsFromStore()
             }
 
             startMessagePolling()
             Task { await PushManager.requestPermissionAndRegister(appState: self) }
         }
+    }
+
+    func logout() {
+        for (_, task) in wsLoopTasks { task.cancel() }
+        wsLoopTasks.removeAll()
+        accounts.removeAll()
+        conversations.removeAll()
+        messagesByConversation.removeAll()
+        cores.removeAll()
+        displayNameCache.removeAll()
+        displayNameInFlight.removeAll()
+        Self.clearPersistedAccounts()
+        isOnboarding = true
     }
 
     func switchMode(_ mode: ServiceMode) {
@@ -179,7 +236,6 @@ final class AppState: ObservableObject {
         displayNameCache.removeAll()
         displayNameInFlight.removeAll()
         Self.clearPersistedAccounts()
-        Self.clearPersistedConversations()
         isOnboarding = true
     }
 
@@ -197,19 +253,117 @@ final class AppState: ObservableObject {
             .appendingPathComponent("actnet", isDirectory: true)
     }
 
-    func createAccount(serverUrl: String, serverName: String, displayName: String) async throws {
+    /// Create a new account. `recoveryKey` is a 32-byte symmetric key from
+    /// passkey PRF or recovery phrase. Pass empty Data to skip recovery setup.
+    func createAccount(serverUrl: String, serverName: String, displayName: String, recoveryKey: Data = Data()) async throws {
         let dir = dbDir
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let dbFilename = "account-\(UUID().uuidString.prefix(8)).db"
         let dbPath = dir.appendingPathComponent(dbFilename).path
-        let dbKey = Self.dbKey
+        let dbKey = try SecureEnclaveKeyManager.dbPassphrase()
 
         let svc = _service
+        let rk = recoveryKey
+        let dn = displayName
         let core = try await Task.detached {
-            try svc.createAccount(serverUrl: serverUrl, dbPath: dbPath, dbKey: dbKey)
+            try svc.createAccount(serverUrl: serverUrl, dbPath: dbPath, dbKey: dbKey, recoveryKey: rk, displayName: dn)
         }.value
 
+        try await finishAccountRegistration(core: core, serverUrl: serverUrl, serverName: serverName, displayName: displayName, dbFilename: dbFilename)
+    }
+
+    /// Prepare a fresh identity (Stage 1 of the passkey flow). The returned
+    /// `PreparedAccountProtocol` exposes the DID derived from the new keys,
+    /// which the caller writes into the passkey's user handle before
+    /// completing registration via `finalizePreparedAccount`.
+    func prepareAccount(serverUrl: String) async throws -> any PreparedAccountProtocol {
+        let svc = _service
+        return try await Task.detached {
+            try svc.prepareAccount(serverUrl: serverUrl)
+        }.value
+    }
+
+    /// Finalize an account previously created by `prepareAccount` (Stage 2 of
+    /// the passkey flow). Submits the PLC genesis op and registers with the
+    /// server using the prepared keys.
+    func finalizePreparedAccount(
+        prepared: any PreparedAccountProtocol,
+        serverUrl: String,
+        serverName: String,
+        displayName: String,
+        recoveryKey: Data
+    ) async throws {
+        let dir = dbDir
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let dbFilename = "account-\(UUID().uuidString.prefix(8)).db"
+        let dbPath = dir.appendingPathComponent(dbFilename).path
+        let dbKey = try SecureEnclaveKeyManager.dbPassphrase()
+
+        let svc = _service
+        let rk = recoveryKey
+        let dn = displayName
+        let core = try await Task.detached {
+            try svc.finalizeAccount(prepared: prepared, dbPath: dbPath, dbKey: dbKey, recoveryKey: rk, displayName: dn)
+        }.value
+
+        try await finishAccountRegistration(core: core, serverUrl: serverUrl, serverName: serverName, displayName: displayName, dbFilename: dbFilename)
+    }
+
+    /// Recover an account from a passkey-protected recovery blob. Downloads
+    /// the blob from `serverUrl` keyed by `did`, decrypts with `recoveryKey`,
+    /// replaces the device on the home server, and signs the user in.
+    ///
+    /// `displayName` may be empty — the recovered account will appear in the
+    /// account list with a placeholder until the user updates it from Settings.
+    func recoverAccount(
+        serverUrl: String,
+        serverName: String,
+        did: String,
+        recoveryKey: Data,
+        displayName: String
+    ) async throws {
+        let dir = dbDir
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let dbFilename = "account-\(UUID().uuidString.prefix(8)).db"
+        let dbPath = dir.appendingPathComponent(dbFilename).path
+        let dbKey = try SecureEnclaveKeyManager.dbPassphrase()
+
+        let svc = _service
+        let rk = recoveryKey
+        let recoveryDid = did
+        let core = try await Task.detached {
+            try svc.recoverFromBlob(
+                serverUrl: serverUrl,
+                did: recoveryDid,
+                recoveryKey: rk,
+                dbPath: dbPath,
+                dbKey: dbKey,
+                displayName: displayName
+            )
+        }.value
+
+        let resolvedDisplayName = displayName.isEmpty
+            ? "Account \(String(did.suffix(6)))"
+            : displayName
+        try await finishAccountRegistration(
+            core: core,
+            serverUrl: serverUrl,
+            serverName: serverName,
+            displayName: resolvedDisplayName,
+            dbFilename: dbFilename
+        )
+    }
+
+    private func finishAccountRegistration(
+        core: any AppCoreProtocol,
+        serverUrl: String,
+        serverName: String,
+        displayName: String,
+        dbFilename: String
+    ) async throws {
         let did = core.did()
         cores[did] = core
 
@@ -266,26 +420,62 @@ final class AppState: ObservableObject {
         return did
     }
 
-    /// Fetch display name from the server and update conversation titles.
+    /// Resolve a display name for a DID. Two sources, in order:
+    /// 1. Local SQLCipher `contact_profiles` cache — populated automatically by
+    ///    app-core when an inbound message carries the sender's profile_key.
+    ///    This is the path for human contacts.
+    /// 2. Server-side `/v1/accounts/{did}` lookup — only returns a name for
+    ///    bot accounts (humans never put a plaintext name on the server).
     private func resolveDisplayName(did: String, accountId: String) {
         guard !displayNameInFlight.contains(did) else { return }
         guard let core = cores[accountId] else { return }
         displayNameInFlight.insert(did)
         let targetDid = did
         Task.detached { [weak self] in
-            let info = try? core.getAccountInfo(did: targetDid)
+            // Local contact_profiles first — fast, no network.
+            let localName = (try? core.contactDisplayName(did: targetDid)) ?? ""
+            // Fall back to server lookup (bots) only if the local cache is empty.
+            let serverName: String? = localName.isEmpty
+                ? (try? core.getAccountInfo(did: targetDid))?.displayName
+                : nil
+            let resolved = !localName.isEmpty ? localName : (serverName ?? "")
+
             await MainActor.run {
                 guard let self else { return }
                 self.displayNameInFlight.remove(targetDid)
-                guard let name = info?.displayName, !name.isEmpty else { return }
-                self.displayNameCache[targetDid] = name
-                // Update titles of any conversations with this DID.
-                for i in self.conversations.indices {
-                    if self.conversations[i].recipientDid == targetDid && self.conversations[i].title == targetDid {
-                        self.conversations[i].title = name
-                    }
-                }
-                self.persistConversations()
+                guard !resolved.isEmpty else { return }
+                self.applyResolvedDisplayName(did: targetDid, name: resolved)
+            }
+        }
+    }
+
+    /// Cache a resolved name and update any conversation title that doesn't
+    /// already match. Handles both first-time resolution (title was the raw
+    /// DID) and refresh-after-rename (title was the old name).
+    private func applyResolvedDisplayName(did: String, name: String) {
+        displayNameCache[did] = name
+        var changed = false
+        for i in conversations.indices {
+            if conversations[i].recipientDid == did && conversations[i].title != name {
+                conversations[i].title = name
+                changed = true
+            }
+        }
+        _ = changed
+    }
+
+    /// Re-fetch a contact's encrypted profile from the homeserver and refresh
+    /// the cached display name if it changed. Called when a conversation opens
+    /// — the primary change-detection path, per `docs/35-profiles.md`.
+    func refreshContactProfile(did: String, accountId: String) {
+        guard let core = cores[accountId] else { return }
+        Task.detached { [weak self] in
+            let changed = (try? core.refreshContactProfile(did: did)) ?? false
+            guard changed else { return }
+            let newName = (try? core.contactDisplayName(did: did)) ?? ""
+            guard !newName.isEmpty else { return }
+            await MainActor.run {
+                self?.applyResolvedDisplayName(did: did, name: newName)
             }
         }
     }
@@ -311,7 +501,7 @@ final class AppState: ObservableObject {
         try await Task.detached { try core.saveMessage(msg: stored) }.value
 
         try await Task.detached {
-            try core.sendDm(recipientDid: recipientDid, recipientDeviceId: 1, plaintext: plaintext, sentAtMs: nowMs)
+            try core.sendDm(recipientDid: recipientDid, plaintext: plaintext, sentAtMs: nowMs)
         }.value
     }
 
@@ -332,6 +522,7 @@ final class AppState: ObservableObject {
         }
         guard changed else { return }
         messagesByConversation[conversationId] = messages
+        NotificationPresenter.updateBadge(appState: self)
 
         // Persist to SQLCipher and send read receipts in the background.
         if let core = cores[accountId] {
@@ -343,7 +534,6 @@ final class AppState: ObservableObject {
                 for (senderDid, timestamps) in timestampsBySender {
                     try? core.sendReadReceipt(
                         recipientDid: senderDid,
-                        recipientDeviceId: 1,
                         timestamps: timestamps
                     )
                 }
@@ -351,7 +541,96 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Mark messages as read up to (and including) the given sentAtMs timestamp.
+    /// Only marks received messages (not own outgoing). Sends read receipts for newly-read messages.
+    func markMessagesReadUpTo(sentAtMs threshold: Int64, conversationId: String, accountId: String) {
+        guard var messages = messagesByConversation[conversationId] else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        var readTimestampsBySender: [String: [Int64]] = [:]
+        var changed = false
+        for i in messages.indices {
+            let msg = messages[i]
+            guard msg.readAtMs == nil && msg.senderAccountId != accountId && msg.sentAtMs <= threshold else { continue }
+            messages[i].readAtMs = nowMs
+            changed = true
+            readTimestampsBySender[msg.senderAccountId, default: []].append(msg.sentAtMs)
+        }
+        guard changed else { return }
+        messagesByConversation[conversationId] = messages
+        NotificationPresenter.updateBadge(appState: self)
+
+        if let core = cores[accountId] {
+            let convId = conversationId
+            let timestampsBySender = readTimestampsBySender
+            Task.detached {
+                try? core.markMessagesRead(conversationId: convId, upToSentAtMs: threshold)
+                for (senderDid, timestamps) in timestampsBySender {
+                    try? core.sendReadReceipt(recipientDid: senderDid, timestamps: timestamps)
+                }
+            }
+        }
+    }
+
     /// Load persisted messages from SQLCipher for a conversation.
+    /// Derive the conversation list from each account's `message_history`
+    /// via a single indexed query. Sorted newest-first; titles are resolved
+    /// asynchronously through `displayName(for:accountId:)`.
+    ///
+    /// Conversation IDs follow the format `dm-<accountId>-<recipientDid>`.
+    private func loadConversationsFromStore() async {
+        let pairs: [(String, any AppCoreProtocol)] = accounts.compactMap { acct in
+            cores[acct.id].map { (acct.id, $0) }
+        }
+        let summariesPerAccount = await withTaskGroup(of: (String, [ConversationSummaryFfi]).self) { group in
+            for (accountId, core) in pairs {
+                group.addTask {
+                    let rows = (try? core.loadConversations()) ?? []
+                    return (accountId, rows)
+                }
+            }
+            var out: [(String, [ConversationSummaryFfi])] = []
+            for await result in group { out.append(result) }
+            return out
+        }
+
+        var newConvs: [Conversation] = []
+        for (accountId, summaries) in summariesPerAccount {
+            let serverUrl = accounts.first(where: { $0.id == accountId })?.servers.first?.id ?? ""
+            for s in summaries {
+                let recipientDid = Self.recipientDid(from: s.conversationId, accountId: accountId)
+                let title = recipientDid.flatMap { displayNameCache[$0] } ?? recipientDid ?? s.conversationId
+                newConvs.append(Conversation(
+                    id: s.conversationId,
+                    title: title,
+                    accountId: accountId,
+                    serverUrl: serverUrl,
+                    recipientDid: recipientDid,
+                    lastMessage: s.lastMessage.body,
+                    lastMessageDate: Date(timeIntervalSince1970: TimeInterval(s.lastMessage.sentAtMs) / 1000.0),
+                    isGroup: false
+                ))
+            }
+        }
+        conversations = newConvs.sorted {
+            ($0.lastMessageDate ?? .distantPast) > ($1.lastMessageDate ?? .distantPast)
+        }
+
+        // Kick off async name resolution for any conversation still showing the raw DID.
+        for conv in conversations {
+            if let did = conv.recipientDid, conv.title == did {
+                _ = displayName(for: did, accountId: conv.accountId)
+            }
+        }
+    }
+
+    /// Parse the recipient DID out of a conversation ID of the form
+    /// `dm-<accountDid>-<recipientDid>`. Returns nil for non-DM IDs.
+    private static func recipientDid(from conversationId: String, accountId: String) -> String? {
+        let prefix = "dm-\(accountId)-"
+        guard conversationId.hasPrefix(prefix) else { return nil }
+        return String(conversationId.dropFirst(prefix.count))
+    }
+
     func loadMessagesFromStore(conversationId: String, accountId: String) {
         guard let core = cores[accountId] else { return }
         // Only load if we haven't already loaded for this conversation.
@@ -398,7 +677,6 @@ final class AppState: ObservableObject {
             isGroup: false
         )
         conversations.append(conv)
-        persistConversations()
         return conv
     }
 
@@ -535,7 +813,6 @@ final class AppState: ObservableObject {
             deliveryStatus: .sent
         )
         messagesByConversation[convId, default: []].append(message)
-        persistConversations()
 
         // Persist to SQLCipher in the background.
         if let core = cores[accountId] {
@@ -550,6 +827,17 @@ final class AppState: ObservableObject {
                 deliveryStatus: 1  // sent
             )
             Task.detached { try? core.saveMessage(msg: stored) }
+        }
+
+        // Fire a local notification (respects scene phase + currently-viewed
+        // conversation; updates the app badge regardless).
+        if let conv = conversations.first(where: { $0.id == convId }) {
+            NotificationPresenter.present(
+                message: message,
+                conversation: conv,
+                senderDisplayName: displayName(for: senderDid, accountId: accountId),
+                appState: self
+            )
         }
     }
 
@@ -602,20 +890,4 @@ final class AppState: ObservableObject {
         UserDefaults.standard.removeObject(forKey: accountsKey)
     }
 
-    // MARK: - Conversation persistence
-
-    private func persistConversations() {
-        if let data = try? JSONEncoder().encode(conversations) {
-            UserDefaults.standard.set(data, forKey: Self.conversationsKey)
-        }
-    }
-
-    private static func loadPersistedConversations() -> [Conversation] {
-        guard let data = UserDefaults.standard.data(forKey: conversationsKey) else { return [] }
-        return (try? JSONDecoder().decode([Conversation].self, from: data)) ?? []
-    }
-
-    private static func clearPersistedConversations() {
-        UserDefaults.standard.removeObject(forKey: conversationsKey)
-    }
 }

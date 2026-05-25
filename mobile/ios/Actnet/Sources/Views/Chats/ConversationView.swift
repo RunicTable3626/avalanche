@@ -2,13 +2,12 @@ import SwiftUI
 
 struct ConversationView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.scenePhase) private var scenePhase
     let conversation: Conversation
 
     @State private var messageText = ""
     @State private var errorMessage: String?
-    @State private var scrollTarget: String?
-    @State private var scrollToken = UUID()
-    @State private var initialLoadDone = false
+    @State private var scrollPosition = ScrollPosition(idType: Int64.self)
 
     private var messages: [Message] {
         appState.messagesByConversation[conversation.id] ?? []
@@ -16,32 +15,38 @@ struct ConversationView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(messages) { message in
-                            MessageBubble(
-                                message: message,
-                                isMe: message.senderAccountId == conversation.accountId
-                            )
-                            .id(message.id)
-                        }
-                        Color.clear.frame(height: 1).id("bottom")
-                    }
-                    .padding()
-                }
-                .defaultScrollAnchor(.bottom)
-                .onChange(of: scrollToken) {
-                    if let scrollTarget {
-                        proxy.scrollTo(scrollTarget, anchor: .bottom)
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(messages) { message in
+                        MessageBubble(
+                            message: message,
+                            isMe: message.senderAccountId == conversation.accountId
+                        )
+                        .id(message.sentAtMs)
                     }
                 }
+                .padding()
+            }
+            .defaultScrollAnchor(.bottom)
+            .scrollPosition($scrollPosition)
+            .onScrollTargetVisibilityChange(idType: Int64.self) { visibleIDs in
+                guard scenePhase == .active, let threshold = visibleIDs.last else { return }
+                appState.markMessagesReadUpTo(
+                    sentAtMs: threshold,
+                    conversationId: conversation.id,
+                    accountId: conversation.accountId
+                )
+            }
+            .onChange(of: messages.count) {
+                guard !messages.isEmpty else { return }
+                scrollPosition.scrollTo(edge: .bottom)
+                appState.markAllMessagesRead(conversationId: conversation.id, accountId: conversation.accountId)
             }
 
             if let error = errorMessage {
                 Text(error)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.avError)
                     .padding(.horizontal)
             }
 
@@ -64,42 +69,40 @@ struct ConversationView: View {
             .padding(.vertical, 8)
             .onChange(of: messageText) {
                 if !messages.isEmpty {
-                    scrollTo("bottom")
+                    scrollPosition.scrollTo(edge: .bottom)
                 }
             }
         }
+        .background(Color.avPaper)
         .navigationTitle(conversation.title)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
+            appState.currentConversationId = conversation.id
             appState.loadMessagesFromStore(conversationId: conversation.id, accountId: conversation.accountId)
-            DispatchQueue.main.async {
-                initialScroll()
-            }
             appState.markAllMessagesRead(conversationId: conversation.id, accountId: conversation.accountId)
-        }
-        .onChange(of: messages.count) {
-            guard initialLoadDone else { return }
-            // Scroll to and mark new messages as read while the conversation is visible.
-            if !messages.isEmpty {
-                scrollTo("bottom")
+            // Re-fetch the contact's encrypted profile and update the cached
+            // display name if it changed. Primary change-detection path.
+            if let recipientDid = conversation.recipientDid {
+                appState.refreshContactProfile(did: recipientDid, accountId: conversation.accountId)
             }
-            appState.markAllMessagesRead(conversationId: conversation.id, accountId: conversation.accountId)
         }
-    }
-
-    private func initialScroll() {
-        let msgs = messages
-        if let firstUnread = msgs.first(where: { $0.readAtMs == nil && $0.senderAccountId != conversation.accountId }) {
-            scrollTo(firstUnread.id)
-        } else if !msgs.isEmpty {
-            scrollTo("bottom")
+        .onDisappear {
+            if appState.currentConversationId == conversation.id {
+                appState.currentConversationId = nil
+            }
         }
-        initialLoadDone = true
-    }
-
-    private func scrollTo(_ id: String) {
-        scrollTarget = id
-        scrollToken = UUID()
+        .task(id: conversation.id) {
+            // After messages load, scroll to first unread (or bottom if all read).
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            let msgs = appState.messagesByConversation[conversation.id] ?? []
+            if let firstUnread = msgs.first(where: {
+                $0.readAtMs == nil && $0.senderAccountId != conversation.accountId
+            }) {
+                scrollPosition.scrollTo(id: firstUnread.sentAtMs)
+            } else {
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+        }
     }
 
     private func sendMessage() {
@@ -121,7 +124,7 @@ struct ConversationView: View {
             deliveryStatus: .sent
         )
         appState.messagesByConversation[conversation.id, default: []].append(message)
-        scrollTo("bottom")
+        scrollPosition.scrollTo(edge: .bottom)
 
         // Update conversation metadata for sorting.
         if let idx = appState.conversations.firstIndex(where: { $0.id == conversation.id }) {

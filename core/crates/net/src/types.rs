@@ -12,6 +12,8 @@ use crate::error::NetError;
 // ── Registration ─────────────────────────────────────────────────────────────
 
 pub struct RegisterRequest {
+    /// Client-generated DID (from PLC directory genesis operation).
+    pub did: Option<String>,
     pub identity_key: Vec<u8>,
     pub registration_id: i32,
     pub device_id: i32,
@@ -25,6 +27,13 @@ pub struct RegisterRequest {
     /// Plaintext display name — bot accounts only. Human accounts should pass `None`.
     pub display_name: Option<String>,
     pub is_bot: bool,
+    /// Encrypted recovery blob (opaque ciphertext). Optional.
+    pub recovery_blob: Option<Vec<u8>>,
+    /// Encrypted profile blob (AES-256-GCM under the user's profile key). Optional.
+    pub encrypted_profile: Option<Vec<u8>>,
+    /// Ed25519 signature of `"register:{did}"` proving identity key possession.
+    /// Required when `did` is provided.
+    pub identity_key_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +200,15 @@ impl RawFetchResponse {
     }
 }
 
+// ── Invites ─────────────────────────────────────────────────────────────────
+
+/// Response from validating an invite token.
+#[derive(Debug, Deserialize)]
+pub struct InviteValidationResponse {
+    pub server_name: String,
+    pub post_onboarding_redirect: Option<String>,
+}
+
 // ── Projects ────────────────────────────────────────────────────────────────
 
 /// A Project installed on the homeserver.
@@ -205,6 +223,51 @@ pub struct ProjectInfo {
 #[derive(Debug, Deserialize)]
 pub struct ProjectTokenResponse {
     pub token: String,
+    pub expires_at: String,
+}
+
+// ── Recovery ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RecoveryBlobResponse {
+    pub recovery_blob: String, // base64
+    #[serde(default)]
+    pub device_ids: Vec<i32>,
+}
+
+/// Decoded result of `get_recovery_blob` — the encrypted blob bytes plus the
+/// account's currently active device_ids, used by the recovery flow to target
+/// the old device for replacement.
+#[derive(Debug)]
+pub struct RecoveryBundle {
+    pub blob: Vec<u8>,
+    pub device_ids: Vec<i32>,
+}
+
+// ── Device replacement ──────────────────────────────────────────────────────
+
+pub struct ReplaceDeviceRequest {
+    pub did: String,
+    pub old_device_id: i32,
+    pub new_device_id: i32,
+    pub new_identity_key: Vec<u8>,
+    pub new_registration_id: i32,
+    pub nonce: String,
+    pub rotation_key_signature: Vec<u8>,
+    pub rotation_key: Vec<u8>,
+    pub signed_prekey_id: i32,
+    pub signed_prekey_public: Vec<u8>,
+    pub signed_prekey_signature: Vec<u8>,
+    pub one_time_prekeys: Vec<(i32, Vec<u8>)>,
+    pub kyber_prekey_id: i32,
+    pub kyber_prekey_public: Vec<u8>,
+    pub kyber_prekey_signature: Vec<u8>,
+    pub recovery_blob: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReplaceDeviceResponse {
+    pub session_token: String,
     pub expires_at: String,
 }
 

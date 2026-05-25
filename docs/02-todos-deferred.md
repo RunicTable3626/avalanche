@@ -1,10 +1,28 @@
 # Deferred TODOs
 
+## Dev Infra
+- Make simple makefile commands to build the entire ios -- currently we can build the Rust code, but I think it's worth having a command that runs xcodebuild, since Claude likes to run it to ensure its changes compile. In general we should make 'compile everything' commands at the root with a Makefile.
+
 ## Mobile app
-- Recovery key UI: setup and backup flows (banner currently always shows, hardcoded false)
-- Scroll-position-based read marking (see docs/31-read-tracking.md, Stage B)
+- Mobile app 'console': nerdly scrolling log which appears during long loads and debugging tools (currently everything is fast so maybe not needed)
+- Account recovery is not yet implemented / working
+- Written-down recovery phrase alternative to passkey (generate memorable phrase, encrypt recovery blob with it, cache derived key in Secure Enclave)
+- Delivery receipts — auto-send on message receive (see docs/31-read-tracking.md, Stage D)
 - Read receipt user preference toggle (send_read_receipts setting)
 - Scroll position: remove invisible "bottom" anchor hack in ConversationView (Color.clear spacer) when scroll position saving is implemented
+- Banner/notification for incoming messages while app is in foreground
+- Offline indicator (show when server is unreachable / WS disconnected)
+- Persist message history locally (currently messages are only in memory)
+- Account switcher UI for multi-account support
+- My QR Code screen uses `accounts.first` — should use the active/selected account once multi-account is implemented
+
+## Privacy / identity
+- PLC directory privacy: the DID document currently includes the homeserver URL as a service endpoint, which means anyone can resolve a DID and learn which server a user is on. For small servers this effectively leaks group membership. Consider removing the homeserver URL from the PLC document entirely and relying on out-of-band discovery (invite links, contact exchange). The PLC document would only contain the identity key for verification.
+- DID update operation for key rotation after recovery (submit new signing key to PLC directory, signed by rotation key)
+- Re-encrypt and re-upload recovery blob to all servers when joining a new server (update server list)
+- Cache recovery derived key in Secure Enclave so re-encryption doesn't require re-prompting passkey/phrase
+- Consider whether we want to bother moving the persisted account list out of UserDefaults into a Secure-Enclave-keyed SQLCipher `manifest.db`. Today the list of accounts (own DID, display name, server URLs, db filename) lives in UserDefaults, which is encrypted at rest by the device data-protection class but not by a user-controlled key. An attacker pulling the iOS sandbox snapshot gets the list of homeservers the user is on plus their own DIDs — enough to link the device to specific orgs. The contact graph and message history are not exposed (they're inside the SQLCipher per-account DBs) so it's maybe not that important. A small manifest DB keyed from the Secure Enclave (same approach as the per-account DBs) could list the other DBs while closing this particular loophole.
+- Contact list backup: we're interested in persisting the user's contacts separately from their identity keys, in hopes that if they lose identity keys at least they can reestablish contact with the people they were previously communicating with under a new ID. The contacts aren't that sensitive, but the tricky bit is that each of your contact is attached to one of your own identities and we don't want to mix them up. You might also want to be able to manually export your contacts list in some standard format that can be processed by other apps too.
 
 ## Android app
 
@@ -68,14 +86,14 @@ The iOS app (`mobile/ios/`) is the reference implementation. The Android app (Ko
 - [ ] `MockServiceTest.kt` — verify `MockAppCore.receiveMessagesWs()` delivers echo reply after ≥1.5 s
 - [ ] Cross-platform interop test: iOS sends encrypted DM, Android decrypts it against a real test homeserver (add to `core/crates/app-core/tests/`)
 ## Crypto / protocol
-- DB encryption key from Secure Enclave instead of hardcoded "dev-placeholder-key"
+- Stale device detection: when a device re-registers (new identity key, new prekeys), the server should reject messages sent to the old device state. `POST /v1/messages` should check that the sender's session is compatible with the recipient's current registration (e.g., compare `registration_id`). On rejection, the sender's client should fetch the new prekey bundle and re-establish the session. Without this, messages encrypted to old keys are silently undeliverable after a key reset.
 
 ## Server
 - WebSocket request/response framing: tunnel HTTP-style request/response pairs over the WebSocket (like Signal does), with request IDs and correlated responses. Move message sends and acks onto the WS transport, replacing the current split of HTTP sends + WS acks. This gives persistent-connection benefits while keeping clear success/failure semantics per operation.
 - Timer change sync message: add a `TimerChangeMessage` body variant to the ContentMessage protobuf so that when a user changes the conversation expiry timer, a control message is sent to the other participant(s) to update their local setting
 
 ## Project-wide
-- Settle on a better name: rename repo, update bundle IDs, update `actnet://` URL scheme to match, update all references in code and docs
+- Mass rename: rename repo, update bundle IDs, update all remaining `actnet` references in code and docs to `avalanche`
 
 ## Big milestones (not yet started)
 - Groups: action-bound (zkgroup) and cross-server casual (Sender Keys)
@@ -87,6 +105,10 @@ The iOS app (`mobile/ios/`) is the reference implementation. The Android app (Ko
 - Calls: voice and video (VoIP)
 - Public profiles: client-owned profile blobs (display name, avatar, bio) pushed to servers
 - Multi-account support in mobile app
+
+## Mesh Fallback / BitChat protocol (optional — implement only after core features are stable)
+
+See `docs/32-bitchat-fallback.md` for the full design. BLE mesh transport as a fallback when the homeserver is unreachable.
 
 ## Push Notifications
 
@@ -129,6 +151,7 @@ Defer until the Android app reaches a stable milestone.
 - [ ] Handle per-OS secure storage: macOS Keychain, Windows Credential Manager, Linux Secret Service / `libsecret`
 - [ ] Handle per-OS notification APIs: macOS `UserNotifications`, Windows `Windows.UI.Notifications`, Linux `libnotify`
 - [ ] Handle per-OS deep link / URL scheme registration for `actnet://`
+
 ## Push Notifications (remaining work)
 - Android client: FCM token registration, pseudonym lifecycle, wakeup handling
 - Relay: real APNs sending via `a2` crate (env vars: APNS_KEY_PATH, APNS_KEY_ID, APNS_TEAM_ID, APNS_BUNDLE_ID)

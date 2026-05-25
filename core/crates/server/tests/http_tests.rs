@@ -36,11 +36,17 @@ async fn test_state() -> AppState {
         project_token_lifetime_secs: 3600,
         projects_json: "[]".into(),
         relay_url: None,
+        server_name: "Test".into(),
+        invite_domain: "go.example.test".into(),
     };
     AppState::new(pool, config)
 }
 
 /// Register a dummy account and return the parsed response body.
+///
+/// Registers as a bot so the server generates a local DID and skips the
+/// PLC-directory verification + identity-key-signature checks. The auth tests
+/// that consume this helper exercise endpoints that are bot/human-agnostic.
 async fn register_dummy(app: &axum::Router) -> Value {
     let body = serde_json::json!({
         "identity_key":     BASE64_STANDARD.encode([1u8; 32]),
@@ -56,7 +62,8 @@ async fn register_dummy(app: &axum::Router) -> Value {
             "id":         1,
             "public_key": BASE64_STANDARD.encode([5u8; 32]),
             "signature":  BASE64_STANDARD.encode([6u8; 64]),
-        }
+        },
+        "is_bot": true,
     });
 
     let resp = app
@@ -103,7 +110,7 @@ async fn resolve_did_returns_document() {
 
     assert_eq!(doc["id"], did);
     assert_eq!(doc["verificationMethod"][0]["controller"], did);
-    assert_eq!(doc["service"][0]["type"], "ActnetHomeserver");
+    assert_eq!(doc["service"][0]["type"], "AvalancheHomeserver");
     assert_eq!(doc["service"][0]["serviceEndpoint"], "http://localhost:3000");
 }
 
@@ -136,6 +143,8 @@ async fn register_with_keypair(
     let keypair = signal::IdentityKeyPair::generate(&mut rand::rngs::OsRng.unwrap_err());
     let identity_key_b64 = BASE64_STANDARD.encode(keypair.identity_key().serialize());
 
+    // Bot path: server generates a local DID and skips PLC verification, so the
+    // test can focus on the challenge-response flow.
     let body = serde_json::json!({
         "identity_key":    identity_key_b64,
         "registration_id": 1,
@@ -143,6 +152,7 @@ async fn register_with_keypair(
         "signed_prekey":   { "id": 1, "public_key": BASE64_STANDARD.encode([2u8; 32]), "signature": BASE64_STANDARD.encode([3u8; 64]) },
         "one_time_prekeys":[{ "id": 1, "public_key": BASE64_STANDARD.encode([4u8; 32]) }],
         "kyber_prekey":    { "id": 1, "public_key": BASE64_STANDARD.encode([5u8; 32]), "signature": BASE64_STANDARD.encode([6u8; 64]) },
+        "is_bot": true,
     });
 
     let resp = app

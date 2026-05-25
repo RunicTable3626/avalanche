@@ -61,6 +61,7 @@ impl Client {
     /// Register a new account. Returns DID and session token.
     pub async fn register(&self, req: &RegisterRequest) -> Result<RegisterResponse, NetError> {
         let body = serde_json::json!({
+            "did": req.did,
             "identity_key": BASE64_STANDARD.encode(&req.identity_key),
             "registration_id": req.registration_id,
             "device_id": req.device_id,
@@ -79,11 +80,29 @@ impl Client {
             },
             "display_name": req.display_name,
             "is_bot": req.is_bot,
+            "recovery_blob": req.recovery_blob.as_ref().map(|b| BASE64_STANDARD.encode(b)),
+            "encrypted_profile": req.encrypted_profile.as_ref().map(|b| BASE64_STANDARD.encode(b)),
+            "identity_key_signature": req.identity_key_signature,
         });
 
         let resp = self.http
             .post(format!("{}/v1/accounts", self.server_url))
             .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+
+        Ok(resp.json().await?)
+    }
+
+    /// Validate an invite token against the server.
+    pub async fn validate_invite(&self, token: &str) -> Result<InviteValidationResponse, NetError> {
+        let resp = self.http
+            .get(format!("{}/v1/invites/{}", self.server_url, token))
             .send()
             .await?;
 
@@ -371,6 +390,27 @@ impl Client {
         Ok(resp.json().await?)
     }
 
+    /// List the active device_ids for an account. Used by senders to fan-out
+    /// encrypted message envelopes across all of a recipient's devices.
+    pub async fn fetch_devices(&self, did: &str) -> Result<Vec<i32>, NetError> {
+        let resp = self
+            .authed_request(reqwest::Method::GET, &format!("/v1/accounts/{}/devices", did))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            device_ids: Vec<i32>,
+        }
+        let body: Resp = resp.json().await?;
+        Ok(body.device_ids)
+    }
+
     // ── DID ──────────────────────────────────────────────────────────────
 
     /// Resolve a DID document (public, no auth needed).
@@ -386,6 +426,133 @@ impl Client {
         }
 
         Ok(resp.json().await?)
+    }
+
+    // ── Recovery ─────────────────────────────────────────────────────────
+
+    /// Download the encrypted recovery blob and the account's current
+    /// device list (unauthenticated). The device list is needed during
+    /// recovery to target the existing device for replacement; bundling it
+    /// with the blob avoids an extra authenticated round-trip.
+    pub async fn get_recovery_blob(&self, did: &str) -> Result<crate::types::RecoveryBundle, NetError> {
+        let resp = self.http
+            .get(format!("{}/v1/recovery/{}", self.server_url, did))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+
+        let body: RecoveryBlobResponse = resp.json().await?;
+        let blob = BASE64_STANDARD
+            .decode(&body.recovery_blob)
+            .map_err(|e| NetError::Base64(e.to_string()))?;
+        Ok(crate::types::RecoveryBundle {
+            blob,
+            device_ids: body.device_ids,
+        })
+    }
+
+    /// Update the encrypted recovery blob (authenticated).
+    pub async fn update_recovery_blob(&self, blob: &[u8]) -> Result<(), NetError> {
+        let resp = self.authed_request(reqwest::Method::PUT, "/v1/recovery")
+            .json(&serde_json::json!({
+                "recovery_blob": BASE64_STANDARD.encode(blob),
+            }))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(NetError::Server(resp.status().as_u16(), resp.text().await.unwrap_or_default()));
+        }
+
+        Ok(())
+    }
+
+    /// Replace a device (authenticated by rotation key signature, not session token).
+    pub async fn replace_device(&self, req: &ReplaceDeviceRequest) -> Result<ReplaceDeviceResponse, NetError> {
+        let body = serde_json::json!({
+            "did": req.did,
+            "old_device_id": req.old_device_id,
+            "new_device_id": req.new_device_id,
+            "new_identity_key": BASE64_STANDARD.encode(&req.new_identity_key),
+            "new_registration_id": req.new_registration_id,
+            "nonce": req.nonce,
+            "rotation_key_signature": BASE64_STANDARD.encode(&req.rotation_key_signature),
+            "rotation_key": BASE64_STANDARD.encode(&req.rotation_key),
+            "signed_prekey": {
+                "id": req.signed_prekey_id,
+                "public_key": BASE64_STANDARD.encode(&req.signed_prekey_public),
+                "signature": BASE64_STANDARD.encode(&req.signed_prekey_signature),
+            },
+            "one_time_prekeys": req.one_time_prekeys.iter().map(|(id, pk)| {
+                serde_json::json!({"id": id, "public_key": BASE64_STANDARD.encode(pk)})
+            }).collect::<Vec<_>>(),
+            "kyber_prekey": {
+                "id": req.kyber_prekey_id,
+                "public_key": BASE64_STANDARD.encode(&req.kyber_prekey_public),
+                "signature": BASE64_STANDARD.encode(&req.kyber_prekey_signature),
+            },
+            "recovery_blob": req.recovery_blob.as_ref().map(|b| BASE64_STANDARD.encode(b)),
+        });
+
+        let resp = self.http
+            .post(format!("{}/v1/devices/replace", self.server_url))
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+
+        Ok(resp.json().await?)
+    }
+
+    // ── Profile ──────────────────────────────────────────────────────────
+
+    /// Upload the caller's encrypted profile blob.
+    pub async fn put_profile(&self, encrypted_blob: &[u8]) -> Result<(), NetError> {
+        let resp = self.authed_request(reqwest::Method::PUT, "/v1/profile")
+            .json(&serde_json::json!({
+                "encrypted_blob": BASE64_STANDARD.encode(encrypted_blob),
+            }))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(NetError::Server(resp.status().as_u16(), resp.text().await.unwrap_or_default()));
+        }
+        Ok(())
+    }
+
+    /// Fetch a contact's encrypted profile blob. Returns `Ok(None)` on 404
+    /// (which is returned identically whether the DID is unknown or simply
+    /// has no profile, so callers can't distinguish those cases).
+    pub async fn get_profile(&self, did: &str) -> Result<Option<Vec<u8>>, NetError> {
+        let resp = self
+            .authed_request(reqwest::Method::GET, &format!("/v1/profile/{}", did))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct R { encrypted_blob: String }
+        let body: R = resp.json().await?;
+        let blob = BASE64_STANDARD
+            .decode(&body.encrypted_blob)
+            .map_err(|e| NetError::Base64(e.to_string()))?;
+        Ok(Some(blob))
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────

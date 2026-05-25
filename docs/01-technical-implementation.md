@@ -46,7 +46,7 @@ core/
     │
     ├── crypto/         # libsignal wrappers. X3DH key generation and session
     │                   # initialization, Double Ratchet encrypt/decrypt, zkgroup
-    │                   # anonymous credentials (Stage 4), Ed25519 signing for
+    │                   # anonymous credentials (Stage 5), Ed25519 signing for
     │                   # federation (Stage 9). Pure logic — no I/O. Testable
     │                   # without a database or network.
     │
@@ -70,7 +70,7 @@ core/
     ├── server/         # The homeserver binary. Axum + Tokio, PostgreSQL via
     │                   # sqlx. Grows across stages: account registration and
     │                   # message relay (Stage 2), zkgroup credential issuance
-    │                   # (Stage 4), Project registration and scope enforcement
+    │                   # (Stage 5), Project registration and scope enforcement
     │                   # (Stage 6), WebRTC signaling (Stage 8), federation relay
     │                   # via the federation crate (Stage 9).
     │
@@ -393,7 +393,7 @@ This scheme is efficient (encrypt once, not once per recipient) and does not req
 
 The tradeoff vs. MLS (RFC 9420): MLS provides stronger forward secrecy guarantees for large groups and more efficient member add/remove at scale, but it is significantly more complex to implement and its benefit is marginal for groups under 50 members. If real usage shows demand for larger cross-server groups, MLS can be adopted later without changing the substrate's external API — it would be a change inside the `crypto` crate's `groups` module.
 
-The `crypto` crate's `groups` module (currently stubbed for Stage 4 zkgroup) will grow a `sender_keys` sub-module in Stage 9. The interface is designed now so that `app-core` doesn't need to know which encryption scheme a group uses — it calls `groups::encrypt` / `groups::decrypt` and the module dispatches based on group type.
+The `crypto` crate's `groups` module (currently stubbed for Stage 5 zkgroup) will grow a `sender_keys` sub-module in Stage 9. The interface is designed now so that `app-core` doesn't need to know which encryption scheme a group uses — it calls `groups::encrypt` / `groups::decrypt` and the module dispatches based on group type.
 
 ---
 
@@ -413,65 +413,50 @@ Each stage produces a testable, shippable increment. Later stages depend on earl
 
 ---
 
-### Stage 1 — Rust cryptographic core
+### Stage 1 — Rust cryptographic core ✅
 
-**What gets built:**
+**Status: Complete.**
 
-- Cargo workspace skeleton: separate crates for `crypto`, `store`, `net`, `server`, `relay`, and `app-core` (the UniFFI boundary crate)
-- libsignal integration: X3DH prekey generation and key-bundle construction; Double Ratchet session initialization and message encrypt/decrypt
-- SQLCipher-backed local store: schema for sessions, prekey material, and message queue; key derived from a placeholder secret (real secure-enclave integration comes in Stage 3)
-- UniFFI interface definitions for the functions mobile UI will need; stub bindings generated but not yet wired to a real UI
-
-**Why first:** Everything else in the system is downstream of correct crypto. Getting this isolated, tested, and reviewed before connecting it to a server or UI eliminates an entire class of integration bugs.
-
-**Testing:**
-- Unit tests in `crypto` crate covering encrypt → decrypt round-trips, ratchet advancement, and prekey consumption
-- Property-based tests (using `proptest`) on session state: any sequence of sends and receives should leave the session in a consistent state
-- All tests run in CI with `cargo-nextest`; `cargo audit` blocks on any advisory
+Built: Cargo workspace with `crypto`, `store`, `net`, `server`, `relay`, `app-core` crates. libsignal integration (X3DH, Double Ratchet, signed/one-time/Kyber prekeys). SQLCipher local store. UniFFI bindings. Protobuf message envelope (`ContentMessage` with `TextMessage` and `ReceiptMessage` body variants).
 
 ---
 
-### Stage 2 — Homeserver MVP
+### Stage 2 — Homeserver MVP ✅
 
-**What gets built:**
+**Status: Complete.**
 
-- PostgreSQL schema: accounts, DID registrations, prekey bundles, encrypted message queue, device sessions, push pseudonyms (stub only), rate-limit counters
-- Axum HTTP server: account registration, device auth (session token issuance), prekey upload and fetch, message send (store-and-forward), WebSocket endpoint for real-time delivery
-- Background task: expire queued messages and session tokens; vacuum prekeys below refill threshold
-- `did:plc` stub: local DID creation and document storage (no PLC directory interaction yet — full DID portability is a federation-stage concern)
-- Docker Compose file: homeserver + PostgreSQL for local development
-
-**Why second:** The homeserver is the counterpart the crypto core needs to be useful. Having both lets us test a full end-to-end message path — encrypt on one device, relay through the server, decrypt on another — before writing any UI.
-
-**Testing:**
-- Integration tests: spin up a real Postgres instance (via `testcontainers-rs`), run account registration, prekey exchange, and a message round-trip
-- sqlx compile-time query checks catch schema/query mismatches at build time
-- HTTP endpoint fuzz testing with `cargo-fuzz` on the message ingestion path
-- Load test: simulate 1,000 concurrent WebSocket connections, verify no memory growth or dropped messages
+Built: PostgreSQL schema and Axum server with account registration, challenge-response auth, prekey management, message relay, WebSocket delivery, DID document storage, message expiry, rate limiting, Projects API, push pseudonym registration. Docker Compose for local dev.
 
 ---
 
-### Stage 3 — Mobile apps: 1:1 encrypted DMs
+### Stage 3 — Mobile app + identity ✅
 
-**What gets built:**
+**Status: Complete.**
 
-- iOS (Swift/SwiftUI) and Android (Kotlin/Jetpack Compose) app shells wired to the Rust core via UniFFI
-- Secure key storage: SQLCipher database key held in iOS Secure Enclave / Android Keystore
-- Account creation and onboarding: generate DID, generate prekeys, register with homeserver, display recovery key
-- **Chats tab:** unified conversation list sorted by recency with unread indicators; 1:1 DM conversation view (text, images, files); message send/receive over WebSocket with offline queue drain on reconnect
-- Placeholder **Calls** and **Network** tabs (visible but empty)
-- Basic push notification wakeup: app wakes on ping and fetches new messages (push relay not yet live; development uses polling as a stand-in)
-
-**Why third:** This is the first thing a real user can interact with. Getting Signal-quality 1:1 DMs on both platforms is the acceptance criterion for the first user-facing milestone.
-
-**Testing:**
-- XCTest (iOS) and Espresso (Android) UI tests covering the account creation flow and message send/receive
-- Cross-platform interop test: iOS device sends an encrypted message, Android device decrypts it correctly, and vice versa — run against a real test homeserver in CI
-- Manual: dog-food the app internally for day-to-day team communication starting here
+Built: iOS app (SwiftUI) with UniFFI bindings to Rust core. Account creation with `did:plc` genesis operations submitted to PLC directory. Passkey-based recovery (WebAuthn + PRF extension for symmetric key derivation, encrypted recovery blob). Server-side device replacement endpoint. Challenge-response login. 1:1 encrypted DMs over WebSocket. Read receipts and delivery receipts. Message history (local SQLCipher). Chats, Calls (placeholder), and Network tabs. Testbot Project. Android not yet started.
 
 ---
 
-### Stage 4 — Action-bound groups
+### Stage 4 — Ship it: invite flow, notifications, deployment
+
+**What gets built:**
+
+- **Invite links:** QR code / shareable link flow for single-server discovery. Scan or tap a link → install app (or open it) → land on the server with the inviter as a contact. Links use `https://go.theavalanche.net/invite/<server>/<token>` Universal Links.
+- **Notifications:** Local notifications when a message arrives while the app is backgrounded. APNs integration via the push relay for wakeups when the app is killed. Content-free payloads only — the relay sees pseudonyms, not user identities.
+- **Homeserver deployment:** Production homeserver on real infrastructure. TLS, backups, monitoring. Server admin tooling for generating invite tokens.
+- **App Store submission:** Provisioning, review, TestFlight → public release. Bundle ID `net.theavalanche.app`, team `7FVK3RR3TV`.
+- **Polish:** Offline indicator, incoming message banner while app is in foreground, persistent message history across app restarts, display names shown in conversation list and messages, basic error handling for network failures.
+
+**Why now:** The crypto and protocol layers are solid. The app needs to be usable by real people — that means they need to find each other, get notified, and install from the App Store. Everything else (groups, projects, federation) can wait until there are real users sending real messages.
+
+**Acceptance criteria:**
+- A new user can scan a QR code, install from the App Store, create an account, and DM the person who invited them
+- Messages arrive as notifications when the app is backgrounded
+- The homeserver stays up under normal usage with monitoring/alerting
+
+---
+
+### Stage 5 — Action-bound groups
 
 **What gets built:**
 
@@ -481,32 +466,13 @@ Each stage produces a testable, shippable increment. Later stages depend on earl
 - **Message expiry:** timer stored in encrypted group state; clients delete on schedule; homeserver deletes its copy on the same schedule; timer cannot be extended by the server
 - Announcement-only mode: enforced at the protocol level so non-admin members cannot post
 
-**Why fourth:** Action-bound groups are the primary organizing primitive. They need the crypto foundation from Stage 1 and the server/mobile layers from Stages 2–3. Message expiry ships here, not later — retrofitting it is much harder than building it in from the start.
+**Why fifth:** Action-bound groups are the primary organizing primitive. They need real users on a deployed system to be useful and testable. Message expiry ships here, not later — retrofitting it is much harder than building it in from the start.
 
 **Testing:**
 - Multi-client integration test: 20 simulated clients join a group, exchange messages, verify each client decrypts correctly, and that no client can impersonate another (sealed sender)
 - Expiry test: set a 10-second timer, verify server and clients both delete on schedule; verify the server cannot re-serve a deleted message
 - Credential verification test: a client with a tampered credential is rejected by the server
 - Announcement-only test: non-admin send attempt is rejected at the protocol level
-
----
-
-### Stage 5 — Push notifications
-
-**What gets built:**
-
-- Push relay: standalone Rust service with a single table mapping `(pseudonym) → (device_token, platform)`; exposes two endpoints — one for clients to register a pseudonym, one for homeservers to send a wakeup
-- APNs and FCM integration in the relay: sends a content-free wakeup (no subject, no body) on receipt of a homeserver ping
-- Pseudonym rotation: clients rotate their pseudonym periodically (default: weekly); old pseudonym is valid for a grace period then deleted
-- Homeserver integration: on message delivery, fire a push ping to the relay for each recipient device not currently on a live WebSocket
-
-**Why fifth:** Push is required for the app to be practically usable (no one polls for messages). It's decoupled enough from groups and crypto that it can wait until basic messaging is stable, but it should land before federation so the relay design can be validated at single-server scale first.
-
-**Testing:**
-- Unit tests: relay correctly maps pseudonyms, rejects unknown pseudonyms, and rotates gracefully
-- Integration test with APNs/FCM sandbox: send a wakeup, verify the device receives it and the payload contains no user-identifiable content
-- Privacy test: confirm the relay's access log contains only pseudonyms and timestamps — no homeserver identity, no content
-- Rotation test: old pseudonym stops receiving after the grace period; new pseudonym receives correctly
 
 ---
 
@@ -517,7 +483,7 @@ Each stage produces a testable, shippable increment. Later stages depend on earl
 - Project registration API on the homeserver: a Project declares its scopes (e.g., "read availability for users in this group," "send push to RSVP'd attendees") and receives a Project identity
 - User-facing permission grant flow: when a user is added to a Project-managed group or opens a Project for the first time, the app presents the requested scopes for approval
 - Bot first-class support: bots are created as Project-owned accounts with their own keys; they join groups as normal members; their presence is visible to all group members
-- Project deep links: `actnet://project/<server>/<project-id>/<path>` scheme registered on iOS and Android; links open the correct Project view or navigate into a chat
+- Project deep links: `https://go.theavalanche.net/project/<server>/<project-id>/<path>` Universal Links registered on iOS and Android; links open the correct Project view or navigate into a chat
 - **Network tab** in the app: hierarchical list of servers → Projects; tap a Project to open its full-screen view
 - Project host SDK (Rust crate + documentation): the interface Project developers use to interact with the substrate
 
@@ -526,7 +492,7 @@ Each stage produces a testable, shippable increment. Later stages depend on earl
 **Testing:**
 - Scope enforcement test: a Project attempts an operation outside its granted scopes; the server rejects it
 - Bot visibility test: all group members can enumerate bots in their group; a bot cannot hide its presence
-- Deep link test: tapping an `actnet://` link from outside the app opens the correct view on both platforms
+- Deep link test: tapping a `https://go.theavalanche.net/` link from outside the app opens the correct view on both platforms
 - SDK smoke test: a minimal "hello world" Project (a bot that echoes messages) is built against the SDK and run against a test homeserver
 
 ---
@@ -601,6 +567,7 @@ Observer bots in action-bound groups surface high-engagement moments to an organ
 - Cross-server casual groups: ad-hoc encrypted group chats spanning homeservers (peer-managed, no Project required)
 - Guest participation in action-bound groups: homeserver A issues a guest credential for a user, homeserver B's Project accepts it and grants scoped access
 - Selective federation: homeserver admins configure an allowlist of servers they federate with
+- Client-side DID verification on session init: when establishing a Signal session with a user on a remote server, the client resolves the sender's DID against the PLC directory to verify the identity key in the prekey bundle matches. One-time check per contact, not per message — the server can't do this since it has no concept of Signal sessions
 
 **Why ninth:** Federation is a meaningful differentiator for resilience and multi-org organizing, but the system is fully usable without it. Every first-party Project works on a single homeserver. Deferring federation means the complexity of cross-server delivery, DID portability, and guest credentials doesn't slow down the path to a working, deployable product. It also means the federation design can be informed by real usage patterns from the single-server deployment rather than guessed at upfront.
 
@@ -635,15 +602,15 @@ This stage runs in parallel with Stages 7–9 and extends after them.
 
 ### Summary table
 
-| Stage | Deliverable | Key acceptance criterion |
+| Stage | Deliverable | Status |
 |---|---|---|
-| 1 | Rust crypto core | Encrypt → decrypt round-trip passes; ratchet property tests pass |
-| 2 | Homeserver MVP | 1,000 concurrent WebSocket connections; message round-trip under load |
-| 3 | Mobile: 1:1 DMs | iOS ↔ Android interop test passes; dog-food begins |
-| 4 | Action-bound groups | 20-client group test; expiry verified server- and client-side |
-| 5 | Push notifications | Content-free wakeup confirmed; relay log contains no user identity |
-| 6 | Project framework | Scope enforcement; bot visibility; deep links |
-| 7 | First-party Projects | Each Project's acceptance tests (see above) |
-| 8 | Calls | SFU blindness verified; group call E2E encryption confirmed |
-| 9 | Federation | Cross-server DM round-trip; fault injection passes |
-| 10 | Hardening + audit | Audit report published; reproducible builds verified; red team exercises pass |
+| 1 | Rust crypto core | ✅ Complete |
+| 2 | Homeserver MVP | ✅ Complete |
+| 3 | Mobile app + identity | ✅ Complete |
+| 4 | Ship it: invites, notifications, deployment | **Next** |
+| 5 | Action-bound groups | |
+| 6 | Project framework | |
+| 7 | First-party Projects | |
+| 8 | Calls | |
+| 9 | Federation | |
+| 10 | Hardening + audit | |

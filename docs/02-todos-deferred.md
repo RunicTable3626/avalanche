@@ -83,8 +83,8 @@ The iOS app (`mobile/ios/`) is the reference implementation. The Android app (Ko
 - [ ] FCM service stub for when push notifications are implemented
 
 ### Testing
-- [ ] `MockServiceTest.kt` — verify `MockAppCore.receiveMessagesWs()` delivers echo reply after ≥1.5 s
-- [ ] Cross-platform interop test: iOS sends encrypted DM, Android decrypts it against a real test homeserver (add to `core/crates/app-core/tests/`)
+- [x] `MockServiceTest.kt` — verify `MockAppCore.receiveMessagesWs()` delivers echo reply after ≥1.5 s
+- [x] Cross-platform interop test: iOS sends encrypted DM, Android decrypts it against a real test homeserver (add to `core/crates/app-core/tests/`)
 ## Crypto / protocol
 - Stale device detection: when a device re-registers (new identity key, new prekeys), the server should reject messages sent to the old device state. `POST /v1/messages` should check that the sender's session is compatible with the recipient's current registration (e.g., compare `registration_id`). On rejection, the sender's client should fetch the new prekey bundle and re-establish the session. Without this, messages encrypted to old keys are silently undeliverable after a key reset.
 

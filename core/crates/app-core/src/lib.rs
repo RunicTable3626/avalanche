@@ -83,6 +83,15 @@ pub struct StoredMessageFfi {
     pub delivery_status: u8,
 }
 
+/// A conversation summary used to build the chat list on startup: one row
+/// per conversation that has at least one persisted message, with the most
+/// recent message attached.
+#[derive(uniffi::Record)]
+pub struct ConversationSummaryFfi {
+    pub conversation_id: String,
+    pub last_message: StoredMessageFfi,
+}
+
 /// A delivery status update for an outgoing message (e.g. read receipt received).
 #[derive(uniffi::Record, Clone)]
 pub struct DeliveryStatusUpdate {
@@ -321,6 +330,31 @@ impl AppCore {
                 edited_at_ms: m.edited_at.map(|t| t.as_millis()),
                 read_at_ms: m.read_at.map(|t| t.as_millis()),
                 delivery_status: m.delivery_status,
+            }).collect())
+        }).map_err(AppErrorFfi::from)
+    }
+
+    /// Enumerate every conversation that has at least one persisted message,
+    /// with that conversation's most recent message attached. One row per
+    /// conversation, sorted newest-first. The mobile chat list is derived
+    /// directly from this — no parallel persistence in UserDefaults.
+    pub fn load_conversations(&self) -> Result<Vec<ConversationSummaryFfi>, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            let rows = inner.store.load_conversations().await
+                .map_err(AppError::from)?;
+            Ok::<_, AppError>(rows.into_iter().map(|c| ConversationSummaryFfi {
+                conversation_id: c.conversation_id,
+                last_message: StoredMessageFfi {
+                    id: c.last_message.id,
+                    conversation_id: c.last_message.conversation_id,
+                    sender_did: c.last_message.sender_did,
+                    body: c.last_message.body,
+                    sent_at_ms: c.last_message.sent_at.as_millis(),
+                    edited_at_ms: c.last_message.edited_at.map(|t| t.as_millis()),
+                    read_at_ms: c.last_message.read_at.map(|t| t.as_millis()),
+                    delivery_status: c.last_message.delivery_status,
+                },
             }).collect())
         }).map_err(AppErrorFfi::from)
     }

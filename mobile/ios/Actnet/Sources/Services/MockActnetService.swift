@@ -63,6 +63,17 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         return msgs.max(by: { $0.sentAtMs < $1.sentAtMs })
     }
 
+    func loadConversations() throws -> [ConversationSummaryFfi] {
+        lock.lock()
+        let snapshot = storedMessages
+        lock.unlock()
+        return snapshot.compactMap { (convId, msgs) -> ConversationSummaryFfi? in
+            guard let last = msgs.max(by: { $0.sentAtMs < $1.sentAtMs }) else { return nil }
+            return ConversationSummaryFfi(conversationId: convId, lastMessage: last)
+        }
+        .sorted { $0.lastMessage.sentAtMs > $1.lastMessage.sentAtMs }
+    }
+
     func markMessagesRead(conversationId: String, upToSentAtMs: Int64) throws -> UInt64 {
         lock.lock()
         defer { lock.unlock() }

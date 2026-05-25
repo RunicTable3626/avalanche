@@ -77,6 +77,38 @@ async fn own_profile_round_trip() {
 }
 
 #[tokio::test]
+async fn load_conversations_one_row_per_convo_newest_first() {
+    use store::messages::HistoryMessage;
+    use types::Timestamp;
+    let store = Store::open_in_memory().await.unwrap();
+
+    // Two messages in convA (newest at t=1000), one in convB (t=500).
+    for (id, conv, sent_at, body) in [
+        ("a1", "convA", 100i64, "older A"),
+        ("a2", "convA", 1000i64, "newest A"),
+        ("b1", "convB", 500i64, "only B"),
+    ] {
+        store.save_message(&HistoryMessage {
+            id: id.into(),
+            conversation_id: conv.into(),
+            sender_did: "did:plc:bob".into(),
+            body: body.into(),
+            sent_at: Timestamp(sent_at),
+            edited_at: None,
+            read_at: None,
+            delivery_status: 1,
+        }).await.unwrap();
+    }
+
+    let convs = store.load_conversations().await.unwrap();
+    assert_eq!(convs.len(), 2, "one row per distinct conversation_id");
+    assert_eq!(convs[0].conversation_id, "convA");
+    assert_eq!(convs[0].last_message.body, "newest A");
+    assert_eq!(convs[1].conversation_id, "convB");
+    assert_eq!(convs[1].last_message.body, "only B");
+}
+
+#[tokio::test]
 async fn contact_profile_cache() {
     use types::Timestamp;
     let store = Store::open_in_memory().await.unwrap();

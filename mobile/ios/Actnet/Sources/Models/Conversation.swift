@@ -1,6 +1,12 @@
 import Foundation
 
-struct Conversation: Identifiable, Codable, Hashable {
+/// In-memory view of a conversation as the chat list sees it.
+///
+/// The persistent source of truth is `message_history` in SQLCipher; this
+/// struct is rebuilt from `AppCore.loadConversations()` on startup and kept
+/// in sync from in-session message activity. Nothing in this struct is
+/// persisted to UserDefaults — plaintext bodies and DIDs would leak there.
+struct Conversation: Identifiable, Hashable {
     let id: String
     var title: String
     let accountId: String  // which DID this conversation belongs to
@@ -9,11 +15,4 @@ struct Conversation: Identifiable, Codable, Hashable {
     var lastMessage: String?
     var lastMessageDate: Date?
     var isGroup: Bool = false
-
-    // Exclude lastMessage (plaintext) from UserDefaults persistence.
-    // Timestamps are non-sensitive metadata, safe to persist.
-    private enum CodingKeys: String, CodingKey {
-        case id, title, accountId, serverUrl, recipientDid, isGroup
-        case lastMessageDate
-    }
 }

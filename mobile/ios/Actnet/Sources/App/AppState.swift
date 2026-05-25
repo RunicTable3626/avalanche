@@ -52,7 +52,6 @@ final class AppState: ObservableObject {
 
     private static let serviceModeKey = "serviceMode"
     private static let accountsKey = "persistedAccounts"
-    private static let conversationsKey = "persistedConversations"
 
 
     init(mode: ServiceMode? = nil) {
@@ -188,18 +187,11 @@ final class AppState: ObservableObject {
                     ))
                 }
             } else {
-                conversations = Self.loadPersistedConversations()
-                // Resolve display names for conversations that still show raw DIDs.
-                for conv in conversations {
-                    if let did = conv.recipientDid, conv.title == did {
-                        _ = displayName(for: did, accountId: conv.accountId)
-                    }
-                }
-                // Rehydrate last-message previews from SQLCipher. Plaintext is
-                // deliberately excluded from UserDefaults persistence (it's not
-                // encrypted at rest), so on restart `conversation.lastMessage`
-                // is nil until we pull the most recent body from the store.
-                rehydrateLastMessages()
+                // Conversation list is derived from message_history in
+                // SQLCipher — no parallel UserDefaults state. One indexed
+                // query per account returns every conversation with at least
+                // one persisted message, already sorted newest-first.
+                await loadConversationsFromStore()
             }
 
             startMessagePolling()
@@ -217,7 +209,6 @@ final class AppState: ObservableObject {
         displayNameCache.removeAll()
         displayNameInFlight.removeAll()
         Self.clearPersistedAccounts()
-        Self.clearPersistedConversations()
         isOnboarding = true
     }
 
@@ -236,7 +227,6 @@ final class AppState: ObservableObject {
         displayNameCache.removeAll()
         displayNameInFlight.removeAll()
         Self.clearPersistedAccounts()
-        Self.clearPersistedConversations()
         isOnboarding = true
     }
 
@@ -368,9 +358,7 @@ final class AppState: ObservableObject {
                 changed = true
             }
         }
-        if changed {
-            persistConversations()
-        }
+        _ = changed
     }
 
     /// Re-fetch a contact's encrypted profile from the homeserver and refresh
@@ -480,28 +468,63 @@ final class AppState: ObservableObject {
     }
 
     /// Load persisted messages from SQLCipher for a conversation.
-    /// On restart, populate `lastMessage` for every restored conversation by
-    /// reading the most recent persisted message from SQLCipher. Cheap — one
-    /// indexed `ORDER BY sent_at DESC LIMIT 1` per conversation.
-    private func rehydrateLastMessages() {
-        let convs = conversations.map { ($0.id, $0.accountId) }
-        Task.detached { [weak self] in
-            for (convId, accountId) in convs {
-                guard let core = await self?.cores[accountId] else { continue }
-                let last = try? core.loadLastMessage(conversationId: convId)
-                guard let last else { continue }
-                await MainActor.run {
-                    guard let self else { return }
-                    guard let idx = self.conversations.firstIndex(where: { $0.id == convId }) else { return }
-                    self.conversations[idx].lastMessage = last.body
-                    // Keep the existing lastMessageDate if it's already set (it
-                    // was persisted); fall back to the message's sent_at if not.
-                    if self.conversations[idx].lastMessageDate == nil {
-                        self.conversations[idx].lastMessageDate = Date(timeIntervalSince1970: TimeInterval(last.sentAtMs) / 1000.0)
-                    }
+    /// Derive the conversation list from each account's `message_history`
+    /// via a single indexed query. Sorted newest-first; titles are resolved
+    /// asynchronously through `displayName(for:accountId:)`.
+    ///
+    /// Conversation IDs follow the format `dm-<accountId>-<recipientDid>`.
+    private func loadConversationsFromStore() async {
+        let pairs: [(String, any AppCoreProtocol)] = accounts.compactMap { acct in
+            cores[acct.id].map { (acct.id, $0) }
+        }
+        let summariesPerAccount = await withTaskGroup(of: (String, [ConversationSummaryFfi]).self) { group in
+            for (accountId, core) in pairs {
+                group.addTask {
+                    let rows = (try? core.loadConversations()) ?? []
+                    return (accountId, rows)
                 }
             }
+            var out: [(String, [ConversationSummaryFfi])] = []
+            for await result in group { out.append(result) }
+            return out
         }
+
+        var newConvs: [Conversation] = []
+        for (accountId, summaries) in summariesPerAccount {
+            let serverUrl = accounts.first(where: { $0.id == accountId })?.servers.first?.id ?? ""
+            for s in summaries {
+                let recipientDid = Self.recipientDid(from: s.conversationId, accountId: accountId)
+                let title = recipientDid.flatMap { displayNameCache[$0] } ?? recipientDid ?? s.conversationId
+                newConvs.append(Conversation(
+                    id: s.conversationId,
+                    title: title,
+                    accountId: accountId,
+                    serverUrl: serverUrl,
+                    recipientDid: recipientDid,
+                    lastMessage: s.lastMessage.body,
+                    lastMessageDate: Date(timeIntervalSince1970: TimeInterval(s.lastMessage.sentAtMs) / 1000.0),
+                    isGroup: false
+                ))
+            }
+        }
+        conversations = newConvs.sorted {
+            ($0.lastMessageDate ?? .distantPast) > ($1.lastMessageDate ?? .distantPast)
+        }
+
+        // Kick off async name resolution for any conversation still showing the raw DID.
+        for conv in conversations {
+            if let did = conv.recipientDid, conv.title == did {
+                _ = displayName(for: did, accountId: conv.accountId)
+            }
+        }
+    }
+
+    /// Parse the recipient DID out of a conversation ID of the form
+    /// `dm-<accountDid>-<recipientDid>`. Returns nil for non-DM IDs.
+    private static func recipientDid(from conversationId: String, accountId: String) -> String? {
+        let prefix = "dm-\(accountId)-"
+        guard conversationId.hasPrefix(prefix) else { return nil }
+        return String(conversationId.dropFirst(prefix.count))
     }
 
     func loadMessagesFromStore(conversationId: String, accountId: String) {
@@ -550,7 +573,6 @@ final class AppState: ObservableObject {
             isGroup: false
         )
         conversations.append(conv)
-        persistConversations()
         return conv
     }
 
@@ -687,7 +709,6 @@ final class AppState: ObservableObject {
             deliveryStatus: .sent
         )
         messagesByConversation[convId, default: []].append(message)
-        persistConversations()
 
         // Persist to SQLCipher in the background.
         if let core = cores[accountId] {
@@ -754,20 +775,4 @@ final class AppState: ObservableObject {
         UserDefaults.standard.removeObject(forKey: accountsKey)
     }
 
-    // MARK: - Conversation persistence
-
-    private func persistConversations() {
-        if let data = try? JSONEncoder().encode(conversations) {
-            UserDefaults.standard.set(data, forKey: Self.conversationsKey)
-        }
-    }
-
-    private static func loadPersistedConversations() -> [Conversation] {
-        guard let data = UserDefaults.standard.data(forKey: conversationsKey) else { return [] }
-        return (try? JSONDecoder().decode([Conversation].self, from: data)) ?? []
-    }
-
-    private static func clearPersistedConversations() {
-        UserDefaults.standard.removeObject(forKey: conversationsKey)
-    }
 }

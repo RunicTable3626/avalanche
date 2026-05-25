@@ -1,7 +1,7 @@
 # Deferred TODOs
 
 ## Dev Infra
-- Make it super easy to launch Postgres, the main server & relevant Projects all at once in dev
+- Make simple makefile commands to build the entire ios -- currently we can build the Rust code, but I think it's worth having a command that runs xcodebuild, since Claude likes to run it to ensure its changes compile. In general we should make 'compile everything' commands at the root with a Makefile.
 
 ## Mobile app
 - Mobile app 'console': nerdly scrolling log which appears during long loads and debugging tools (currently everything is fast so maybe not needed)
@@ -21,6 +21,7 @@
 - DID update operation for key rotation after recovery (submit new signing key to PLC directory, signed by rotation key)
 - Re-encrypt and re-upload recovery blob to all servers when joining a new server (update server list)
 - Cache recovery derived key in Secure Enclave so re-encryption doesn't require re-prompting passkey/phrase
+- Consider whether we want to bother moving the persisted account list out of UserDefaults into a Secure-Enclave-keyed SQLCipher `manifest.db`. Today the list of accounts (own DID, display name, server URLs, db filename) lives in UserDefaults, which is encrypted at rest by the device data-protection class but not by a user-controlled key. An attacker pulling the iOS sandbox snapshot gets the list of homeservers the user is on plus their own DIDs — enough to link the device to specific orgs. The contact graph and message history are not exposed (they're inside the SQLCipher per-account DBs) so it's maybe not that important. A small manifest DB keyed from the Secure Enclave (same approach as the per-account DBs) could list the other DBs while closing this particular loophole.
 
 ## Crypto / protocol
 - Stale device detection: when a device re-registers (new identity key, new prekeys), the server should reject messages sent to the old device state. `POST /v1/messages` should check that the sender's session is compatible with the recipient's current registration (e.g., compare `registration_id`). On rejection, the sender's client should fetch the new prekey bundle and re-establish the session. Without this, messages encrypted to old keys are silently undeliverable after a key reset.

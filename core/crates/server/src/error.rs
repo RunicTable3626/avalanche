@@ -12,6 +12,14 @@
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StaleDeviceRef {
+    pub did: String,
+    pub device_id: i32,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -32,25 +40,36 @@ pub enum ServerError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("stale device")]
+    StaleDevice(Vec<StaleDeviceRef>),
 }
 
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            ServerError::Db(ref e) => {
+        match self {
+            ServerError::StaleDevice(stale) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "stale_device",
+                    "stale_devices": stale,
+                })),
+            )
+                .into_response(),
+            ServerError::Db(e) => {
                 tracing::error!("database error: {e}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
             }
-            ServerError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-            ServerError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
-            ServerError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            ServerError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate limited".to_string()),
-            ServerError::Internal(ref msg) => {
+            ServerError::NotFound => (StatusCode::NOT_FOUND, "not found").into_response(),
+            ServerError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+            ServerError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+            ServerError::RateLimited => {
+                (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response()
+            }
+            ServerError::Internal(msg) => {
                 tracing::error!("internal error: {msg}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
             }
-        };
-
-        (status, message).into_response()
+        }
     }
 }

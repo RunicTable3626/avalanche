@@ -32,7 +32,7 @@ use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
-use crate::{db, error::ServerError, middleware::auth::AuthDevice, state::AppState, state::WsMessage};
+use crate::{db, error::{ServerError, StaleDeviceRef}, middleware::auth::AuthDevice, state::AppState, state::WsMessage};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -52,6 +52,7 @@ struct SendRequest {
 struct OutboundMessage {
     recipient_did: String,
     recipient_device_id: i32,
+    destination_registration_id: i32,
     ciphertext: String, // base64
     message_kind: i16,
     expiry_secs: Option<i64>,
@@ -105,6 +106,13 @@ async fn send(
         let device = db::devices::find_by_did(&mut conn, &msg.recipient_did, msg.recipient_device_id)
             .await?
             .ok_or(ServerError::NotFound)?;
+
+        if device.registration_id != msg.destination_registration_id {
+            return Err(ServerError::StaleDevice(vec![StaleDeviceRef {
+                did: msg.recipient_did.clone(),
+                device_id: msg.recipient_device_id,
+            }]));
+        }
 
         let expiry = msg.expiry_secs
             .map(|s| s.clamp(state.config.message_expiry_min_secs, state.config.message_expiry_max_secs))

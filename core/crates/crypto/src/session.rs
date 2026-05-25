@@ -188,6 +188,24 @@ pub async fn encrypt<S: Store>(
     Ok(EncryptedMessage::from_signal(ciphertext))
 }
 
+/// Read the registration_id stored inside the active outbound session for `recipient`.
+///
+/// Returns `None` if there is no session record. This should not happen after a
+/// successful `encrypt`, but callers must handle it.
+pub async fn remote_registration_id<S: Store>(
+    store: &mut S,
+    recipient: &DeviceAddress,
+) -> Result<Option<u32>, CryptoError> {
+    let addr = recipient.to_protocol_address()?;
+    match store.load_session(&addr).await {
+        Ok(Some(record)) => {
+            Ok(Some(record.remote_registration_id().map_err(CryptoError::Signal)?))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(CryptoError::Signal(e)),
+    }
+}
+
 /// Decrypt a message from a sender, advancing the receiving ratchet.
 ///
 /// The updated session state is persisted to the store automatically.

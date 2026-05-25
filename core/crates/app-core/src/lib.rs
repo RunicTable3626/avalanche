@@ -1607,9 +1607,8 @@ impl AppCoreInner {
     /// Fan-out send: fetches the recipient's active device list and encrypts a
     /// copy of `plaintext` for each device, sending them as one batch.
     ///
-    /// Mirrors Signal's `SignalServiceMessageSender.sendMessage` shape: callers
-    /// don't think about device IDs. Stale-device handling (`409`/`410`) is a
-    /// later improvement — for now, each send hits `GET /v1/accounts/{did}/devices`.
+    /// If the server returns 409 (stale device), automatically re-establishes
+    /// the session for affected devices and retries once.
     async fn send_dm(
         &mut self,
         recipient_did: &str,
@@ -1623,34 +1622,62 @@ impl AppCoreInner {
             )));
         }
 
-        let mut envelopes = Vec::with_capacity(device_ids.len());
-        for device_id in device_ids {
-            let env = self
-                .encrypt_for_device(recipient_did, device_id as u32, plaintext, expiry_secs)
-                .await?;
-            envelopes.push(env);
-        }
+        let envelopes = self.build_envelopes(recipient_did, &device_ids, plaintext, expiry_secs, &[]).await?;
 
-        self.client.send_messages(&envelopes).await?;
-        Ok(())
+        match self.client.send_messages(&envelopes).await {
+            Ok(_) => Ok(()),
+            Err(net::error::NetError::StaleDevice { stale_devices }) => {
+                let stale_ids: Vec<i32> = stale_devices.iter().map(|s| s.device_id).collect();
+                let envelopes = self.build_envelopes(recipient_did, &device_ids, plaintext, expiry_secs, &stale_ids).await?;
+                self.client.send_messages(&envelopes).await?;
+                Ok(())
+            }
+            Err(e) => Err(AppError::Net(e)),
+        }
+    }
+
+    /// Encrypt `plaintext` for each device in `device_ids`.
+    /// Devices in `force_refresh_ids` will have their sessions forcibly re-established.
+    async fn build_envelopes(
+        &mut self,
+        recipient_did: &str,
+        device_ids: &[i32],
+        plaintext: &[u8],
+        expiry_secs: Option<i64>,
+        force_refresh_ids: &[i32],
+    ) -> Result<Vec<OutboundMessage>, AppError> {
+        let mut envelopes = Vec::with_capacity(device_ids.len());
+        for &device_id in device_ids {
+            let force = force_refresh_ids.contains(&device_id);
+            envelopes.push(
+                self.encrypt_for_device(recipient_did, device_id as u32, plaintext, expiry_secs, force).await?,
+            );
+        }
+        Ok(envelopes)
     }
 
     /// Per-device encryption helper: establishes a Double Ratchet session if
     /// needed (fetching that device's prekey bundle), encrypts the plaintext,
     /// and returns the `OutboundMessage` envelope ready for `send_messages`.
+    ///
+    /// If `force_refresh` is true, the existing session (if any) is discarded
+    /// and a fresh prekey bundle is fetched — used after a 409 stale-device response.
     async fn encrypt_for_device(
         &mut self,
         recipient_did: &str,
         recipient_device_id: u32,
         plaintext: &[u8],
         expiry_secs: Option<i64>,
+        force_refresh: bool,
     ) -> Result<OutboundMessage, AppError> {
         let recipient_addr = DeviceAddress::new(
             AccountId::new(recipient_did),
             DeviceId::new(recipient_device_id),
         );
 
-        let has_session = {
+        let has_session = if force_refresh {
+            false
+        } else {
             use libsignal_protocol::SessionStore;
             let protocol_addr = libsignal_protocol::ProtocolAddress::new(
                 recipient_did.to_string(),
@@ -1701,9 +1728,14 @@ impl AppCoreInner {
             plaintext,
         ).await?;
 
+        let dest_reg_id = session::remote_registration_id(&mut self.store, &recipient_addr)
+            .await?
+            .ok_or_else(|| AppError::Protocol("no session after encrypt".into()))? as i32;
+
         Ok(OutboundMessage {
             recipient_did: recipient_did.to_string(),
             recipient_device_id: recipient_device_id as i32,
+            destination_registration_id: dest_reg_id,
             ciphertext: encrypted.ciphertext,
             message_kind: match encrypted.kind {
                 MessageKind::PreKey => 0,

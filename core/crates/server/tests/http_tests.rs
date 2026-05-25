@@ -288,6 +288,91 @@ async fn auth_token_wrong_signature_returns_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+// ── Stale device detection tests ─────────────────────────────────────────────
+
+/// Happy path: sender supplies the correct `destination_registration_id` → 200 OK.
+#[tokio::test]
+async fn send_correct_registration_id_returns_200() {
+    let app = routes::router().with_state(test_state().await);
+
+    // Alice (sender) — bot registration returns session_token directly.
+    let alice = register_dummy(&app).await;
+    let alice_token = alice["session_token"].as_str().unwrap().to_string();
+
+    // Bob (recipient) — registered with registration_id=1 and device_id=1.
+    let bob = register_dummy(&app).await;
+    let bob_did = bob["did"].as_str().unwrap().to_string();
+
+    let body = serde_json::json!({
+        "messages": [{
+            "recipient_did": bob_did,
+            "recipient_device_id": 1,
+            "destination_registration_id": 1,   // matches Bob's stored registration_id
+            "ciphertext": BASE64_STANDARD.encode([0u8; 32]),
+            "message_kind": 1,
+        }]
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// Error path: sender supplies a wrong `destination_registration_id` → 409 Conflict.
+#[tokio::test]
+async fn send_stale_registration_id_returns_409() {
+    let app = routes::router().with_state(test_state().await);
+
+    let alice = register_dummy(&app).await;
+    let alice_token = alice["session_token"].as_str().unwrap().to_string();
+
+    let bob = register_dummy(&app).await;
+    let bob_did = bob["did"].as_str().unwrap().to_string();
+
+    let body = serde_json::json!({
+        "messages": [{
+            "recipient_did": bob_did,
+            "recipient_device_id": 1,
+            "destination_registration_id": 9999,    // wrong — Bob's actual registration_id is 1
+            "ciphertext": BASE64_STANDARD.encode([0u8; 32]),
+            "message_kind": 1,
+        }]
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {alice_token}"))
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let resp_body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(resp_body["error"], "stale_device");
+    assert_eq!(resp_body["stale_devices"][0]["device_id"], 1);
+    assert_eq!(resp_body["stale_devices"][0]["did"], bob_did);
+}
+
 #[tokio::test]
 async fn auth_token_without_nonce_returns_422() {
     let app = routes::router().with_state(test_state().await);

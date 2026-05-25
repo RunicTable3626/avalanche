@@ -1,5 +1,11 @@
 //! Network client errors.
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct StaleDevice {
+    pub did: String,
+    pub device_id: i32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
     #[error("HTTP error: {0}")]
@@ -13,4 +19,7 @@ pub enum NetError {
 
     #[error("WebSocket error: {0}")]
     WebSocket(String),
+
+    #[error("stale device: session out of date for {stale_devices:?}")]
+    StaleDevice { stale_devices: Vec<StaleDevice> },
 }

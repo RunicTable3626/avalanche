@@ -252,6 +252,7 @@ impl Client {
             let mut obj = serde_json::json!({
                 "recipient_did": m.recipient_did,
                 "recipient_device_id": m.recipient_device_id,
+                "destination_registration_id": m.destination_registration_id,
                 "ciphertext": BASE64_STANDARD.encode(&m.ciphertext),
                 "message_kind": m.message_kind,
             });
@@ -267,6 +268,21 @@ impl Client {
             .await?;
 
         let status = resp.status();
+        if status == reqwest::StatusCode::CONFLICT {
+            let text = resp.text().await.unwrap_or_default();
+            if let Ok(body) = serde_json::from_str::<serde_json::Value>(&text) {
+                if body.get("error").and_then(|v| v.as_str()) == Some("stale_device") {
+                    let stale_devices: Vec<crate::error::StaleDevice> = body["stale_devices"]
+                        .as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                        .collect();
+                    return Err(NetError::StaleDevice { stale_devices });
+                }
+            }
+            return Err(NetError::Server(status.as_u16(), text));
+        }
         if !status.is_success() {
             return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
         }

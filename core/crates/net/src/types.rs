@@ -154,6 +154,10 @@ pub struct PrekeyStatusResponse {
 pub struct OutboundMessage {
     pub recipient_did: String,
     pub recipient_device_id: i32,
+    /// The registration_id stored in the local session for this recipient device.
+    /// The server rejects the message with 409 if this doesn't match the current
+    /// registration_id, signalling that the session is stale.
+    pub destination_registration_id: i32,
     pub ciphertext: Vec<u8>,
     pub message_kind: i16,
     /// Per-message expiry in seconds. `None` means use the server's global default.

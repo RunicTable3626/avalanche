@@ -121,7 +121,7 @@ struct ConversationView: View {
             body: text,
             sentAtMs: nowMs,
             readAtMs: nowMs,  // outgoing = immediately read
-            deliveryStatus: .sent
+            deliveryStatus: .sending
         )
         appState.messagesByConversation[conversation.id, default: []].append(message)
         scrollPosition.scrollTo(edge: .bottom)

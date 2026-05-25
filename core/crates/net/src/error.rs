@@ -13,4 +13,14 @@ pub enum NetError {
 
     #[error("WebSocket error: {0}")]
     WebSocket(String),
+
+    /// Authenticated request attempted but no `Signer` was configured on the
+    /// `Client`. Indicates a misconfiguration — callers should always set up
+    /// auth via `with_signer` before issuing authenticated requests.
+    #[error("no signer configured for authenticated request")]
+    NoSigner,
+
+    /// Signer returned an error while signing the challenge nonce.
+    #[error("signing failed: {0}")]
+    Signing(String),
 }

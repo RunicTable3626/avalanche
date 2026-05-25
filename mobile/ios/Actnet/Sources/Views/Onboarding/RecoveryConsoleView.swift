@@ -70,6 +70,13 @@ struct RecoveryConsoleView: View {
 
     private func log(_ line: String) {
         logLines.append(line)
+        if line.hasPrefix("[!]") {
+            AppLog.error("recovery", String(line.dropFirst(3).trimmingCharacters(in: .whitespaces)))
+        } else if line.hasPrefix("[ok]") {
+            AppLog.ok("recovery", String(line.dropFirst(4).trimmingCharacters(in: .whitespaces)))
+        } else {
+            AppLog.info("recovery", line)
+        }
     }
 
     private func performRecovery() async {

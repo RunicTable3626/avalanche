@@ -58,7 +58,7 @@ pub struct ProjectInfoFfi {
 }
 
 /// A decrypted inbound message.
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone, Debug)]
 pub struct DecryptedMessage {
     pub server_id: i64,
     pub sender_did: String,
@@ -93,7 +93,7 @@ pub struct ConversationSummaryFfi {
 }
 
 /// A delivery status update for an outgoing message (e.g. read receipt received).
-#[derive(uniffi::Record, Clone)]
+#[derive(uniffi::Record, Clone, Debug)]
 pub struct DeliveryStatusUpdate {
     pub conversation_id: String,
     pub sent_at_ms: i64,
@@ -112,21 +112,97 @@ pub struct AccountInfoFfi {
     pub is_bot: bool,
 }
 
+/// Liveness of the connection to the homeserver.
+///
+/// Owned by the `AppCore` background reconnect task; observed by UI via
+/// `connection_state()` and `wait_for_connection_state_change()`.
+#[derive(uniffi::Enum, Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// Initial state; reconnect task hasn't run yet.
+    Disconnected,
+    /// An attempt is in flight (handshake / lazy auth).
+    Connecting,
+    /// WebSocket is open. Steady state.
+    Connected,
+    /// Last attempt failed; backing off until `next_attempt_at_ms`.
+    Reconnecting { next_attempt_at_ms: i64 },
+}
+
+/// A single event surfaced to the FFI from the background reconnect task.
+/// Drained in batches by `next_events()`.
+#[derive(uniffi::Enum, Debug, Clone)]
+pub enum IncomingEvent {
+    /// A decrypted content message.
+    Message { msg: DecryptedMessage },
+    /// A delivery status update from a read receipt.
+    ReceiptUpdate { update: DeliveryStatusUpdate },
+}
+
+/// Implementation of `net::Signer` backed by the device's libsignal identity
+/// key. Used by `net::Client` to perform challenge/response on demand
+/// (initial auth + transparent 401 retry).
+///
+/// Stores the identity as serialized bytes and deserializes on each sign call.
+/// Signing happens once per auth round (rare); the per-call deserialization
+/// cost is negligible and avoids Clone constraints on `IdentityKeyPair`.
+struct IdentitySigner {
+    identity_bytes: Vec<u8>,
+}
+
+impl net::Signer for IdentitySigner {
+    fn sign(&self, nonce: &[u8]) -> Result<Vec<u8>, String> {
+        let identity = crypto::IdentityKeyPair::deserialize(&self.identity_bytes)
+            .map_err(|e| format!("identity deserialize: {e}"))?;
+        identity
+            .private_key()
+            .calculate_signature(nonce, &mut rand::rngs::OsRng.unwrap_err())
+            .map(|s| s.into_vec())
+            .map_err(|e| format!("signal signing error: {e}"))
+    }
+}
+
+/// Build a `net::Client` for an authenticated session. Captures the identity
+/// key in an `Arc<dyn Signer>` so the client can re-auth on 401 without
+/// holding a reference to the store or identity locally.
+fn build_authed_client(
+    server_url: &str,
+    did: String,
+    device_id: u32,
+    identity: &crypto::IdentityKeyPair,
+    initial_token: Option<String>,
+) -> net::Client {
+    let signer: Arc<dyn net::Signer> = Arc::new(IdentitySigner {
+        identity_bytes: identity.serialize().into(),
+    });
+    net::Client::new(server_url).with_signer(did, device_id, signer, initial_token)
+}
+
 /// The main client handle. Holds local state and a server connection.
 ///
 /// Thread-safe: all mutable state is behind an async Mutex, and the object
 /// is wrapped in Arc by UniFFI. Safe to call from multiple Swift/Kotlin threads.
 ///
 /// Exported methods are blocking — call from a background thread.
+///
+/// Connection state lives here too: a background reconnect task (spawned by
+/// the FFI constructors) owns the WebSocket lifecycle. UI observes state via
+/// `connection_state` / `wait_for_connection_state_change` and reads
+/// decrypted messages + receipt updates via `next_events`.
 #[derive(uniffi::Object)]
 pub struct AppCore {
     inner: Mutex<AppCoreInner>,
-    /// WebSocket connection for real-time message delivery. Separate from
-    /// `inner` so that `send_dm` can proceed while waiting for WS messages.
-    ws: Mutex<Option<net::ws::WsConnection>>,
-    /// Buffered delivery status updates from incoming read receipts.
-    /// Drained by `drain_receipt_updates()` after each WS receive.
-    receipt_updates: Mutex<Vec<DeliveryStatusUpdate>>,
+    /// Canonical connection-state observable. The reconnect task publishes;
+    /// each waiter calls `state_tx.subscribe()` to get its own receiver.
+    state_tx: tokio::sync::watch::Sender<ConnectionState>,
+    /// Sender side of the events queue. The reconnect task pushes; FFI
+    /// `next_events` drains via `event_rx`.
+    event_tx: tokio::sync::mpsc::UnboundedSender<IncomingEvent>,
+    /// Single-consumer event receiver. Wrapped in a tokio Mutex because
+    /// `recv().await` is held across an await.
+    event_rx: Mutex<tokio::sync::mpsc::UnboundedReceiver<IncomingEvent>>,
+    /// Handle to the background reconnect task. Held so it doesn't get
+    /// detached; the task self-exits when the last `Arc<AppCore>` drops.
+    reconnect_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 struct AppCoreInner {
@@ -135,6 +211,63 @@ struct AppCoreInner {
     local_address: DeviceAddress,
     did: String,
     device_id: u32,
+}
+
+impl AppCore {
+    /// Construct an `AppCore` with fresh state/event channels. Does **not**
+    /// spawn the reconnect task — that requires an `Arc` and happens in
+    /// `start_reconnect_task` after wrapping.
+    fn build(inner: AppCoreInner) -> Self {
+        let (state_tx, _) = tokio::sync::watch::channel(ConnectionState::Disconnected);
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            inner: Mutex::new(inner),
+            state_tx,
+            event_tx,
+            event_rx: Mutex::new(event_rx),
+            reconnect_task: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Spawn the background reconnect task. Idempotent — second call is a no-op.
+    /// Call after wrapping `AppCore` in `Arc` so the task can hold a `Weak`.
+    ///
+    /// The FFI constructors (`login`, `create_account`, etc.) call this
+    /// automatically. Tests and the testbot must call it explicitly after
+    /// wrapping in `Arc`.
+    ///
+    /// Why `spawn_blocking` + a dedicated current-thread runtime: libsignal
+    /// futures are not `Send` (see CLAUDE.md), so we can't `tokio::spawn` an
+    /// async task that touches the store. The blocking worker thread owns
+    /// its own runtime and drives the loop locally.
+    pub fn start_reconnect_task(self: &Arc<Self>) {
+        let mut slot = self.reconnect_task.lock().unwrap();
+        if slot.is_some() {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let handle = ffi_runtime().spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("reconnect runtime build");
+            rt.block_on(reconnect_loop(weak));
+        });
+        *slot = Some(handle);
+    }
+
+    /// Publish a connection-state change. Uses `send_if_modified` so duplicate
+    /// values don't wake waiters.
+    fn publish_state(&self, new_state: ConnectionState) {
+        self.state_tx.send_if_modified(|current| {
+            if *current != new_state {
+                *current = new_state.clone();
+                true
+            } else {
+                false
+            }
+        });
+    }
 }
 
 #[uniffi::export]
@@ -179,7 +312,11 @@ impl AppCore {
         let inner = rt.block_on(Self::create_inner(prepared, store, Some(display_name), false, rk.as_ref()))
             .map_err(AppErrorFfi::from)?;
 
-        Ok(Arc::new(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) }))
+        {
+            let core = Arc::new(Self::build(inner));
+            core.start_reconnect_task();
+            Ok(core)
+        }
     }
 
     /// Finalize account registration using a previously prepared identity.
@@ -224,7 +361,11 @@ impl AppCore {
         let inner = rt.block_on(Self::create_inner(state, store, Some(display_name), false, rk.as_ref()))
             .map_err(AppErrorFfi::from)?;
 
-        Ok(Arc::new(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) }))
+        {
+            let core = Arc::new(Self::build(inner));
+            core.start_reconnect_task();
+            Ok(core)
+        }
     }
 
     /// Recover an account from a passkey-protected recovery blob.
@@ -438,8 +579,15 @@ impl AppCore {
                     .await?;
             }
 
-            // Authenticated client carries the session token returned by replace.
-            let client = net::Client::with_token(&primary_server, reg_resp.session_token);
+            // Authenticated client carries the session token returned by replace
+            // and the identity signer for transparent re-auth on 401.
+            let client = build_authed_client(
+                &primary_server,
+                did.clone(),
+                new_device_id,
+                &identity,
+                Some(reg_resp.session_token),
+            );
 
             // Upload one-time Kyber public halves separately (matching create_inner).
             client
@@ -481,17 +629,15 @@ impl AppCore {
                 DeviceId::new(new_device_id),
             );
 
-            Ok::<_, AppError>(Arc::new(Self {
-                inner: Mutex::new(AppCoreInner {
-                    store,
-                    client,
-                    local_address,
-                    did,
-                    device_id: new_device_id,
-                }),
-                ws: Mutex::new(None),
-                receipt_updates: Mutex::new(Vec::new()),
-            }))
+            let core = Arc::new(Self::build(AppCoreInner {
+                store,
+                client,
+                local_address,
+                did,
+                device_id: new_device_id,
+            }));
+            core.start_reconnect_task();
+            Ok::<_, AppError>(core)
         })
         .map_err(AppErrorFfi::from)
     }
@@ -514,7 +660,11 @@ impl AppCore {
         let inner = rt.block_on(Self::login_inner(store))
             .map_err(AppErrorFfi::from)?;
 
-        Ok(Arc::new(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) }))
+        {
+            let core = Arc::new(Self::build(inner));
+            core.start_reconnect_task();
+            Ok(core)
+        }
     }
 
     pub fn did(&self) -> String {
@@ -605,13 +755,56 @@ impl AppCore {
         }).map_err(AppErrorFfi::from)
     }
 
-    /// Drain buffered delivery status updates (from incoming read receipts).
-    /// Call after each `receive_messages_ws` to get real-time status updates.
-    pub fn drain_receipt_updates(&self) -> Vec<DeliveryStatusUpdate> {
+    /// Cheap snapshot of current connection state. Non-blocking.
+    pub fn connection_state(&self) -> ConnectionState {
+        self.state_tx.borrow().clone()
+    }
+
+    /// Block until the connection state differs from `last`, then return the
+    /// new value. iOS runs this in a tight loop on a dedicated task and
+    /// publishes to its UI state.
+    ///
+    /// Returns `Err` if the underlying watch sender is dropped (i.e. the
+    /// `AppCore` is being torn down).
+    pub fn wait_for_connection_state_change(
+        &self,
+        last: ConnectionState,
+    ) -> Result<ConnectionState, AppErrorFfi> {
         ffi_runtime().block_on(async {
-            let mut updates = self.receipt_updates.lock().await;
-            std::mem::take(&mut *updates)
+            let mut rx = self.state_tx.subscribe();
+            let current = rx.borrow().clone();
+            if current != last {
+                return Ok::<_, AppError>(current);
+            }
+            rx.changed()
+                .await
+                .map_err(|_| AppError::Protocol("connection state channel closed".into()))?;
+            let new_state = rx.borrow().clone();
+            Ok(new_state)
         })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// Block until at least one event is available; drain the queue and
+    /// return the batch.
+    ///
+    /// Single-consumer: concurrent FFI callers serialize on the receiver
+    /// mutex. Returns `Err` if the event channel is closed (`AppCore` torn
+    /// down).
+    pub fn next_events(&self) -> Result<Vec<IncomingEvent>, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let mut rx = self.event_rx.lock().await;
+            let first = rx
+                .recv()
+                .await
+                .ok_or_else(|| AppError::Protocol("event channel closed".into()))?;
+            let mut batch = vec![first];
+            while let Ok(more) = rx.try_recv() {
+                batch.push(more);
+            }
+            Ok::<_, AppError>(batch)
+        })
+        .map_err(AppErrorFfi::from)
     }
 
     /// Save a message to local history (SQLCipher).
@@ -717,18 +910,6 @@ impl AppCore {
             inner.store.unread_count(&conversation_id, &inner.did).await
                 .map_err(AppError::from)
         }).map_err(AppErrorFfi::from)
-    }
-
-    /// Wait for the next message(s) via WebSocket, decrypt, and return.
-    ///
-    /// Lazily connects on first call. Blocks until at least one message
-    /// arrives. Returns an empty vec if the connection is closed (caller
-    /// should retry to reconnect).
-    ///
-    /// Call from a background thread — this blocks until messages arrive.
-    pub fn receive_messages_ws(&self) -> Result<Vec<DecryptedMessage>, AppErrorFfi> {
-        ffi_runtime().block_on(self.receive_messages_ws_async())
-            .map_err(AppErrorFfi::from)
     }
 
     /// Fetch public metadata for an account: display name and bot flag.
@@ -1257,7 +1438,13 @@ impl AppCore {
             &one_time_kyber.iter().map(|k| (k.wire.id, k.record.clone())).collect::<Vec<_>>(),
         ).await?;
 
-        let client = net::Client::with_token(server_url, reg_resp.session_token);
+        let client = build_authed_client(
+            server_url,
+            reg_resp.did.clone(),
+            device_id,
+            &identity,
+            Some(reg_resp.session_token),
+        );
 
         // Upload one-time Kyber public halves to the server after registration.
         client.upload_prekeys(&net::types::UploadPrekeysRequest {
@@ -1288,21 +1475,17 @@ impl AppCore {
         let reg = store.load_registration().await?
             .ok_or(AppError::NoAccount)?;
 
-        let client = net::Client::new(&reg.server_url);
+        // Offline-safe: build the Client with a signer but no token. The first
+        // authenticated request (HTTP send_authed or the reconnect task's WS
+        // open) will trigger lazy challenge/response.
+        let client = build_authed_client(
+            &reg.server_url,
+            reg.account_id.clone(),
+            reg.device_id,
+            &identity,
+            None,
+        );
         let device_id = reg.device_id;
-
-        // Challenge-response: fetch nonce, sign it with our Ed25519 identity key.
-        let nonce = client.challenge(&reg.account_id, device_id as i32).await?;
-        let nonce_bytes = BASE64_URL_SAFE_NO_PAD
-            .decode(&nonce)
-            .map_err(|_| AppError::Protocol("server returned invalid nonce encoding".into()))?;
-        let signature = identity
-            .private_key()
-            .calculate_signature(&nonce_bytes, &mut rand::rngs::OsRng.unwrap_err())
-            .map_err(|e| AppError::Crypto(crypto::CryptoError::Signal(e.into())))?;
-
-        let auth = client.authenticate(&reg.account_id, device_id as i32, &nonce, &signature).await?;
-        let client = net::Client::with_token(&reg.server_url, auth.session_token);
 
         let local_address = DeviceAddress::new(
             AccountId::new(&reg.account_id),
@@ -1331,13 +1514,15 @@ impl AppCore {
     ) -> Result<Self, AppError> {
         let prepared = PreparedAccountState::prepare(server_url.to_string(), false)?;
         let inner = Self::create_inner(prepared, store, display_name, is_bot, None).await?;
-        Ok(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) })
+        Ok(Self::build(inner))
     }
 
     /// Login with a pre-opened store (for tests).
+    /// Does not spawn the reconnect task; callers that want it must wrap in
+    /// `Arc` and call `start_reconnect_task()` themselves.
     pub async fn login_with_store(store: store::Store) -> Result<Self, AppError> {
         let inner = Self::login_inner(store).await?;
-        Ok(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) })
+        Ok(Self::build(inner))
     }
 
     /// Async send_read_receipt for use in tests and the testbot.
@@ -1407,145 +1592,235 @@ impl AppCore {
         self.inner.lock().await.device_id
     }
 
-    /// Async version of receive_messages_ws for use in tests and the testbot.
-    pub async fn receive_messages_ws_async(&self) -> Result<Vec<DecryptedMessage>, AppError> {
-        // 1. Ensure WS is connected.
-        {
-            let mut ws_guard = self.ws.lock().await;
-            if ws_guard.is_none() {
-                let inner = self.inner.lock().await;
-                let token = inner.client.token()
-                    .ok_or_else(|| AppError::Protocol("no session token for WS".into()))?
-                    .to_string();
-                let url = inner.client.server_url().to_string();
-                drop(inner);
-                *ws_guard = Some(net::ws::WsConnection::connect(&url, &token).await?);
+    /// Block on the next batch of events from the reconnect task. Async
+    /// equivalent of the FFI `next_events`. Used by the testbot.
+    ///
+    /// The reconnect task must be running (`start_reconnect_task`) for events
+    /// to arrive.
+    pub async fn next_events_async(&self) -> Result<Vec<IncomingEvent>, AppError> {
+        let mut rx = self.event_rx.lock().await;
+        let first = rx
+            .recv()
+            .await
+            .ok_or_else(|| AppError::Protocol("event channel closed".into()))?;
+        let mut batch = vec![first];
+        while let Ok(more) = rx.try_recv() {
+            batch.push(more);
+        }
+        Ok(batch)
+    }
+}
+
+// ── Reconnect task ──────────────────────────────────────────────────────
+
+/// Connect-receive-backoff loop. Runs as a background tokio task owned by
+/// `AppCore::reconnect_task`. Holds a `Weak<AppCore>` so dropping the last
+/// strong reference lets the task exit on its next iteration.
+async fn reconnect_loop(weak: std::sync::Weak<AppCore>) {
+    let mut backoff_sec: u64 = 1;
+    loop {
+        let Some(core) = weak.upgrade() else {
+            return;
+        };
+
+        core.publish_state(ConnectionState::Connecting);
+
+        match try_connect_ws(&core).await {
+            Ok(mut ws) => {
+                core.publish_state(ConnectionState::Connected);
+                let connected_at = std::time::Instant::now();
+                run_receive_loop(&core, &mut ws).await;
+                // Only reset backoff if the connection was actually usable.
+                // A handshake that succeeds but disconnects within a second
+                // counts as a failure for backoff purposes — otherwise we
+                // bounce 1s,2s,4s,1s,2s,4s indefinitely against a flapping
+                // server.
+                if connected_at.elapsed() >= std::time::Duration::from_secs(5) {
+                    backoff_sec = 1;
+                } else {
+                    eprintln!("[ws] connection dropped after {:?}, not resetting backoff", connected_at.elapsed());
+                }
+            }
+            Err(e) => {
+                eprintln!("[ws] connect failed: {e}");
             }
         }
 
-        // 2. Wait for next message (ws lock only, inner is free for send_dm).
-        let raw_msg = {
-            let mut ws_guard = self.ws.lock().await;
-            let ws_conn = ws_guard.as_mut().unwrap();
-            match ws_conn.next_message().await {
-                Ok(Some(msg)) => msg,
-                Ok(None) => {
-                    // Connection closed — clear so next call reconnects.
-                    *ws_guard = None;
-                    return Ok(vec![]);
-                }
-                Err(e) => {
-                    *ws_guard = None;
-                    return Err(e.into());
-                }
+        // Jittered backoff (0.75x – 1.25x) so reinstalls / mass-restarts don't
+        // hammer the server in sync.
+        let jitter = rand::random::<f64>() * 0.5 + 0.75;
+        let sleep_ms = ((backoff_sec as f64) * 1000.0 * jitter) as u64;
+        let next_attempt_at_ms = Timestamp::now().as_millis() + sleep_ms as i64;
+        core.publish_state(ConnectionState::Reconnecting { next_attempt_at_ms });
+
+        // Release the strong ref before sleeping so AppCore can drop.
+        drop(core);
+        tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+        backoff_sec = (backoff_sec * 2).min(30);
+    }
+}
+
+/// Open a fresh WebSocket connection. Triggers lazy challenge/response on
+/// the underlying `net::Client` if no token is present.
+async fn try_connect_ws(core: &AppCore) -> Result<net::ws::WsConnection, AppError> {
+    // Hold the lock just long enough to clone what we need, then release
+    // before doing network I/O. Avoids blocking parallel send_dm calls.
+    let (url, client_for_auth) = {
+        let inner = core.inner.lock().await;
+        (
+            inner.client.server_url().to_string(),
+            // The Client itself is not Clone, but we just need to call ensure_authenticated
+            // on it — do that under the lock, briefly. The HTTP I/O inside ensure_authenticated
+            // releases its own internal lock between awaits.
+            (),
+        )
+    };
+    let _ = client_for_auth;
+
+    // ensure_authenticated needs to call client.challenge/authenticate.
+    // It manages its own auth lock internally; we just hold the inner lock
+    // long enough to call into it. Inside ensure_authenticated, network
+    // I/O happens without holding inner's lock (because the auth mutex is
+    // separate — see net::Client).
+    let inner = core.inner.lock().await;
+    inner.client.ensure_authenticated().await?;
+    let token = inner
+        .client
+        .token()
+        .ok_or_else(|| AppError::Protocol("no session token after auth".into()))?;
+    drop(inner);
+
+    let ws = net::ws::WsConnection::connect(&url, &token).await?;
+    Ok(ws)
+}
+
+/// Pull messages off an open WebSocket until it errors or closes. Each
+/// decrypted message + extracted receipt update is pushed to `event_tx`.
+async fn run_receive_loop(core: &AppCore, ws: &mut net::ws::WsConnection) {
+    loop {
+        let raw_msg = match ws.next_message().await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => {
+                eprintln!("[ws] connection closed cleanly");
+                return;
+            }
+            Err(e) => {
+                eprintln!("[ws] receive error: {e}");
+                return;
             }
         };
 
-        // 3. Decrypt (inner lock). If decryption fails, ack the message
-        //    anyway so it doesn't block the queue forever, then skip it.
+        // Decrypt under the inner lock; release before any further work.
         let decrypted = {
-            let mut inner = self.inner.lock().await;
+            let mut inner = core.inner.lock().await;
             match inner.decrypt_inbound(&raw_msg).await {
-                Ok(msg) => msg,
+                Ok(d) => d,
                 Err(e) => {
                     eprintln!(
                         "[ws] failed to decrypt message {} from {:?}: {}, acking to skip",
                         raw_msg.id, raw_msg.sender_did, e
                     );
-                    // Ack the undecryptable message so it doesn't block the queue.
-                    let mut ws_guard = self.ws.lock().await;
-                    if let Some(ws_conn) = ws_guard.as_mut() {
-                        let _ = ws_conn.ack(&[raw_msg.id]).await;
-                    }
-                    // Return empty — caller will loop and get the next message.
-                    return Ok(vec![]);
+                    drop(inner);
+                    let _ = ws.ack(&[raw_msg.id]).await;
+                    continue;
                 }
             }
         };
 
-        // 4. Ack via WS.
-        {
-            let mut ws_guard = self.ws.lock().await;
-            if let Some(ws_conn) = ws_guard.as_mut() {
-                let _ = ws_conn.ack(&[raw_msg.id]).await;
+        // Ack on the wire so the server stops re-delivering it.
+        let _ = ws.ack(&[raw_msg.id]).await;
+
+        // Parse the content envelope and emit appropriate IncomingEvents.
+        process_decrypted(core, decrypted).await;
+    }
+}
+
+/// Decode a `DecryptedMessage`'s content envelope and emit messages /
+/// receipt-updates onto the event channel. Sends auto-delivery receipts.
+async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessage) {
+    let msg = match ContentMessage::decode(decrypted.plaintext.as_slice()) {
+        Ok(m) => m,
+        Err(_) => {
+            // Non-protobuf payload — emit as raw text for backward compat.
+            let _ = core.event_tx.send(IncomingEvent::Message { msg: decrypted });
+            return;
+        }
+    };
+
+    // Process inbound profile_key (any variant may carry one).
+    if !msg.profile_key.is_empty() {
+        let inner = core.inner.lock().await;
+        inner
+            .handle_inbound_profile_key(&decrypted.sender_did, &msg.profile_key)
+            .await;
+    }
+
+    match msg.body {
+        Some(Body::Receipt(receipt)) => {
+            // DELIVERY (0) → status 2, READ (1) → status 3.
+            let status: u8 = if receipt.r#type == receipt_message::Type::Read as i32 {
+                3
+            } else {
+                2
+            };
+            let timestamps: Vec<i64> = receipt.timestamps.into_iter().map(|t| t as i64).collect();
+            if timestamps.is_empty() {
+                return;
+            }
+            let conv_id = {
+                let inner = core.inner.lock().await;
+                let conv_id = format!("dm-{}-{}", inner.did, decrypted.sender_did);
+                let _ = inner
+                    .store
+                    .update_delivery_status(&conv_id, &timestamps, status)
+                    .await;
+                conv_id
+            };
+            for ts in timestamps {
+                let _ = core.event_tx.send(IncomingEvent::ReceiptUpdate {
+                    update: DeliveryStatusUpdate {
+                        conversation_id: conv_id.clone(),
+                        sent_at_ms: ts,
+                        delivery_status: status,
+                    },
+                });
             }
         }
+        Some(Body::Text(text)) => {
+            let body = text.body;
+            let sent_at = if msg.timestamp_ms > 0 {
+                Some(msg.timestamp_ms as i64)
+            } else {
+                None
+            };
 
-        // 5. Parse envelope. Handle receipts internally; return content messages.
-        match ContentMessage::decode(decrypted.plaintext.as_slice()) {
-            Ok(msg) => {
-                // Process inbound profile_key (any variant may carry one).
-                if !msg.profile_key.is_empty() {
-                    let inner = self.inner.lock().await;
-                    inner.handle_inbound_profile_key(&decrypted.sender_did, &msg.profile_key).await;
-                }
-                match msg.body {
-                Some(Body::Receipt(receipt)) => {
-                    // Receipt — update delivery status in store and buffer for Swift.
-                    // DELIVERY (0) = status 2, READ (1) = status 3.
-                    let status: u8 = if receipt.r#type == receipt_message::Type::Read as i32 { 3 } else { 2 };
-                    let timestamps: Vec<i64> = receipt.timestamps.into_iter().map(|t| t as i64).collect();
-                    if !timestamps.is_empty() {
-                        let inner = self.inner.lock().await;
-                        let conv_id = format!(
-                            "dm-{}-{}",
-                            inner.did, decrypted.sender_did
-                        );
-                        let _ = inner
-                            .store
-                            .update_delivery_status(&conv_id, &timestamps, status)
-                            .await;
-                        let mut updates = self.receipt_updates.lock().await;
-                        for ts in &timestamps {
-                            updates.push(DeliveryStatusUpdate {
-                                conversation_id: conv_id.clone(),
-                                sent_at_ms: *ts,
-                                delivery_status: status,
-                            });
-                        }
-                    }
-                    Ok(vec![])
-                }
-                Some(Body::Text(text)) => {
-                    // Content message — unwrap body and sender timestamp from envelope.
-                    let body = text.body;
-                    let sent_at = if msg.timestamp_ms > 0 { Some(msg.timestamp_ms as i64) } else { None };
-
-                    // Auto-send delivery receipt back to the sender.
-                    if let Some(ts) = sent_at {
-                        let mut inner = self.inner.lock().await;
-                        let profile_key = inner.own_profile_key().await;
-                        let delivery = ContentMessage {
-                            body: Some(Body::Receipt(ReceiptMessage {
-                                r#type: receipt_message::Type::Delivery as i32,
-                                timestamps: vec![ts as u64],
-                            })),
-                            timestamp_ms: 0,
-                            profile_key,
-                        };
-                        let _ = inner.send_dm(
-                            &decrypted.sender_did,
-                            &delivery.encode_to_vec(),
-                            None,
-                        ).await;
-                    }
-
-                    Ok(vec![DecryptedMessage {
-                        plaintext: body.into_bytes(),
-                        sent_at_ms: sent_at,
-                        ..decrypted
-                    }])
-                }
-                None => {
-                    // ContentMessage with no body — treat raw bytes as plain text (backward compat).
-                    Ok(vec![decrypted])
-                }
-                }
+            // Auto-send delivery receipt to the sender.
+            if let Some(ts) = sent_at {
+                let mut inner = core.inner.lock().await;
+                let profile_key = inner.own_profile_key().await;
+                let delivery = ContentMessage {
+                    body: Some(Body::Receipt(ReceiptMessage {
+                        r#type: receipt_message::Type::Delivery as i32,
+                        timestamps: vec![ts as u64],
+                    })),
+                    timestamp_ms: 0,
+                    profile_key,
+                };
+                let _ = inner
+                    .send_dm(&decrypted.sender_did, &delivery.encode_to_vec(), None)
+                    .await;
             }
-            Err(_) => {
-                // Not a valid protobuf — treat raw bytes as plain text (backward compat).
-                Ok(vec![decrypted])
-            }
+
+            let out = DecryptedMessage {
+                plaintext: body.into_bytes(),
+                sent_at_ms: sent_at,
+                ..decrypted
+            };
+            let _ = core.event_tx.send(IncomingEvent::Message { msg: out });
+        }
+        None => {
+            // ContentMessage with no body — emit as raw bytes (backward compat).
+            let _ = core.event_tx.send(IncomingEvent::Message { msg: decrypted });
         }
     }
 }

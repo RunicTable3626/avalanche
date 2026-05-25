@@ -1,16 +1,72 @@
 import SwiftUI
+import UIKit
 
 struct RootView: View {
     @EnvironmentObject var appState: AppState
+    @State private var showLogViewer = false
 
     var body: some View {
-        Group {
-            if appState.isOnboarding {
-                SplashView()
-            } else {
-                MainTabView()
+        ZStack(alignment: .top) {
+            Group {
+                if appState.isOnboarding {
+                    SplashView()
+                } else {
+                    MainTabView()
+                }
             }
+            .background(Color.avPaper)
+
+            OfflineBanner()
         }
-        .background(Color.avPaper)
+        .background(
+            // Installs a window-level two-finger triple-tap recognizer.
+            TwoFingerTripleTapInstaller { showLogViewer = true }
+                .frame(width: 0, height: 0)
+        )
+        .sheet(isPresented: $showLogViewer) {
+            LogViewerView()
+        }
+    }
+}
+
+/// UIKit bridge that attaches a two-finger triple-tap gesture recognizer to
+/// the host window so it observes touches anywhere in the app without
+/// interfering with normal hit testing.
+private struct TwoFingerTripleTapInstaller: UIViewRepresentable {
+    let onTrigger: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onTrigger: onTrigger) }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = AttachOnMoveView()
+        view.onMove = { [weak view] in
+            guard let window = view?.window, context.coordinator.installedOn !== window else { return }
+            let gr = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handle))
+            gr.numberOfTapsRequired = 3
+            gr.numberOfTouchesRequired = 2
+            gr.cancelsTouchesInView = false
+            gr.delegate = context.coordinator
+            window.addGestureRecognizer(gr)
+            context.coordinator.installedOn = window
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        let onTrigger: () -> Void
+        weak var installedOn: UIWindow?
+        init(onTrigger: @escaping () -> Void) { self.onTrigger = onTrigger }
+        @objc func handle() { onTrigger() }
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    }
+
+    final class AttachOnMoveView: UIView {
+        var onMove: (() -> Void)?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            onMove?()
+        }
     }
 }

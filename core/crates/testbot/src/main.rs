@@ -257,9 +257,14 @@ async fn text_me(
         });
     }
 
+    // Wrap the AppCore in Arc + start its background reconnect task so the
+    // bot receives events through the same channel iOS does.
+    let bot_core = Arc::new(bot);
+    bot_core.start_reconnect_task();
+
     // Wrap bot in Arc<Mutex> so the message loop thread owns it.
     let bot = Arc::new(Mutex::new(BotRunner {
-        app_core: bot,
+        app_core: bot_core,
         conversation: vec![ConversationMessage {
             role: "assistant".into(),
             content: "Hey! I'm a testbot. Ask me anything.".into(),
@@ -307,7 +312,7 @@ async fn list_bots(
 // ── Bot message loop ────────────────────────────────────────────────────────
 
 struct BotRunner {
-    app_core: app_core::AppCore,
+    app_core: Arc<app_core::AppCore>,
     conversation: Vec<ConversationMessage>,
 }
 
@@ -325,24 +330,28 @@ async fn bot_message_loop(
     tracing::info!("[bot {}] starting message loop (WebSocket)", bot_did);
 
     loop {
-        // Wait for the next message via WebSocket. This blocks until a
-        // message arrives or the connection drops.
-        let messages = {
+        // Pull the next batch of events from the AppCore reconnect task.
+        // Filter to content messages — receipts are ignored by the bot.
+        let events = {
             let runner = bot.lock().await;
-            match runner.app_core.receive_messages_ws_async().await {
-                Ok(msgs) => msgs,
+            match runner.app_core.next_events_async().await {
+                Ok(evs) => evs,
                 Err(e) => {
-                    tracing::warn!("[bot {}] WS receive failed: {}, reconnecting in 2s", bot_did, e);
-                    drop(runner);
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    continue;
+                    tracing::warn!("[bot {}] event channel closed: {}, exiting loop", bot_did, e);
+                    return;
                 }
             }
         };
 
+        let messages: Vec<_> = events
+            .into_iter()
+            .filter_map(|e| match e {
+                app_core::IncomingEvent::Message { msg } => Some(msg),
+                app_core::IncomingEvent::ReceiptUpdate { .. } => None,
+            })
+            .collect();
+
         if messages.is_empty() {
-            tracing::info!("[bot {}] WS connection closed, reconnecting in 1s", bot_did);
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             continue;
         }
 

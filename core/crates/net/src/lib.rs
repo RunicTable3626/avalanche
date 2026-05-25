@@ -7,53 +7,174 @@
 //!
 //! The `ws` module provides a WebSocket client for real-time message delivery
 //! via `GET /v1/ws?token=<session_token>`.
+//!
+//! ## Authentication
+//!
+//! Authenticated requests use lazy challenge/response. Callers configure a
+//! [`Signer`] via [`Client::with_signer`]; the client performs the
+//! challenge/response handshake on the first authenticated call (and again
+//! transparently on any HTTP 401 response). Token state is internal to the
+//! `Client`.
 
 pub mod error;
 pub mod types;
 pub mod ws;
 
+use std::sync::{Arc, Mutex};
+
 use base64::prelude::*;
 use error::NetError;
 use types::*;
+
+/// Produces Ed25519 signatures over server-issued challenge nonces.
+///
+/// The implementation lives in `app-core` (`IdentitySigner`) and captures the
+/// device's identity private key. Kept abstract here so `net` doesn't depend
+/// on crypto/store types.
+pub trait Signer: Send + Sync {
+    /// Sign a challenge nonce. The nonce is the raw decoded bytes returned by
+    /// the server's `/v1/auth/challenge` endpoint.
+    fn sign(&self, nonce: &[u8]) -> Result<Vec<u8>, String>;
+}
+
+/// Per-account authentication state held by the `Client`.
+struct AuthState {
+    did: String,
+    device_id: u32,
+    signer: Arc<dyn Signer>,
+    token: Option<String>,
+}
 
 /// HTTP client for a single homeserver.
 pub struct Client {
     http: reqwest::Client,
     server_url: String,
-    token: Option<String>,
+    /// `None` until `with_signer` is called. The inner `Option<String>` is the
+    /// session token, populated lazily by `ensure_authenticated`.
+    ///
+    /// We use `std::sync::Mutex` (not `tokio::sync::Mutex`) because we never
+    /// hold the lock across an `await` — the double-check re-auth pattern
+    /// releases it during network I/O.
+    auth: Mutex<Option<AuthState>>,
 }
 
 impl Client {
-    /// Create an unauthenticated client (for registration).
+    /// Create a new client. Use `.with_signer(...)` to enable authenticated
+    /// requests. Unauthenticated endpoints (register, resolve_did, etc.) work
+    /// without a signer.
     pub fn new(server_url: &str) -> Self {
         Self {
             http: reqwest::Client::new(),
             server_url: server_url.trim_end_matches('/').to_string(),
-            token: None,
+            auth: Mutex::new(None),
         }
     }
 
-    /// Create an authenticated client with a session token.
-    pub fn with_token(server_url: &str, token: String) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            server_url: server_url.trim_end_matches('/').to_string(),
-            token: Some(token),
-        }
-    }
-
-    /// Set or replace the session token.
-    pub fn set_token(&mut self, token: String) {
-        self.token = Some(token);
+    /// Configure this client for authenticated requests. Lazy: challenge/
+    /// response runs on the first authenticated call. Pass a pre-fetched
+    /// `initial_token` (e.g. from `register`) to skip the first round trip.
+    pub fn with_signer(
+        self,
+        did: String,
+        device_id: u32,
+        signer: Arc<dyn Signer>,
+        initial_token: Option<String>,
+    ) -> Self {
+        *self.auth.lock().unwrap() = Some(AuthState {
+            did,
+            device_id,
+            signer,
+            token: initial_token,
+        });
+        self
     }
 
     pub fn server_url(&self) -> &str {
         &self.server_url
     }
 
-    /// Get the current session token, if set.
-    pub fn token(&self) -> Option<&str> {
-        self.token.as_deref()
+    /// Get the current session token, if set. Used by the WebSocket client.
+    pub fn token(&self) -> Option<String> {
+        self.auth.lock().unwrap().as_ref().and_then(|a| a.token.clone())
+    }
+
+    /// Acquire a session token via challenge/response if we don't have one.
+    /// Idempotent. Safe under concurrent callers (the double-check pattern
+    /// means at most one wasted nonce request per race).
+    pub async fn ensure_authenticated(&self) -> Result<(), NetError> {
+        // Fast path: token already present.
+        {
+            let auth = self.auth.lock().unwrap();
+            match auth.as_ref() {
+                Some(a) if a.token.is_some() => return Ok(()),
+                None => return Err(NetError::NoSigner),
+                _ => {}
+            }
+        }
+        // Slow path: extract what we need under the lock, release, then do I/O.
+        let (did, device_id, signer) = {
+            let auth = self.auth.lock().unwrap();
+            let a = auth.as_ref().ok_or(NetError::NoSigner)?;
+            if a.token.is_some() { return Ok(()); }
+            (a.did.clone(), a.device_id, a.signer.clone())
+        };
+
+        let nonce = self.challenge(&did, device_id as i32).await?;
+        let nonce_bytes = BASE64_URL_SAFE_NO_PAD
+            .decode(&nonce)
+            .map_err(|e| NetError::Base64(e.to_string()))?;
+        let sig = signer.sign(&nonce_bytes).map_err(NetError::Signing)?;
+        let resp = self.authenticate(&did, device_id as i32, &nonce, &sig).await?;
+
+        let mut auth = self.auth.lock().unwrap();
+        if let Some(a) = auth.as_mut() {
+            // Another caller may have set it concurrently; first-write wins.
+            if a.token.is_none() {
+                a.token = Some(resp.session_token);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop the cached token. Called internally on 401 before re-auth.
+    fn clear_token(&self) {
+        if let Some(a) = self.auth.lock().unwrap().as_mut() {
+            a.token = None;
+        }
+    }
+
+    /// Issue an authenticated request. Builds the request via `build`, sends
+    /// it, and on HTTP 401 transparently re-authenticates and retries once.
+    ///
+    /// `build` receives a fresh `RequestBuilder` with the bearer token already
+    /// applied; the closure adds headers, body, query params, etc.
+    async fn send_authed<F>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        build: F,
+    ) -> Result<reqwest::Response, NetError>
+    where
+        F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    {
+        let url = format!("{}{}", self.server_url, path);
+
+        self.ensure_authenticated().await?;
+        let token = self.token().ok_or(NetError::NoSigner)?;
+        let resp = build(self.http.request(method.clone(), &url).bearer_auth(&token))
+            .send()
+            .await?;
+        if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(resp);
+        }
+
+        // Token rejected — drop, re-auth, retry exactly once.
+        self.clear_token();
+        self.ensure_authenticated().await?;
+        let token = self.token().ok_or(NetError::NoSigner)?;
+        Ok(build(self.http.request(method, &url).bearer_auth(&token))
+            .send()
+            .await?)
     }
 
     // ── Account ──────────────────────────────────────────────────────────
@@ -196,9 +317,8 @@ impl Client {
             ));
         }
 
-        let resp = self.authed_request(reqwest::Method::PUT, "/v1/prekeys")
-            .json(&body)
-            .send()
+        let resp = self
+            .send_authed(reqwest::Method::PUT, "/v1/prekeys", |b| b.json(&body))
             .await?;
 
         if !resp.status().is_success() {
@@ -214,12 +334,10 @@ impl Client {
         did: &str,
         device_id: i32,
     ) -> Result<PreKeyBundleResponse, NetError> {
-        let resp = self.authed_request(
-            reqwest::Method::GET,
-            &format!("/v1/prekeys/{}/{}", did, device_id),
-        )
-        .send()
-        .await?;
+        let path = format!("/v1/prekeys/{}/{}", did, device_id);
+        let resp = self
+            .send_authed(reqwest::Method::GET, &path, |b| b)
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -232,8 +350,8 @@ impl Client {
 
     /// Check remaining prekey pool counts.
     pub async fn prekey_status(&self) -> Result<PrekeyStatusResponse, NetError> {
-        let resp = self.authed_request(reqwest::Method::GET, "/v1/prekeys/status")
-            .send()
+        let resp = self
+            .send_authed(reqwest::Method::GET, "/v1/prekeys/status", |b| b)
             .await?;
 
         let status = resp.status();
@@ -260,10 +378,10 @@ impl Client {
             }
             obj
         }).collect();
+        let body = serde_json::json!({"messages": wire});
 
-        let resp = self.authed_request(reqwest::Method::POST, "/v1/messages")
-            .json(&serde_json::json!({"messages": wire}))
-            .send()
+        let resp = self
+            .send_authed(reqwest::Method::POST, "/v1/messages", |b| b.json(&body))
             .await?;
 
         let status = resp.status();
@@ -281,8 +399,8 @@ impl Client {
 
     /// Fetch queued messages for the authenticated device.
     pub async fn fetch_messages(&self) -> Result<Vec<InboundMessage>, NetError> {
-        let resp = self.authed_request(reqwest::Method::GET, "/v1/messages")
-            .send()
+        let resp = self
+            .send_authed(reqwest::Method::GET, "/v1/messages", |b| b)
             .await?;
 
         let status = resp.status();
@@ -296,9 +414,9 @@ impl Client {
 
     /// Acknowledge (delete) delivered messages.
     pub async fn ack_messages(&self, message_ids: &[i64]) -> Result<(), NetError> {
-        let resp = self.authed_request(reqwest::Method::DELETE, "/v1/messages")
-            .json(&serde_json::json!({"message_ids": message_ids}))
-            .send()
+        let body = serde_json::json!({"message_ids": message_ids});
+        let resp = self
+            .send_authed(reqwest::Method::DELETE, "/v1/messages", |b| b.json(&body))
             .await?;
 
         if !resp.status().is_success() {
@@ -330,9 +448,9 @@ impl Client {
         &self,
         project_url: &str,
     ) -> Result<ProjectTokenResponse, NetError> {
-        let resp = self.authed_request(reqwest::Method::POST, "/v1/project-token")
-            .json(&serde_json::json!({"project_url": project_url}))
-            .send()
+        let body = serde_json::json!({"project_url": project_url});
+        let resp = self
+            .send_authed(reqwest::Method::POST, "/v1/project-token", |b| b.json(&body))
             .await?;
 
         let status = resp.status();
@@ -347,9 +465,9 @@ impl Client {
 
     /// Register a push pseudonym with the homeserver.
     pub async fn register_push_pseudonym(&self, pseudonym: &str) -> Result<(), NetError> {
-        let resp = self.authed_request(reqwest::Method::POST, "/v1/push/register")
-            .json(&serde_json::json!({"pseudonym": pseudonym}))
-            .send()
+        let body = serde_json::json!({"pseudonym": pseudonym});
+        let resp = self
+            .send_authed(reqwest::Method::POST, "/v1/push/register", |b| b.json(&body))
             .await?;
 
         if !resp.status().is_success() {
@@ -361,9 +479,9 @@ impl Client {
 
     /// Unregister a push pseudonym (e.g. on rotation or logout).
     pub async fn unregister_push_pseudonym(&self, pseudonym: &str) -> Result<(), NetError> {
-        let resp = self.authed_request(reqwest::Method::POST, "/v1/push/unregister")
-            .json(&serde_json::json!({"pseudonym": pseudonym}))
-            .send()
+        let body = serde_json::json!({"pseudonym": pseudonym});
+        let resp = self
+            .send_authed(reqwest::Method::POST, "/v1/push/unregister", |b| b.json(&body))
             .await?;
 
         if !resp.status().is_success() {
@@ -377,9 +495,9 @@ impl Client {
 
     /// Look up an account's display name and bot flag.
     pub async fn get_account_info(&self, did: &str) -> Result<AccountInfoResponse, NetError> {
+        let path = format!("/v1/accounts/{}", did);
         let resp = self
-            .authed_request(reqwest::Method::GET, &format!("/v1/accounts/{}", did))
-            .send()
+            .send_authed(reqwest::Method::GET, &path, |b| b)
             .await?;
 
         let status = resp.status();
@@ -393,9 +511,9 @@ impl Client {
     /// List the active device_ids for an account. Used by senders to fan-out
     /// encrypted message envelopes across all of a recipient's devices.
     pub async fn fetch_devices(&self, did: &str) -> Result<Vec<i32>, NetError> {
+        let path = format!("/v1/accounts/{}/devices", did);
         let resp = self
-            .authed_request(reqwest::Method::GET, &format!("/v1/accounts/{}/devices", did))
-            .send()
+            .send_authed(reqwest::Method::GET, &path, |b| b)
             .await?;
 
         let status = resp.status();
@@ -457,11 +575,11 @@ impl Client {
 
     /// Update the encrypted recovery blob (authenticated).
     pub async fn update_recovery_blob(&self, blob: &[u8]) -> Result<(), NetError> {
-        let resp = self.authed_request(reqwest::Method::PUT, "/v1/recovery")
-            .json(&serde_json::json!({
-                "recovery_blob": BASE64_STANDARD.encode(blob),
-            }))
-            .send()
+        let body = serde_json::json!({
+            "recovery_blob": BASE64_STANDARD.encode(blob),
+        });
+        let resp = self
+            .send_authed(reqwest::Method::PUT, "/v1/recovery", |b| b.json(&body))
             .await?;
 
         if !resp.status().is_success() {
@@ -516,11 +634,11 @@ impl Client {
 
     /// Upload the caller's encrypted profile blob.
     pub async fn put_profile(&self, encrypted_blob: &[u8]) -> Result<(), NetError> {
-        let resp = self.authed_request(reqwest::Method::PUT, "/v1/profile")
-            .json(&serde_json::json!({
-                "encrypted_blob": BASE64_STANDARD.encode(encrypted_blob),
-            }))
-            .send()
+        let body = serde_json::json!({
+            "encrypted_blob": BASE64_STANDARD.encode(encrypted_blob),
+        });
+        let resp = self
+            .send_authed(reqwest::Method::PUT, "/v1/profile", |b| b.json(&body))
             .await?;
 
         if !resp.status().is_success() {
@@ -533,9 +651,9 @@ impl Client {
     /// (which is returned identically whether the DID is unknown or simply
     /// has no profile, so callers can't distinguish those cases).
     pub async fn get_profile(&self, did: &str) -> Result<Option<Vec<u8>>, NetError> {
+        let path = format!("/v1/profile/{}", did);
         let resp = self
-            .authed_request(reqwest::Method::GET, &format!("/v1/profile/{}", did))
-            .send()
+            .send_authed(reqwest::Method::GET, &path, |b| b)
             .await?;
 
         let status = resp.status();
@@ -553,15 +671,5 @@ impl Client {
             .decode(&body.encrypted_blob)
             .map_err(|e| NetError::Base64(e.to_string()))?;
         Ok(Some(blob))
-    }
-
-    // ── Helpers ──────────────────────────────────────────────────────────
-
-    fn authed_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let mut req = self.http.request(method, format!("{}{}", self.server_url, path));
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
-        }
-        req
     }
 }

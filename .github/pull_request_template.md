@@ -24,7 +24,7 @@
 - [ ] `GET` endpoints that return user data are authenticated (no accidental public exposure)
 
 ### Mobile / FFI PRs
-- [ ] `make bindings` was run after any changes to `core/crates/app-core/src/lib.rs`
+- [ ] `make ios` was run after any changes to `core/crates/app-core/src/lib.rs` (regenerates bindings + xcframework as needed)
 - [ ] New FFI methods added to `AppCoreProtocol` in `ActnetService.swift`
 - [ ] New FFI methods stubbed in `MockActnetService.swift`
 - [ ] FFI exports are synchronous (no async FFI boundary crossings)

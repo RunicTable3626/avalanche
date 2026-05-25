@@ -195,6 +195,17 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
     }
 }
 
+/// Mock `PreparedAccountProtocol` that just hands back a fabricated DID.
+final class MockPreparedAccount: PreparedAccountProtocol, @unchecked Sendable {
+    private let storedDid: String
+
+    init() {
+        self.storedDid = "did:plc:mock\(UUID().uuidString.prefix(8).lowercased())"
+    }
+
+    func did() -> String { storedDid }
+}
+
 /// Mock service that creates fake accounts and seeds initial conversations.
 struct MockActnetService: ActnetService {
     func createAccount(serverUrl: String, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol {
@@ -204,6 +215,15 @@ struct MockActnetService: ActnetService {
 
     func login(dbPath: String, dbKey: String) throws -> any AppCoreProtocol {
         MockAppCore()
+    }
+
+    func prepareAccount(serverUrl: String) throws -> any PreparedAccountProtocol {
+        MockPreparedAccount()
+    }
+
+    func finalizeAccount(prepared: any PreparedAccountProtocol, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol {
+        Thread.sleep(forTimeInterval: 0.5)
+        return MockAppCore(did: prepared.did(), displayName: displayName)
     }
 }
 

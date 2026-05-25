@@ -7,7 +7,13 @@ struct RecoveryConsoleView: View {
     let did: String
 
     @State private var logLines: [String] = []
-    @State private var serverUrlInput = ""
+    @State private var serverUrlInput: String = {
+        #if DEBUG
+        return "http://localhost:3000"
+        #else
+        return ""
+        #endif
+    }()
     @State private var needsServerUrl = false
 
     var body: some View {

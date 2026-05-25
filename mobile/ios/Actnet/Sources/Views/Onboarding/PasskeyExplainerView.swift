@@ -105,29 +105,37 @@ struct PasskeyExplainerView: View {
                     return
                 }
 
+                // Stage 1: pre-compute the DID locally so the passkey credential
+                // can be created with the real DID as its user handle. This is
+                // what makes recovery work later — the assertion returns the DID,
+                // and we use it to fetch the recovery blob from the home server.
+                let prepared = try await appState.prepareAccount(
+                    serverUrl: inviteToken.serverUrl.absoluteString
+                )
+
                 let passkeyManager = PasskeyManager()
-                // The DID doesn't exist yet — we use a placeholder that will be
-                // stored in the passkey's user handle. During recovery, the client
-                // reads this to know which DID to look up. We'll create the account
-                // first to get the DID, but since we need the recovery key before
-                // registration, we use a temporary ID and the server will assign the
-                // real DID.
-                //
-                // Actually, the flow is: create passkey → get recovery key →
-                // create account (which generates the DID) → done.
-                // The DID in the passkey is for recovery lookup. Since we don't have
-                // it yet, we register the passkey with a placeholder and would need
-                // to update it later. For now, we proceed with the registration and
-                // the recovery blob on the server is keyed by DID anyway.
-                let tempId = "pending-\(UUID().uuidString.prefix(8))"
                 let result = try await passkeyManager.register(
-                    did: tempId,
+                    did: prepared.did(),
                     displayName: displayName,
                     anchor: window
                 )
 
-                // Now create the account with the PRF-derived recovery key.
-                register(recoveryKey: result.recoveryKey)
+                // Stage 2: submit PLC genesis + register with the homeserver,
+                // encrypting the recovery blob under the passkey's PRF-derived key.
+                try await appState.finalizePreparedAccount(
+                    prepared: prepared,
+                    serverUrl: inviteToken.serverUrl.absoluteString,
+                    serverName: inviteToken.serverName,
+                    displayName: displayName,
+                    recoveryKey: result.recoveryKey
+                )
+
+                if let redirect = inviteToken.postOnboardingRedirect,
+                   let url = URL(string: redirect) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        appState.handleDeepLink(url)
+                    }
+                }
             } catch let error as ASAuthorizationError where error.code == .canceled {
                 // User cancelled — don't show error, just re-enable buttons.
                 isRegistering = false

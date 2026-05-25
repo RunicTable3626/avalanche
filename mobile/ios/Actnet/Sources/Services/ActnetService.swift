@@ -10,15 +10,13 @@ protocol ActnetService: Sendable {
     /// freshly generated profile key and uploaded alongside registration.
     func createAccount(serverUrl: String, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol
     func login(dbPath: String, dbKey: String) throws -> any AppCoreProtocol
-}
 
-/// Uses the real UniFFI-generated AppCore bindings.
-/// Uncomment when the Rust XCFramework is linked.
-// struct RealActnetService: ActnetService {
-//     func createAccount(serverUrl: String, dbPath: String, dbKey: String, recoveryKey: Data) throws -> any AppCoreProtocol {
-//         try AppCore.createAccount(serverUrl: serverUrl, dbPath: dbPath, dbKey: dbKey, recoveryKey: recoveryKey)
-//     }
-//     func login(dbPath: String, dbKey: String) throws -> any AppCoreProtocol {
-//         try AppCore.login(dbPath: dbPath, dbKey: dbKey)
-//     }
-// }
+    /// Two-stage account creation for the passkey flow. Stage 1: generate
+    /// identity + rotation keys and derive the DID locally so the passkey
+    /// ceremony can write the real DID into the credential's user handle.
+    func prepareAccount(serverUrl: String) throws -> any PreparedAccountProtocol
+
+    /// Stage 2: consume the prepared handle, submit the PLC genesis op, and
+    /// register the account with the homeserver.
+    func finalizeAccount(prepared: any PreparedAccountProtocol, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol
+}

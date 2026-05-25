@@ -11,4 +11,26 @@ struct DevServerActnetService: ActnetService {
     func login(dbPath: String, dbKey: String) throws -> any AppCoreProtocol {
         try AppCore.login(dbPath: dbPath, dbKey: dbKey)
     }
+
+    func prepareAccount(serverUrl: String) throws -> any PreparedAccountProtocol {
+        try PreparedAccount(serverUrl: serverUrl)
+    }
+
+    func finalizeAccount(prepared: any PreparedAccountProtocol, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol {
+        guard let concrete = prepared as? PreparedAccount else {
+            throw ActnetServiceError.preparedAccountTypeMismatch
+        }
+        return try AppCore.finalizeAccount(prepared: concrete, dbPath: dbPath, dbKey: dbKey, recoveryKey: recoveryKey, displayName: displayName)
+    }
+}
+
+enum ActnetServiceError: LocalizedError {
+    case preparedAccountTypeMismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .preparedAccountTypeMismatch:
+            return "PreparedAccount instance does not match the active ActnetService."
+        }
+    }
 }

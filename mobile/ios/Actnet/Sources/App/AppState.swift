@@ -261,6 +261,54 @@ final class AppState: ObservableObject {
             try svc.createAccount(serverUrl: serverUrl, dbPath: dbPath, dbKey: dbKey, recoveryKey: rk, displayName: dn)
         }.value
 
+        try await finishAccountRegistration(core: core, serverUrl: serverUrl, serverName: serverName, displayName: displayName, dbFilename: dbFilename)
+    }
+
+    /// Prepare a fresh identity (Stage 1 of the passkey flow). The returned
+    /// `PreparedAccountProtocol` exposes the DID derived from the new keys,
+    /// which the caller writes into the passkey's user handle before
+    /// completing registration via `finalizePreparedAccount`.
+    func prepareAccount(serverUrl: String) async throws -> any PreparedAccountProtocol {
+        let svc = _service
+        return try await Task.detached {
+            try svc.prepareAccount(serverUrl: serverUrl)
+        }.value
+    }
+
+    /// Finalize an account previously created by `prepareAccount` (Stage 2 of
+    /// the passkey flow). Submits the PLC genesis op and registers with the
+    /// server using the prepared keys.
+    func finalizePreparedAccount(
+        prepared: any PreparedAccountProtocol,
+        serverUrl: String,
+        serverName: String,
+        displayName: String,
+        recoveryKey: Data
+    ) async throws {
+        let dir = dbDir
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let dbFilename = "account-\(UUID().uuidString.prefix(8)).db"
+        let dbPath = dir.appendingPathComponent(dbFilename).path
+        let dbKey = try SecureEnclaveKeyManager.dbPassphrase()
+
+        let svc = _service
+        let rk = recoveryKey
+        let dn = displayName
+        let core = try await Task.detached {
+            try svc.finalizeAccount(prepared: prepared, dbPath: dbPath, dbKey: dbKey, recoveryKey: rk, displayName: dn)
+        }.value
+
+        try await finishAccountRegistration(core: core, serverUrl: serverUrl, serverName: serverName, displayName: displayName, dbFilename: dbFilename)
+    }
+
+    private func finishAccountRegistration(
+        core: any AppCoreProtocol,
+        serverUrl: String,
+        serverName: String,
+        displayName: String,
+        dbFilename: String
+    ) async throws {
         let did = core.did()
         cores[did] = core
 

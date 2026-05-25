@@ -174,7 +174,54 @@ impl AppCore {
             None
         };
 
-        let inner = rt.block_on(Self::create_inner(&server_url, store, Some(display_name), false, rk.as_ref(), true))
+        let prepared = PreparedAccountState::prepare(server_url, true)
+            .map_err(AppErrorFfi::from)?;
+        let inner = rt.block_on(Self::create_inner(prepared, store, Some(display_name), false, rk.as_ref()))
+            .map_err(AppErrorFfi::from)?;
+
+        Ok(Arc::new(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) }))
+    }
+
+    /// Finalize account registration using a previously prepared identity.
+    ///
+    /// Use this when the passkey ceremony needs the DID up front: call
+    /// [`PreparedAccount::new`] first to compute the DID locally, register the
+    /// passkey with that DID, then call this to encrypt the recovery blob,
+    /// submit the PLC genesis op, and complete server registration.
+    ///
+    /// The `prepared` handle is consumed (its inner state is moved out); a
+    /// second call with the same handle returns an error.
+    #[uniffi::constructor]
+    pub fn finalize_account(
+        prepared: Arc<PreparedAccount>,
+        db_path: String,
+        db_key: String,
+        recovery_key: Vec<u8>,
+        display_name: String,
+    ) -> Result<Arc<Self>, AppErrorFfi> {
+        let rt = ffi_runtime();
+
+        let state = prepared
+            .state
+            .blocking_lock()
+            .take()
+            .ok_or_else(|| AppError::Protocol("PreparedAccount already consumed".into()))
+            .map_err(AppErrorFfi::from)?;
+
+        let store = rt.block_on(store::Store::open(
+            Path::new(&db_path),
+            &store::DatabaseKey::from_passphrase(db_key),
+        )).map_err(AppError::from).map_err(AppErrorFfi::from)?;
+
+        let rk = if recovery_key.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&recovery_key);
+            Some(arr)
+        } else {
+            None
+        };
+
+        let inner = rt.block_on(Self::create_inner(state, store, Some(display_name), false, rk.as_ref()))
             .map_err(AppErrorFfi::from)?;
 
         Ok(Arc::new(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) }))
@@ -726,18 +773,102 @@ impl AppCore {
     }
 }
 
+// ── Prepared account state ──────────────────────────────────────────────────
+
+/// Pre-computed identity material whose DID can be known *before* server
+/// registration — useful when the passkey ceremony needs to write the DID
+/// into the credential's user handle. PLC submission is deferred to
+/// [`AppCore::finalize_account`] so that a cancelled passkey ceremony does
+/// not leave a stranded DID in the directory.
+struct PreparedAccountState {
+    server_url: String,
+    identity: crypto::IdentityKeyPair,
+    rotation_key_private: Vec<u8>,
+    rotation_key_public: Vec<u8>,
+    /// Some when we're using the PLC directory (the signed genesis op is
+    /// submitted during finalize); None for the bot/test path.
+    signed_genesis: Option<plc::PlcOperation>,
+    did: Option<String>,
+}
+
+impl PreparedAccountState {
+    fn prepare(server_url: String, use_plc_directory: bool) -> Result<Self, AppError> {
+        let identity = crypto::IdentityKeyPair::generate();
+        let (rot_priv, rot_pub) = recovery::generate_rotation_key();
+
+        let (signed_genesis, did) = if use_plc_directory {
+            let identity_pub_bytes = identity.public_key().serialize();
+            let genesis_op = plc::build_genesis_op(&rot_pub, &identity_pub_bytes, &server_url);
+            let signed = plc::sign_plc_op(&genesis_op, &rot_priv)?;
+            let did = plc::derive_did(&signed)?;
+            (Some(signed), Some(did))
+        } else {
+            (None, None)
+        };
+
+        Ok(Self {
+            server_url,
+            identity,
+            rotation_key_private: rot_priv,
+            rotation_key_public: rot_pub,
+            signed_genesis,
+            did,
+        })
+    }
+}
+
+/// FFI handle wrapping a [`PreparedAccountState`]. Consumed by
+/// [`AppCore::finalize_account`] (the inner state is moved out).
+#[derive(uniffi::Object)]
+pub struct PreparedAccount {
+    state: Mutex<Option<PreparedAccountState>>,
+}
+
+#[uniffi::export]
+impl PreparedAccount {
+    /// Generate identity + rotation keys and derive the DID locally.
+    /// Does **not** submit the PLC genesis op or contact the home server —
+    /// those happen in [`AppCore::finalize_account`].
+    #[uniffi::constructor]
+    pub fn new(server_url: String) -> Result<Arc<Self>, AppErrorFfi> {
+        let state = PreparedAccountState::prepare(server_url, true)
+            .map_err(AppErrorFfi::from)?;
+        Ok(Arc::new(Self {
+            state: Mutex::new(Some(state)),
+        }))
+    }
+
+    /// The DID derived from the prepared keys. Empty string if the handle has
+    /// already been consumed by `finalize_account`.
+    pub fn did(&self) -> String {
+        self.state
+            .blocking_lock()
+            .as_ref()
+            .and_then(|s| s.did.clone())
+            .unwrap_or_default()
+    }
+}
+
 // ── Internal async implementation (not exported via FFI) ────────────────────
 
 impl AppCore {
     async fn create_inner(
-        server_url: &str,
+        prepared: PreparedAccountState,
         store: store::Store,
         display_name: Option<String>,
         is_bot: bool,
         recovery_key: Option<&[u8; 32]>,
-        use_plc_directory: bool,
     ) -> Result<AppCoreInner, AppError> {
-        let identity = crypto::IdentityKeyPair::generate();
+        let PreparedAccountState {
+            server_url,
+            identity,
+            rotation_key_private,
+            rotation_key_public,
+            signed_genesis,
+            did: client_did,
+        } = prepared;
+        let server_url = server_url.as_str();
+
         let registration_id = rand::Rng::random::<u32>(&mut rand::rng()) & 0x3FFF;
         let device_id = 1u32;
 
@@ -748,24 +879,10 @@ impl AppCore {
             .map(|id| crypto::prekeys::generate_kyber_prekey(&identity, id))
             .collect::<Result<_, _>>()?;
 
-        // Generate P-256 rotation key for DID and recovery.
-        let (rotation_key_private, rotation_key_public) = recovery::generate_rotation_key();
-
-        // Build and submit DID genesis operation to the PLC directory.
-        let client_did = if use_plc_directory {
-            let identity_pub_bytes = identity.public_key().serialize();
-            let genesis_op = plc::build_genesis_op(
-                &rotation_key_public,
-                &identity_pub_bytes,
-                server_url,
-            );
-            let signed_op = plc::sign_plc_op(&genesis_op, &rotation_key_private)?;
-            let did = plc::derive_did(&signed_op)?;
-            plc::submit_genesis(&did, &signed_op).await?;
-            Some(did)
-        } else {
-            None
-        };
+        // Submit the deferred PLC genesis op (if any) — we already have the DID.
+        if let (Some(signed_op), Some(did)) = (signed_genesis.as_ref(), client_did.as_ref()) {
+            plc::submit_genesis(did, signed_op).await?;
+        }
 
         // Build and encrypt recovery blob if a recovery key is provided.
         let recovery_blob = if let Some(key) = recovery_key {
@@ -932,7 +1049,8 @@ impl AppCore {
         display_name: Option<String>,
         is_bot: bool,
     ) -> Result<Self, AppError> {
-        let inner = Self::create_inner(server_url, store, display_name, is_bot, None, false).await?;
+        let prepared = PreparedAccountState::prepare(server_url.to_string(), false)?;
+        let inner = Self::create_inner(prepared, store, display_name, is_bot, None).await?;
         Ok(Self { inner: Mutex::new(inner), ws: Mutex::new(None), receipt_updates: Mutex::new(Vec::new()) })
     }
 

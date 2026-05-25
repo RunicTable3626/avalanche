@@ -25,7 +25,6 @@
 - Contact list backup: we're interested in persisting the user's contacts separately from their identity keys, in hopes that if they lose identity keys at least they can reestablish contact with the people they were previously communicating with under a new ID. The contacts aren't that sensitive, but the tricky bit is that each of your contact is attached to one of your own identities and we don't want to mix them up. You might also want to be able to manually export your contacts list in some standard format that can be processed by other apps too.
 
 ## Crypto / protocol
-- Stale device detection: when a device re-registers (new identity key, new prekeys), the server should reject messages sent to the old device state. `POST /v1/messages` should check that the sender's session is compatible with the recipient's current registration (e.g., compare `registration_id`). On rejection, the sender's client should fetch the new prekey bundle and re-establish the session. Without this, messages encrypted to old keys are silently undeliverable after a key reset.
 
 ## Server
 - WebSocket request/response framing: tunnel HTTP-style request/response pairs over the WebSocket (like Signal does), with request IDs and correlated responses. Move message sends and acks onto the WS transport, replacing the current split of HTTP sends + WS acks. This gives persistent-connection benefits while keeping clear success/failure semantics per operation.

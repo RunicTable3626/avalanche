@@ -43,14 +43,20 @@ final class AppState: ObservableObject {
     /// only when viewing the relevant conversation).
     @Published var isAppActive: Bool = true
 
+    /// Per-account connection state, keyed by DID. Sourced from the Rust
+    /// reconnect task via `waitForConnectionStateChange`.
+    @Published var connectionStates: [String: ConnectionState] = [:]
+
     enum Tab {
         case calls, chats, network
     }
 
     /// Active AppCore instances, keyed by DID.
     private var cores: [String: any AppCoreProtocol] = [:]
-    /// Running WebSocket loop tasks, keyed by DID. Cancelled when account is removed.
-    private var wsLoopTasks: [String: Task<Void, Never>] = [:]
+    /// Per-account connection-state listener tasks. Cancelled on logout/mode switch.
+    private var stateTasks: [String: Task<Void, Never>] = [:]
+    /// Per-account event-channel listener tasks. Cancelled on logout/mode switch.
+    private var eventTasks: [String: Task<Void, Never>] = [:]
     /// Cached display names for remote DIDs, keyed by DID.
     private var displayNameCache: [String: String] = [:]
     /// DIDs currently being fetched (to avoid duplicate requests).
@@ -180,6 +186,22 @@ final class AppState: ObservableObject {
                     try svc.login(dbPath: dbPath, dbKey: dbKey)
                 }.value
                 self.cores[core.did()] = core
+
+                // Refresh display name from the local profile store. The
+                // persisted name in UserDefaults can be stale (e.g. recovered
+                // accounts started with an empty placeholder).
+                if let coreName = try? await Task.detached(operation: { try core.ownDisplayName() }).value,
+                   !coreName.isEmpty,
+                   coreName != p.displayName,
+                   let idx = accounts.firstIndex(where: { $0.id == p.did }) {
+                    accounts[idx].displayName = coreName
+                    Self.persistAccount(PersistedAccount(
+                        did: p.did,
+                        displayName: coreName,
+                        dbFilename: p.dbFilename,
+                        servers: p.servers
+                    ))
+                }
             } catch {
                 print("Failed to authenticate account \(p.did) (will show offline): \(error)")
             }
@@ -209,12 +231,12 @@ final class AppState: ObservableObject {
     }
 
     func logout() {
-        for (_, task) in wsLoopTasks { task.cancel() }
-        wsLoopTasks.removeAll()
+        cancelAllListenerTasks()
         accounts.removeAll()
         conversations.removeAll()
         messagesByConversation.removeAll()
         cores.removeAll()
+        connectionStates.removeAll()
         displayNameCache.removeAll()
         displayNameInFlight.removeAll()
         Self.clearPersistedAccounts()
@@ -225,14 +247,14 @@ final class AppState: ObservableObject {
         serviceMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: Self.serviceModeKey)
         _service = Self.makeService(mode: mode)
-        // Cancel all WS loops before clearing state
-        for (_, task) in wsLoopTasks { task.cancel() }
-        wsLoopTasks.removeAll()
+        // Cancel all listener tasks before clearing state
+        cancelAllListenerTasks()
         // Reset state on mode switch
         accounts.removeAll()
         conversations.removeAll()
         messagesByConversation.removeAll()
         cores.removeAll()
+        connectionStates.removeAll()
         displayNameCache.removeAll()
         displayNameInFlight.removeAll()
         Self.clearPersistedAccounts()
@@ -345,9 +367,18 @@ final class AppState: ObservableObject {
             )
         }.value
 
-        let resolvedDisplayName = displayName.isEmpty
-            ? "Account \(String(did.suffix(6)))"
-            : displayName
+        // Prefer the display name that the recovery blob restored into the
+        // local profile store. Falls back to the user-supplied name, then to
+        // a placeholder.
+        let restoredName = (try? await Task.detached(operation: { try core.ownDisplayName() }).value) ?? ""
+        let resolvedDisplayName: String
+        if !restoredName.isEmpty {
+            resolvedDisplayName = restoredName
+        } else if !displayName.isEmpty {
+            resolvedDisplayName = displayName
+        } else {
+            resolvedDisplayName = "Account \(String(did.suffix(6)))"
+        }
         try await finishAccountRegistration(
             core: core,
             serverUrl: serverUrl,
@@ -485,24 +516,51 @@ final class AppState: ObservableObject {
     func sendMessage(conversationId: String, text: String, recipientDid: String, senderAccountId: String, messageId: String, sentAtMs: Int64) async throws {
         guard let core = cores[senderAccountId] else { return }
         let plaintext = Data(text.utf8)
-
-        // Persist outbound message to SQLCipher (outgoing messages are immediately "read").
         let nowMs = sentAtMs
-        let stored = StoredMessageFfi(
+
+        // Persist as "sending" up front so failures are recoverable across launches.
+        let pending = StoredMessageFfi(
             id: messageId,
             conversationId: conversationId,
             senderDid: senderAccountId,
             body: text,
             sentAtMs: nowMs,
             editedAtMs: nil,
-            readAtMs: nowMs,  // outgoing = immediately read
-            deliveryStatus: 1  // sent
+            readAtMs: nowMs,
+            deliveryStatus: UInt8(DeliveryStatus.sending.rawValue)
         )
-        try await Task.detached { try core.saveMessage(msg: stored) }.value
+        try await Task.detached { try core.saveMessage(msg: pending) }.value
 
-        try await Task.detached {
-            try core.sendDm(recipientDid: recipientDid, plaintext: plaintext, sentAtMs: nowMs)
-        }.value
+        do {
+            try await Task.detached {
+                try core.sendDm(recipientDid: recipientDid, plaintext: plaintext, sentAtMs: nowMs)
+            }.value
+            updateMessageStatus(messageId: messageId, conversationId: conversationId, newStatus: .sent)
+            let sent = StoredMessageFfi(
+                id: messageId, conversationId: conversationId, senderDid: senderAccountId,
+                body: text, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
+                deliveryStatus: UInt8(DeliveryStatus.sent.rawValue)
+            )
+            Task.detached { try? core.saveMessage(msg: sent) }
+        } catch {
+            AppLog.error("send", "DM to \(recipientDid) failed: \(error.localizedDescription)")
+            updateMessageStatus(messageId: messageId, conversationId: conversationId, newStatus: .failed)
+            let failed = StoredMessageFfi(
+                id: messageId, conversationId: conversationId, senderDid: senderAccountId,
+                body: text, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
+                deliveryStatus: UInt8(DeliveryStatus.failed.rawValue)
+            )
+            Task.detached { try? core.saveMessage(msg: failed) }
+            throw error
+        }
+    }
+
+    /// Update an in-memory message's delivery status by id.
+    private func updateMessageStatus(messageId: String, conversationId: String, newStatus: DeliveryStatus) {
+        guard var msgs = messagesByConversation[conversationId] else { return }
+        guard let idx = msgs.firstIndex(where: { $0.id == messageId }) else { return }
+        msgs[idx].deliveryStatus = newStatus
+        messagesByConversation[conversationId] = msgs
     }
 
     /// Mark all messages in a conversation as read (sets read_at on unread messages).
@@ -715,57 +773,126 @@ final class AppState: ObservableObject {
         }.value
     }
 
-    // MARK: - Message receiving (WebSocket)
+    // MARK: - Connection state + incoming events
 
-    /// Start a background WebSocket listener for each account that has a live core.
+    /// Aggregate connection state across all accounts. The banner shows
+    /// whenever any account is not `.connected`. Earliest backoff timestamp
+    /// wins the countdown.
+    var aggregateConnectionState: ConnectionState {
+        let states = connectionStates.values
+        if states.isEmpty { return .connected }
+        if states.allSatisfy({ if case .connected = $0 { return true }; return false }) {
+            return .connected
+        }
+        // Pick the "worst" — prefer Reconnecting (earliest next attempt), then
+        // Connecting, then Disconnected, then Connected.
+        var bestReconnect: Int64?
+        var sawConnecting = false
+        var sawDisconnected = false
+        for state in states {
+            switch state {
+            case .reconnecting(let nextAttemptAtMs):
+                if let cur = bestReconnect {
+                    bestReconnect = min(cur, nextAttemptAtMs)
+                } else {
+                    bestReconnect = nextAttemptAtMs
+                }
+            case .connecting: sawConnecting = true
+            case .disconnected: sawDisconnected = true
+            case .connected: break
+            }
+        }
+        if let next = bestReconnect {
+            return .reconnecting(nextAttemptAtMs: next)
+        }
+        if sawConnecting { return .connecting }
+        if sawDisconnected { return .disconnected }
+        return .connected
+    }
+
+    /// Start the per-account state + event listener tasks for any account
+    /// that has a live core. Idempotent — restarts only missing tasks.
     func startMessagePolling() {
         for account in accounts {
             let accountId = account.id
-            // Skip if there's no core (account is offline) or loop already running.
-            guard cores[accountId] != nil, wsLoopTasks[accountId] == nil else { continue }
-            wsLoopTasks[accountId] = Task {
-                await messageWsLoop(accountId: accountId)
+            guard cores[accountId] != nil else { continue }
+            if stateTasks[accountId] == nil {
+                stateTasks[accountId] = Task { [accountId] in
+                    await connectionStateLoop(accountId: accountId)
+                }
+            }
+            if eventTasks[accountId] == nil {
+                eventTasks[accountId] = Task { [accountId] in
+                    await eventLoop(accountId: accountId)
+                }
             }
         }
     }
 
-    /// Connects via WebSocket and waits for messages. Reconnects on error.
-    /// Exits cleanly when the task is cancelled or the core is removed.
-    private func messageWsLoop(accountId: String) async {
-        print("[ws] starting message loop for \(accountId)")
+    /// Cancel all per-account listener tasks. Called on logout/mode switch.
+    private func cancelAllListenerTasks() {
+        for (_, task) in stateTasks { task.cancel() }
+        stateTasks.removeAll()
+        for (_, task) in eventTasks { task.cancel() }
+        eventTasks.removeAll()
+    }
+
+    /// Block on `waitForConnectionStateChange` in a loop and mirror updates
+    /// into `connectionStates[accountId]`.
+    private func connectionStateLoop(accountId: String) async {
+        AppLog.info("conn", "starting connection-state listener for \(accountId)")
+        // Seed from the current snapshot so we don't miss the initial transition.
+        guard let core = cores[accountId] else { return }
+        var last: ConnectionState = await Task.detached { core.connectionState() }.value
+        connectionStates[accountId] = last
         while !Task.isCancelled {
-            guard let core = cores[accountId] else {
-                // Core was removed (account deleted/recreated). Stop the loop.
-                print("[ws] no core for \(accountId), stopping loop")
+            guard let core = cores[accountId] else { break }
+            let lastSnapshot = last
+            let next: ConnectionState
+            do {
+                next = try await Task.detached { try core.waitForConnectionStateChange(last: lastSnapshot) }.value
+            } catch {
+                AppLog.warn("conn", "state listener for \(accountId) ended: \(error.localizedDescription)")
                 break
             }
+            guard !Task.isCancelled else { break }
+            last = next
+            connectionStates[accountId] = next
+        }
+        stateTasks.removeValue(forKey: accountId)
+        AppLog.info("conn", "connection-state listener ended for \(accountId)")
+    }
+
+    /// Block on `nextEvents` in a loop and dispatch each event.
+    private func eventLoop(accountId: String) async {
+        AppLog.info("evt", "starting event listener for \(accountId)")
+        while !Task.isCancelled {
+            guard let core = cores[accountId] else { break }
+            let events: [IncomingEvent]
             do {
-                let messages = try await Task.detached {
-                    try core.receiveMessagesWs()
-                }.value
-                guard !Task.isCancelled else { break }
-                print("[ws] received \(messages.count) message(s) for \(accountId)")
-                for msg in messages {
-                    handleIncomingMessage(msg, accountId: accountId)
-                }
-                // Apply any delivery status updates from incoming read receipts.
-                let updates = core.drainReceiptUpdates()
-                if !updates.isEmpty {
-                    applyDeliveryStatusUpdates(updates)
-                }
-                if messages.isEmpty && updates.isEmpty {
-                    // Connection closed — brief delay before reconnect.
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                }
+                events = try await Task.detached { try core.nextEvents() }.value
             } catch {
-                guard !Task.isCancelled else { break }
-                print("[ws] error for \(accountId): \(error), reconnecting in 2s")
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                AppLog.warn("evt", "event listener for \(accountId) ended: \(error.localizedDescription)")
+                break
+            }
+            guard !Task.isCancelled else { break }
+            var messages: [DecryptedMessage] = []
+            var receiptUpdates: [DeliveryStatusUpdate] = []
+            for ev in events {
+                switch ev {
+                case .message(let msg): messages.append(msg)
+                case .receiptUpdate(let upd): receiptUpdates.append(upd)
+                }
+            }
+            for msg in messages {
+                handleIncomingMessage(msg, accountId: accountId)
+            }
+            if !receiptUpdates.isEmpty {
+                applyDeliveryStatusUpdates(receiptUpdates)
             }
         }
-        // Clean up task reference on exit.
-        wsLoopTasks.removeValue(forKey: accountId)
-        print("[ws] loop ended for \(accountId)")
+        eventTasks.removeValue(forKey: accountId)
+        AppLog.info("evt", "event listener ended for \(accountId)")
     }
 
     private func handleIncomingMessage(_ msg: DecryptedMessage, accountId: String) {

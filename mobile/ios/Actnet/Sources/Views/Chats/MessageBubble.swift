@@ -58,6 +58,9 @@ struct MessageBubble: View {
                         .foregroundStyle(Color.avBrand)
                         .offset(x: 4)
                 )
+        case .failed:
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(Color.avError)
         }
     }
 }

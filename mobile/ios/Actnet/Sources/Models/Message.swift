@@ -5,6 +5,8 @@ enum DeliveryStatus: Int {
     case sent = 1
     case delivered = 2
     case read = 3
+    /// Send failed (network down, server rejected, etc.). UI shows a red indicator.
+    case failed = 4
 }
 
 struct Message: Identifiable {

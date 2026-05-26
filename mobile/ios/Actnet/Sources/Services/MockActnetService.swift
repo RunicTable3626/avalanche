@@ -109,9 +109,35 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         // Mock: no-op
     }
 
-    func drainReceiptUpdates() -> [DeliveryStatusUpdate] {
-        // Mock: no receipt updates
-        []
+    // MARK: - Connection state
+
+    func connectionState() -> ConnectionState {
+        // Mock is always "online".
+        .connected
+    }
+
+    func waitForConnectionStateChange(last: ConnectionState) throws -> ConnectionState {
+        // Mock never changes — block forever (the listener task is fine
+        // sitting on a never-resolving call).
+        Thread.sleep(forTimeInterval: 60 * 60)
+        return .connected
+    }
+
+    func nextEvents() throws -> [IncomingEvent] {
+        // Drain any pending incoming messages as Message events.
+        for _ in 0..<20 {
+            Thread.sleep(forTimeInterval: 0.1)
+            lock.lock()
+            if !pendingMessages.isEmpty {
+                let msgs = pendingMessages
+                pendingMessages.removeAll()
+                lock.unlock()
+                return msgs.map { IncomingEvent.message(msg: $0) }
+            }
+            lock.unlock()
+        }
+        // No events arrived in the polling window — return empty so caller loops.
+        return []
     }
 
     func hasRecovery() -> Bool {
@@ -161,22 +187,6 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         pendingMessages.removeAll()
         lock.unlock()
         return msgs
-    }
-
-    func receiveMessagesWs() throws -> [DecryptedMessage] {
-        // Simulate WebSocket blocking: sleep until messages arrive.
-        for _ in 0..<20 {
-            Thread.sleep(forTimeInterval: 0.1)
-            lock.lock()
-            if !pendingMessages.isEmpty {
-                let msgs = pendingMessages
-                pendingMessages.removeAll()
-                lock.unlock()
-                return msgs
-            }
-            lock.unlock()
-        }
-        return []
     }
 
     func enqueueMessage(from senderDid: String, text: String) {

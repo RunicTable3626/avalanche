@@ -18,7 +18,7 @@ use sqlx::PgPool;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{db, state::{AppState, WsMessage}};
+use crate::{db, state::{AppState, WsPush}};
 
 /// Spawn all background tasks.
 pub fn spawn_all(state: AppState) {
@@ -75,6 +75,10 @@ pub fn spawn_all(state: AppState) {
             let n = db::rate_limits::delete_stale(&mut conn).await?;
             if n > 0 {
                 tracing::info!(count = n, "stale rate limit counters deleted");
+            }
+            let n = db::ip_rate_limits::delete_stale(&mut conn).await?;
+            if n > 0 {
+                tracing::info!(count = n, "stale IP rate limit counters deleted");
             }
             Ok(())
         },
@@ -144,17 +148,15 @@ pub async fn notify_if_prekeys_low(
     conn: &mut sqlx::PgConnection,
     device_pk: i64,
     threshold: i64,
-    sender: &UnboundedSender<WsMessage>,
+    sender: &UnboundedSender<WsPush>,
 ) -> Result<(), sqlx::Error> {
     let one_time = db::prekeys::one_time_count(conn, device_pk).await?;
     let kyber = db::prekeys::one_time_kyber_count(conn, device_pk).await?;
     if one_time < threshold || kyber < threshold {
-        let msg = serde_json::json!({
-            "type": "prekey_low",
-            "one_time_remaining": one_time,
-            "kyber_remaining": kyber,
+        let _ = sender.send(WsPush::PrekeyLow {
+            one_time_remaining: one_time,
+            kyber_remaining: kyber,
         });
-        let _ = sender.send(WsMessage(msg.to_string()));
     }
     Ok(())
 }

@@ -21,6 +21,7 @@ tokio-rusqlite   = { workspace = true }
 # `ring` instead of the default openssl feature so the relay binary has
 # no C dependencies — clean musl static build for droplet deployment.
 a2               = { version = "0.10", default-features = false, features = ["ring"] }
+tower_governor   = "0.7"
 
 [[example]]
 name = "send_test_push"

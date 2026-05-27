@@ -6,7 +6,7 @@ content-free silent pushes when homeservers report offline messages.
 
 This guide walks through running it on a $5 DigitalOcean droplet.
 
-**Why so cheap:** the relay is stateless apart from a small SQLite file
+**Why so cheap:** the relay has very little state, just a small SQLite file
 (pseudonym → device token, with 7-day TTL). RAM use is ~10 MB, disk grows
 linearly with active devices. A `s-1vcpu-512mb-10gb` droplet handles
 hundreds of thousands of devices comfortably.
@@ -47,7 +47,6 @@ DigitalOcean → Create → Droplets:
 - **Size:** Basic → Regular → $4/mo (`s-1vcpu-512mb-10gb`)
 - **Region:** anywhere; latency to APNs/FCM doesn't matter much
 - **Auth:** SSH key (paste your `~/.ssh/id_ed25519.pub`)
-- **Hostname:** `relay-prod` (or whatever)
 
 Once it's up, point a DNS A record (`relay.theavalanche.net`) at the droplet's
 IPv4 address.

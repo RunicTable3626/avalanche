@@ -183,6 +183,8 @@ On iOS and Android, only Apple (APNs) and Google (FCM) can wake a backgrounded a
 
 The relay is operationally critical infrastructure and a metadata target, but far less leaky than any direct-to-APNs design. High-risk users can opt out and rely on manual fetch. The protocol should support multiple relays from day one so the app developer's relay is swappable, not a privileged singleton.
 
+The Avalanche-operated relay lives at **`https://relay.theavalanche.net`**. Homeservers point at it via `RELAY_URL` (see `docs/41-relay-deployment.md`); the mobile client picks it up at build time from the same env var.
+
 ## Signup and invitations
 
 Substrate-level registration is keys-only: the client generates an identity key pair and prekeys, sends them to the server, and gets back a DID and session token. No name, email, or phone number. Profile data (handle, avatar, bio) is optional and can be set at any time.

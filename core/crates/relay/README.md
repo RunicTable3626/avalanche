@@ -19,6 +19,18 @@ Homeserver-facing:
 
 - `POST /v1/wakeup` `{ pseudonyms: [..] }` — sends silent push to each
 
+## Rate limits
+
+Per source IP (extracted from `X-Forwarded-For` when behind Caddy, peer IP
+otherwise). Excess requests get HTTP 429.
+
+| Endpoints | Sustained | Burst |
+|---|---|---|
+| `/v1/register`, `/v1/unregister` | 10/min | 5 |
+| `/v1/wakeup` | 60/min | 30 |
+
+Request bodies are capped at 4 KB by `DefaultBodyLimit`.
+
 ## Running locally
 
 ```bash

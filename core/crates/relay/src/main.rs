@@ -41,13 +41,16 @@ use a2::{
     NotificationOptions, Priority, PushType,
 };
 use axum::{
-    extract::{Json, State},
+    extract::{DefaultBodyLimit, Json, State},
     http::StatusCode,
     routing::post,
     Router,
 };
 use serde::{Deserialize, Serialize};
 use tokio_rusqlite::Connection;
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
+};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -348,10 +351,49 @@ async fn main() {
 
     let state = Arc::new(RelayState { conn, apns });
 
-    let app = Router::new()
+    // Per-IP rate limits. SmartIpKeyExtractor reads X-Forwarded-For when
+    // present (set automatically by Caddy in the production deployment) and
+    // falls back to the connection peer IP. The production relay binds to
+    // 127.0.0.1, so only Caddy can reach it — direct connections that could
+    // spoof X-Forwarded-For aren't possible from outside the droplet.
+    //
+    // - register/unregister: one client touches these on app launch and on
+    //   weekly rotation. 10/min/IP with burst 5 covers NATed networks while
+    //   capping a flood attacker at ~600 inserts/hour.
+    // - wakeup: per-IP is per-homeserver in the homeserver→relay path.
+    //   60/min sustained, burst 30 handles announcement-group fan-out.
+    let register_limit = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(6)
+            .burst_size(5)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("register rate limiter"),
+    );
+    let wakeup_limit = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(1)
+            .burst_size(30)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("wakeup rate limiter"),
+    );
+
+    let register_routes = Router::new()
         .route("/v1/register", post(register))
         .route("/v1/unregister", post(unregister))
+        .layer(GovernorLayer { config: register_limit });
+
+    let wakeup_routes = Router::new()
         .route("/v1/wakeup", post(wakeup))
+        .layer(GovernorLayer { config: wakeup_limit });
+
+    let app = register_routes
+        .merge(wakeup_routes)
+        // Cap request bodies at 4 KB. Even a wakeup with many pseudonyms
+        // (each ~44 chars b64) fits well under this; a register payload
+        // (token ~64 hex + a few short strings) is well under 1 KB.
+        .layer(DefaultBodyLimit::max(4096))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

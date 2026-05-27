@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# First-boot bootstrap for an actnet homeserver droplet.
+# First-boot bootstrap for an Avalanche homeserver droplet.
 #
 # Paste this entire file into DigitalOcean's "Add Initial Scripts (user
 # data)" field when creating a droplet. It runs as root on first boot.
 #
 # What it does:
 #   - Installs Caddy (for HTTPS) and a few helpers.
-#   - Creates the `actnet` system user and config/data directories.
+#   - Creates the `avalanche` system user and config/data directories.
 #   - Drops in the systemd unit and Caddyfile templates.
 #   - Downloads the latest server binary release.
 #
 # What it does NOT do (the operator does these by hand after SSHing in):
-#   - Fill in /etc/actnet/actnet.env with their DATABASE_URL + domain.
+#   - Fill in /etc/avalanche/avalanche.env with their DATABASE_URL + domain.
 #   - Edit /etc/caddy/Caddyfile to set the actual hostname.
 #   - Run database migrations against the managed Postgres cluster.
-#   - Start the actnet service.
+#   - Start the avalanche service.
 #
 # See docs/40-deployment.md for the full walkthrough.
 
@@ -50,25 +50,25 @@ ufw allow 443/tcp
 ufw --force enable
 
 # ── 3. User + directories ───────────────────────────────────────────────────
-useradd --system --home /var/lib/actnet --shell /usr/sbin/nologin actnet || true
-install -d -o actnet -g actnet /var/lib/actnet
-install -d -o root   -g root   /etc/actnet
-install -d -o root   -g root   /usr/local/lib/actnet
+useradd --system --home /var/lib/avalanche --shell /usr/sbin/nologin avalanche || true
+install -d -o avalanche -g avalanche /var/lib/avalanche
+install -d -o root   -g root   /etc/avalanche
+install -d -o root   -g root   /usr/local/lib/avalanche
 
 # ── 4. Server binary ────────────────────────────────────────────────────────
-# TODO(deploy): once GitHub Releases publishes actnet-server-linux-x86_64,
+# TODO(deploy): once GitHub Releases publishes avalanche-server-linux-x86_64,
 # replace the placeholder below with a real download. For now this leaves
 # a marker file so the operator knows what's missing.
-BINARY_URL="${ACTNET_BINARY_URL:-}"
+BINARY_URL="${AVALANCHE_BINARY_URL:-}"
 if [[ -n "$BINARY_URL" ]]; then
-    curl -fsSL -o /usr/local/lib/actnet/actnet-server "$BINARY_URL"
-    chmod +x /usr/local/lib/actnet/actnet-server
+    curl -fsSL -o /usr/local/lib/avalanche/avalanche-server "$BINARY_URL"
+    chmod +x /usr/local/lib/avalanche/avalanche-server
 else
-    cat > /usr/local/lib/actnet/MISSING_BINARY <<'EOF'
+    cat > /usr/local/lib/avalanche/MISSING_BINARY <<'EOF'
 The server binary has not been downloaded yet. Either:
-  - Pass ACTNET_BINARY_URL in the cloud-init env, or
-  - Manually copy a built binary to /usr/local/lib/actnet/actnet-server
-    (chmod +x it), then `systemctl start actnet`.
+  - Pass AVALANCHE_BINARY_URL in the cloud-init env, or
+  - Manually copy a built binary to /usr/local/lib/avalanche/avalanche-server
+    (chmod +x it), then `systemctl start avalanche`.
 EOF
 fi
 
@@ -76,9 +76,9 @@ fi
 # Embedded so the script is fully self-contained — operator doesn't need
 # to clone the repo on the droplet.
 
-cat > /etc/actnet/actnet.env <<'EOF'
-# actnet homeserver configuration. Fill in the values marked CHANGEME.
-# After editing, run: systemctl restart actnet
+cat > /etc/avalanche/avalanche.env <<'EOF'
+# Avalanche homeserver configuration. Fill in the values marked CHANGEME.
+# After editing, run: systemctl restart avalanche
 
 # Public HTTPS URL of this homeserver. Must match your DNS and Caddyfile.
 SERVER_URL=https://CHANGEME.example.com
@@ -92,12 +92,12 @@ SERVER_NAME=CHANGEME
 # Bind to localhost only — Caddy reverse-proxies from :443.
 BIND_ADDR=127.0.0.1:3000
 
-# Shared push relay (operated by the actnet project). Leave as-is unless
+# Shared push relay (operated by the Avalanche project). Leave as-is unless
 # you're running your own.
-RELAY_URL=https://relay.actnet.example
+RELAY_URL=https://relay.avalanche.example
 EOF
-chmod 640 /etc/actnet/actnet.env
-chown root:actnet /etc/actnet/actnet.env
+chmod 640 /etc/avalanche/avalanche.env
+chown root:avalanche /etc/avalanche/avalanche.env
 
 cat > /etc/caddy/Caddyfile <<'EOF'
 # Change `your-domain.example.com` to your actual hostname, then:
@@ -112,19 +112,19 @@ your-domain.example.com {
 }
 EOF
 
-cat > /etc/systemd/system/actnet.service <<'EOF'
+cat > /etc/systemd/system/avalanche.service <<'EOF'
 [Unit]
-Description=actnet homeserver
+Description=Avalanche homeserver
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=actnet
-Group=actnet
-EnvironmentFile=/etc/actnet/actnet.env
-ExecStart=/usr/local/lib/actnet/actnet-server
-WorkingDirectory=/var/lib/actnet
+User=avalanche
+Group=avalanche
+EnvironmentFile=/etc/avalanche/avalanche.env
+ExecStart=/usr/local/lib/avalanche/avalanche-server
+WorkingDirectory=/var/lib/avalanche
 Restart=always
 RestartSec=5
 # Hardening
@@ -132,29 +132,29 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/actnet
+ReadWritePaths=/var/lib/avalanche
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable actnet
-# Note: not starting actnet here — it would fail until the operator fills
-# in /etc/actnet/actnet.env. The systemctl start happens at the end of
+systemctl enable avalanche
+# Note: not starting avalanche here — it would fail until the operator fills
+# in /etc/avalanche/avalanche.env. The systemctl start happens at the end of
 # Step 4 in the deployment guide.
 
 # ── 6. Done ─────────────────────────────────────────────────────────────────
 cat > /etc/motd <<'EOF'
 
-  actnet homeserver — first-boot setup complete.
+  Avalanche homeserver — first-boot setup complete.
 
   Next steps (see docs/40-deployment.md):
-    1. nano /etc/actnet/actnet.env      # fill in CHANGEME values
+    1. nano /etc/avalanche/avalanche.env      # fill in CHANGEME values
     2. nano /etc/caddy/Caddyfile        # set your real domain
-    3. systemctl restart caddy actnet
+    3. systemctl restart caddy avalanche
     4. curl https://YOUR_DOMAIN/healthz # should print: ok
 
 EOF
 
-echo "[setup.sh] bootstrap complete — operator must finish config and start actnet"
+echo "[setup.sh] bootstrap complete — operator must finish config and start avalanche"

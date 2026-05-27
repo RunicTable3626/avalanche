@@ -42,7 +42,7 @@ We'll walk you through it all.
    down — your droplet has to live in the same region.**
 4. Cluster configuration: **Basic** plan, **1 GB RAM / 1 vCPU / 10 GB**.
    That's the $15/mo tier.
-5. Choose a name: e.g. `actnet-db`.
+5. Choose a name: e.g. `avalanche-db`.
 6. Click **Create Database Cluster**. Provisioning takes ~5 minutes.
 
 When the cluster is ready, you'll see a **Connection Details** panel. Switch
@@ -67,7 +67,7 @@ Keep this open in a tab; you'll paste it into the droplet in Step 4.
 5. **Authentication: SSH key** (not password). If you've never set up an
    SSH key, see [DigitalOcean's 2-minute
    guide](https://docs.digitalocean.com/products/droplets/how-to/add-ssh-keys/).
-6. Hostname: something memorable, e.g. `actnet-yourorg`.
+6. Hostname: something memorable, e.g. `avalanche-yourorg`.
 7. **Advanced options → Add Initial Scripts (user data)**: paste the
    contents of [`infra/deploy/digitalocean/setup.sh`](../infra/deploy/digitalocean/setup.sh)
    into the text box. This script installs the server binary, Caddy (for
@@ -121,7 +121,7 @@ Now edit the config file. We'll use `nano`, a beginner-friendly text
 editor:
 
 ```bash
-nano /etc/actnet/actnet.env
+nano /etc/avalanche/avalanche.env
 ```
 
 You'll see a file with placeholders. Fill in three values:
@@ -129,7 +129,7 @@ You'll see a file with placeholders. Fill in three values:
 ```bash
 # Your homeserver's public URL — must match what's in DNS and what
 # you'll put in invite links.
-SERVER_URL=https://actnet.your-org.org
+SERVER_URL=https://av.your-org.org
 
 # The connection string you copied from Step 1.
 DATABASE_URL=postgresql://doadmin:abc123XYZ...@db-postgresql-...
@@ -147,22 +147,22 @@ nano /etc/caddy/Caddyfile
 ```
 
 Change the placeholder `your-domain.example.com` to your actual domain
-(e.g. `actnet.your-org.org`). Save and exit.
+(e.g. `av.your-org.org`). Save and exit.
 
 Now run the database migrations and start everything:
 
 ```bash
-actnet-init           # creates the schema in your managed PG
-systemctl restart caddy actnet
+avalanche-init           # creates the schema in your managed PG
+systemctl restart caddy avalanche
 ```
 
 Check it's running:
 
 ```bash
-systemctl status actnet
+systemctl status avalanche
 # Look for: Active: active (running)
 
-curl https://actnet.your-org.org/healthz
+curl https://avalanche.your-org.org/healthz
 # Should print: ok
 ```
 
@@ -178,12 +178,12 @@ Your members need an invite link to join your homeserver. Generate one
 from the droplet:
 
 ```bash
-actnet-invite create --name "Alice"
+avalanche-invite create --name "Alice"
 # Prints: https://go.theavalanche.net/i/abc123def456
 ```
 
 Send that URL to Alice via any channel (Signal, email, in person — it's a
-one-time token). She opens it on her phone with the actnet app installed,
+one-time token). She opens it on her phone with the Avalanche app installed,
 and she's signed up against your homeserver.
 
 Each invite is single-use and expires after 24 hours by default.
@@ -195,7 +195,7 @@ Each invite is single-use and expires after 24 hours by default.
 ### Watching logs
 
 ```bash
-journalctl -u actnet -f
+journalctl -u avalanche -f
 ```
 
 This streams the server's logs. Ctrl+C to exit (the server keeps running).
@@ -203,11 +203,48 @@ This streams the server's logs. Ctrl+C to exit (the server keeps running).
 ### Updating to a new server version
 
 ```bash
-actnet-update
+avalanche-update https://github.com/.../releases/download/v0.4.0/avalanche-server-linux-x86_64
 ```
 
-This fetches the latest release binary, swaps it in, and restarts the
-service. Downtime: a few seconds.
+`avalanche-update` does the whole release dance safely:
+
+1. Downloads the new binary alongside the running one.
+2. Snapshots the database with `pg_dump` to
+   `/var/backups/avalanche/pre-migrate-<timestamp>.sql.gz`. Keep this — it's
+   how you roll back if the new release misbehaves after migrating.
+3. Stops the service.
+4. Runs `avalanche-server migrate` against the new binary. Migrations are
+   *not* run on startup by the systemd service — they only ever run
+   here, explicitly, with a fresh DB snapshot already taken.
+5. Atomically swaps the binary in and restarts the service.
+6. Verifies the new binary actually came up. If anything fails, rolls
+   back to the old binary and restarts it so the homeserver stays up.
+
+Downtime: a few seconds for a no-op migration, longer for a migration
+that rewrites a big table.
+
+### Rolling back a release
+
+If an update succeeded but the new version misbehaves at runtime:
+
+```bash
+# Re-run avalanche-update against the previous release URL.
+avalanche-update https://github.com/.../releases/download/v0.3.9/avalanche-server-linux-x86_64
+```
+
+If the new release ran a forward migration you can't undo by re-installing
+the old binary, restore from the pre-migrate snapshot:
+
+```bash
+systemctl stop avalanche
+gunzip -c /var/backups/avalanche/pre-migrate-<timestamp>.sql.gz \
+    | sudo -u postgres psql avalanche
+# Then install the old binary (without running its `migrate`, since the
+# DB is back to its pre-migrate state).
+curl -fsSL -o /usr/local/lib/avalanche/avalanche-server <old release URL>
+chmod +x /usr/local/lib/avalanche/avalanche-server
+systemctl start avalanche
+```
 
 ### Backups
 
@@ -254,17 +291,18 @@ This doc describes the target deployment experience. Some pieces are not
 yet built — tracking here:
 
 - **Prebuilt release binaries.** No GitHub Release publishes
-  `actnet-server-linux-x86_64` yet. Until that exists, the setup script
+  `avalanche-server-linux-x86_64` yet. Until that exists, the setup script
   has to build from source on the droplet (slow on 512 MB — bump to the
   1 GB droplet for the initial bootstrap, then resize down).
-- **`actnet-init` / `actnet-invite` / `actnet-update` /
-  `actnet-backup-setup` / `actnet-restore` CLIs.** Today these are
-  manual steps (run `psql` against the cluster with the migration files;
-  use `dev-invite.py`). The deploy folder will get small shell wrappers
-  for each.
-- **Migrations runner.** Currently `infra/migrations/*.sql` is applied
-  manually. Plan: embed `sqlx::migrate!()` into the server binary so it
-  runs on startup, removing the `actnet-init` step entirely.
+- **`avalanche-invite` CLI** for generating invite links from the droplet
+  (today this is `dev-invite.py`, which depends on a Python env).
+  `avalanche-update` and `avalanche-backup` are shipped by the cloud-init.
+- **`avalanche-server migrate` subcommand.** Embed `sqlx::migrate!()` into
+  the server binary but expose it only as a subcommand, never run on
+  startup. First deploy and every subsequent release invoke it
+  explicitly — see § Updating above. This decouples schema changes from
+  the service lifecycle so a failed migration doesn't crash-loop the
+  server, and every migration is preceded by a `pg_dump` snapshot.
 - **Healthcheck endpoint.** `/healthz` doesn't exist yet on the server.
   Easy add — returns 200 if the DB pool is reachable.
 

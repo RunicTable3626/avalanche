@@ -1,4 +1,4 @@
-# actnet reverse-proxy + auto-TLS via Let's Encrypt.
+# Avalanche reverse-proxy + auto-TLS via Let's Encrypt.
 #
 # Replace `your-domain.example.com` with your actual hostname, then run:
 #   systemctl restart caddy

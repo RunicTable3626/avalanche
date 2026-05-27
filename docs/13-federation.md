@@ -22,7 +22,7 @@ At minimum, servers need to:
 3. **Serve prekeys to other servers** — peers can fetch our users' prekey bundles to start sessions.
 4. **Resolve DIDs across servers** — given a DID, determine which server is currently published as the user's discovery server (via PLC or equivalent).
 5. **Authenticate the origin server** of every inbound federation request — verify that a message claiming to come from `b.example` actually came from `b.example`. **Not** a prior trust relationship; just origin authentication via a server identity key the sending domain publishes at a discoverable location (e.g., `.well-known/actnet-server`). No peering handshake, no allowlist by default.
-6. **Abuse controls at the server boundary** — per-origin rate limits, reputation accrued over time, operator-controlled blocklists for known-bad origins. Federation is open by default; abuse is handled post-hoc, not gated up front.
+6. **Abuse controls at the server boundary** — per-origin rate limits, reputation accrued over time, operator-controlled blocklists for known-bad origins. Federation is semi-open by default, but based on user attestations to mitigate spam.
 
 For DMs this is basically (1)–(5). Cross-server groups add complexity (Sender Keys distribution, membership changes) but build on the same primitives. See `docs/01-technical-implementation.md` for the group encryption model.
 

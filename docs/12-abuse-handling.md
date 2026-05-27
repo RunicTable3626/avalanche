@@ -1,5 +1,7 @@
 # User-Generated Abuse Handling
 
+> **Status: design only, nothing here is implemented.** This document describes the intended abuse-handling model and is the working specification we'll build against. No code in the repo implements message requests, spam reports, account-level enforcement, federation trust scoring, or contact attestation as described below. Treat this as a target, not a description of current behavior.
+
 How blocking, spam reporting, and account-level enforcement work in an E2E-encrypted, federated system where the server cannot read message content.
 
 ## Goals
@@ -188,9 +190,81 @@ Suspended/banned users receive a system message (sent via a control-message enve
 
 If a homeserver consistently ignores reports about its users — i.e., known bad actors keep operating from it — peer homeservers can defederate: refuse to accept messages from accounts on that server. This is a heavy hammer (cuts off all that server's users, not just abusers) and is operator policy, not in-protocol.
 
-A trust score per peer-homeserver (computed from how often their accounts get reported, how responsively they act on forwarded reports) gives operators data to make defederation decisions without making them in the dark.
+Defederation is the manual operator decision at the top of the trust ladder; the underlying signal is the peer trust score described in § 5, which is also what gates inbound federation more broadly (not just the all-or-nothing defederation decision point).
 
-## 5. Profile-level abuse
+## 5. Federation trust and contact attestation
+
+How a homeserver decides which peer servers to accept federation from. The federation protocol primitives — origin authentication, contact attestation tokens issued at QR/invite creation — are described in `docs/13-federation.md`. This section covers the trust scoring and policy that ride on top.
+
+### Two derived scores
+
+Each homeserver maintains two scores, computed from observable events and updated continuously:
+
+- **Peer trust score** (per peer server P) — confidence that P delivers well-behaved traffic.
+- **User attestation quality** (per local user U) — historical reliability of U's contact-attestations.
+
+Both are server-local policy state. Neither is a protocol primitive; each operator can tune weights, bands, and thresholds without breaking interop.
+
+### Signals feeding peer trust
+
+For peer P, the trust score moves with:
+
+- *Mildly positive:* inbound traffic volume from P — established peers have history.
+- *Strongly positive:* attestations issued by A-users involving P, weighted by the attester's own quality and by **distinct-attester diversity** (10 attestations from 10 users count for far more than 100 attestations from 1 user).
+- *Mild negative:* declines by A-users of message requests routed via P.
+- *Strongly negative:* spam reports by A-users against P-routed senders, weighted by reporter quality.
+- *Recency decay* so old behavior fades and a previously-bad peer can recover.
+
+### Signals feeding user attestation quality
+
+For user U, attestation quality moves with:
+
+- *Positive:* user's lifetime and mutual conversations on the server
+- *Mild negative:* attestations U later declined (issued contact tokens to people U didn't actually want to hear from).
+- *Strongly negative:* attestations U then spam-reported (vouched for an actual abuser).
+- *Moderate negative:* attestations against senders subsequently spam-reported by *other* A-users.
+
+New users start at a default high enough to admit their early attestations — they get the benefit of the doubt. Users who attest spammers rapidly drop below that baseline and their attestations stop being load-bearing for peer admission.
+
+### Default federation policy
+
+Operator policy maps the peer trust score onto behavior bands. Suggested defaults:
+
+| Band | Behavior |
+|---|---|
+| **Trusted** | Accept federation requests at normal rate limits. Per-user delivery still gated by the contact-graph (§ 1). |
+| **Nascent / Unknown** | Accept only requests carrying a valid attestation token issued by an A-user with non-negative attestation quality. Deliver as a message request to that user only. Strict per-origin rate limits. |
+| **Suspect** | Reject at the border. Manual operator review path if needed. |
+
+A new peer starts Unknown. Per-message attestation tokens — created whenever an A-user generates a contact QR or invite link, and presented by the scanning server on first-contact federation — are the bridge that lets the new peer reach attested recipients while history accumulates. Once enough weighted attestation signal builds up, the peer promotes to Trusted.
+
+**This is "default deny with attestation as the gate," not "default open."** Combined with the per-recipient contact-graph gate, abuse from a hostile peer is bounded to recipients who explicitly invited contact in the first place.
+
+### Bootstrapping behavior
+
+- **Brand-new peer with no history:** Unknown. Reachable only via attestation-token-bearing first-contact requests. Real conversations promote it organically.
+- **Brand-new user on this server:** default attestation quality, sufficient to open the gate for their first contact-adds.
+- **Established peer suddenly behaving badly:** demoted via accumulating spam reports without explicit operator intervention.
+- **Hostile new peer brute-forcing federation:** rejected at the border. Only attested per-recipient first contacts get through, rate-limited, and even those require the recipient to accept before delivering further.
+- **Activist operator coming online after a seizure of a previous server:** Unknown band — but their users start adding contacts on day one, attestations flow, the peer promotes organically. No operator-to-operator peering ceremony required.
+
+### Cross-server reports as a trust signal
+
+The spam-report mechanism (§ 3) feeds peer trust directly, in addition to its role in P-side enforcement:
+
+- When an A-user reports a P-routed message, A updates **its own** peer trust score for P immediately, independent of whether P acts on the report.
+- If the reporter had previously attested the spammer, A also reduces the reporter's attestation quality slightly — the reporter vouched for someone who turned out bad, which is some evidence about their judgment.
+- The forwarded report still goes to P for local enforcement; the trust adjustment on A's side happens regardless of P's response.
+
+This means reports propagate two ways: locally on P (account-level enforcement against the reported user) and reputationally on A and other servers that observe P's behavior over time.
+
+### Out of scope
+
+- **Global reputation network.** Each server computes its own scores from its own observations. A network-wide shared trust graph would centralize abuse decisions in whoever runs it and create a single coercion target.
+- **Signed/portable trust scores.** Scores are server-local policy data, not cryptographic credentials. Operators may share blocklists or trust hints out-of-band, but the protocol does not standardize that.
+- **Automatic cascading defederation.** A peer demoted on one server has no protocol effect on its standing elsewhere. Other servers compute independently.
+
+## 6. Profile-level abuse
 
 Display names, avatars, and bios are user-supplied profile fields visible to anyone who can fetch the profile (see `35-profiles.md`). These are abuse vectors distinct from message content because they're broadcast, not addressed.
 
@@ -199,7 +273,7 @@ Mitigations:
 - Profile reports use the same mechanism as message-request reports, but reason `impersonation` or `objectionable_profile`. The reporting client includes a *signed snapshot* of the offending profile so the reportee's homeserver can verify the report (since profile contents change).
 - Operator action on profile reports: force a profile reset (clearing display name, avatar, bio to defaults) before allowing further sends. Repeat offenses → suspend.
 
-## 6. UI surfaces summary
+## 7. UI surfaces summary
 
 | Surface | Affordance |
 |---|---|
@@ -210,7 +284,7 @@ Mitigations:
 | Settings → Privacy → Server-enforced blocking | Opt-in toggle for relaying block list to homeserver |
 | Group invite | Accept / Decline / Report group invite |
 
-## 7. What we explicitly do not build
+## 8. What we explicitly do not build
 
 To preserve the privacy promise and avoid encouraging weaponized reporting:
 
@@ -221,7 +295,7 @@ To preserve the privacy promise and avoid encouraging weaponized reporting:
 - No proactive content scanning (CSAM-hash scanning, etc.) on-device. If legally compelled in some jurisdiction, this would be a hard design conflict; defer to legal review.
 - No reverse search of report history ("show me everyone who has ever reported me"). Reports are operator data, not user data.
 
-## 8. App Store 1.2 mapping
+## 9. App Store 1.2 mapping
 
 For Apple review, the four requirements map cleanly:
 
@@ -234,10 +308,17 @@ For Apple review, the four requirements map cleanly:
 
 In review notes, explicitly call out: "This is an end-to-end encrypted messaging app. The server cannot read message content. Abuse handling is account-level, following the model used by Signal, WhatsApp, and other E2E messengers."
 
-## 9. Open questions / future work
+## 10. Open questions / future work
 
 - **Cross-homeserver report aggregation.** When the same DID is reported by users on many homeservers, no single homeserver sees the full picture. A privacy-preserving aggregation protocol (e.g. PSI-style intersection of report sets) would help. Out of scope for v1.
 - **Group abuse**. Group spam (mass-add-to-group) needs its own design. Probably: group invites land in a request queue similar to DMs; admins can rate-limit invites; reporting a group reports the admin who added you.
 - **Project abuse** (per `20-project-security.md`). When third-party Projects can interact with users, reports against the *Project* (not the user) need a different routing path — probably to the Project developer's homeserver and to the platform.
 - **Recovery after false report**. If a user is suspended based on coordinated false reporting, what's the appeal flow? At minimum: a support contact and operator-side ability to review and clear the suspension. Standardize across reference homeserver.
-- **Federation trust scoring**. How do homeservers build reputation for each other? Could be as simple as a manually-curated trust list at first.
+- **Decay constants and threshold tuning** for peer trust and attestation quality (§ 5). Ship sensible defaults and instrument operator dashboards to refine from real data.
+- **Privacy of attestation events.** The homeserver records which of its users attested which peer servers. Already implicit in the contact-add flow, but a juicier target now that it drives federation policy — list of "users with contacts on `suspicious.example`" is sensitive metadata if the server is compromised.
+- **Inter-server signal sharing.** Today, each server manages abuse from its own observations alone. A small operator with little traffic has correspondingly little signal and reacts slowly to new spammers. Plausible future directions, in increasing order of complexity:
+  1. **Opt-in subscription feeds** — signed blocklists / vouch lists published by trusted third parties (EFF, an activist-operator coalition, etc.), ingested as weighted inputs to the local peer-trust score. Composable with § 5, never overrides local policy. Closest analogue: email DNSBLs.
+  2. **Trusted-peer direct gossip** — a small mutually-trusted operator circle shares richer signals (live spam reports, peer-trust deltas). Higher velocity, real governance and privacy problems (membership politics, amplification risk, metadata leakage to gossip-circle peers).
+  3. **Privacy-preserving cross-server aggregation** — MPC/PSI-style protocols that output aggregate signals (e.g., "this DID is reported by N servers") without revealing which servers contributed. Principled answer; cryptographically heavy.
+  
+  None of these are in v1. The right end state probably involves at least (1), but for now each server manages abuse independently and we accept the slower per-server signal velocity as the cost of not centralizing trust.

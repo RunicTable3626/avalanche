@@ -8,10 +8,11 @@ Docs are numbered by category. First digit = area, second digit = sequence withi
 
 | Prefix | Area | Docs |
 |--------|------|------|
-| `0x` | Core design | `00` this doc, `01` technical implementation |
-| `1x` | Server | `10` server implementation, `11` core API sketch |
-| `2x` | Projects | `20` project security, `21` chatbot project |
-| `3x` | Mobile apps | `30` mobile UX |
+| `0x` | Core design | [`00`](00-design.md) this doc · [`01`](01-technical-implementation.md) technical implementation · [`02`](02-todos-deferred.md) deferred TODOs / backlog |
+| `1x` | Server | [`10`](10-server-implementation.md) server implementation · [`11`](11-core-api-sketch.md) core API sketch · [`12`](12-abuse-handling.md) abuse handling · [`13`](13-federation.md) federation |
+| `2x` | Projects | [`20`](20-project-security.md) project security · [`21`](21-chatbot-project.md) chatbot project |
+| `3x` | Mobile apps | [`30`](30-mobile-ux.md) mobile UX · [`31`](31-read-tracking.md) read tracking · [`32`](32-bitchat-fallback.md) bitchat fallback · [`33`](33-identity-auth-recovery.md) identity / auth / recovery · [`34`](34-invite-tokens.md) invite tokens · [`35`](35-profiles.md) profiles · [`36`](36-connection-state.md) connection state |
+| `4x` | Deployment & infra | [`40`](40-deployment.md) deployment · [`41`](41-relay-deployment.md) relay deployment |
 
 ## Premise
 

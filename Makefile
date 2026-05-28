@@ -48,7 +48,7 @@ SWIFT_BINDING := mobile/ios/Generated/app_core.swift
 XCFRAMEWORK_STAMP := mobile/ios/AppCoreFFI.xcframework/Info.plist
 XCODE_PROJ_FILE := mobile/ios/Actnet/Actnet.xcodeproj/project.pbxproj
 
-.PHONY: test test-server test-core test-e2e check clippy fmt ci db-up db-down ios xcode bindings dev testbot relay relay-release dev-all
+.PHONY: test test-server test-core test-e2e check clippy fmt ci db-up db-down migrate ios xcode bindings dev testbot relay relay-release dev-all
 
 # ----------------------------------------------------------------------------
 # Rust
@@ -85,10 +85,16 @@ dev:
 	cd core && ACTNET_ALLOW_DEV_DB=1 ACTNET_DISABLE_IP_RATE_LIMITS=1 RUST_LOG=tower_http=debug,server=debug cargo run -p server
 
 db-up:
-	docker compose -f infra/docker-compose.yml up -d
+	docker compose -f infra/docker-compose.yml up -d --wait
+	$(MAKE) migrate
 
 db-down:
 	docker compose -f infra/docker-compose.yml down
+
+# Apply embedded schema migrations against the dev Postgres. Idempotent —
+# safe to re-run. Same code path the prod release uses.
+migrate:
+	cd core && DATABASE_URL=$(TEST_DATABASE_URL) cargo run -q -p server -- migrate
 
 testbot:
 	cd core && RUST_LOG=actnet_testbot=debug,app_core=debug,tower_http=debug cargo run -p testbot

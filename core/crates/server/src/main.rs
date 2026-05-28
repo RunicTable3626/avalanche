@@ -1,8 +1,11 @@
 //! Homeserver binary entry point.
 //!
-//! Connects to PostgreSQL, runs schema migrations, spawns background cleanup
-//! tasks, and starts the Axum HTTP/WebSocket server. Configuration is read
-//! from environment variables (see [`server::config::Config`]).
+//! Subcommands:
+//!   - (none)   start the HTTP/WebSocket server
+//!   - migrate  apply pending schema migrations and exit
+//!
+//! Configuration is read from environment variables (see
+//! [`server::config::Config`]).
 
 use axum::http::Request as HttpRequest;
 use sqlx::postgres::PgPoolOptions;
@@ -24,6 +27,30 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    // Subcommands are handled before loading the full Config so they don't
+    // trip the prod-safety check on dev-default credentials.
+    match std::env::args().nth(1).as_deref() {
+        Some("migrate") => {
+            let url = std::env::var("DATABASE_URL")
+                .expect("DATABASE_URL must be set to run migrations");
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(std::time::Duration::from_secs(5))
+                .connect(&url)
+                .await
+                .expect("failed to connect to database");
+            server::migrate::run(&pool).await.expect("migration failed");
+            tracing::info!("migrations applied");
+            return;
+        }
+        Some(other) => {
+            eprintln!("unknown subcommand: {other}");
+            eprintln!("usage: actnet-server [migrate]");
+            std::process::exit(2);
+        }
+        None => {}
+    }
 
     let config = Config::from_env();
 

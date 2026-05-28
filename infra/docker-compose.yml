@@ -9,7 +9,9 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ../infra/migrations:/docker-entrypoint-initdb.d:ro
+    # Migrations are embedded in the server binary and applied via
+    # `actnet-server migrate` (see `make migrate`) — not mounted as initdb
+    # scripts. This keeps dev exercising the same code path as prod.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U actnet"]
       interval: 2s

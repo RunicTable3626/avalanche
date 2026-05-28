@@ -7,15 +7,27 @@
 //! - Tests need a running Postgres with the schema already applied.
 //!
 //! Set `TEST_DATABASE_URL` to point at a test Postgres instance.
-//! The schema from `infra/migrations/001_initial.sql` must be applied first.
+//! Schema migrations are applied automatically on first connect via the same
+//! embedded migrator the server binary uses.
 
 use sqlx::{PgPool, Row};
+use tokio::sync::OnceCell;
 
-/// Connect to the test database. Panics if TEST_DATABASE_URL is not set.
+static POOL: OnceCell<PgPool> = OnceCell::const_new();
+
+/// Connect to the test database and ensure migrations are applied. Panics if
+/// TEST_DATABASE_URL is not set. The pool is shared across tests so the
+/// migrator runs at most once.
 async fn test_pool() -> PgPool {
-    let url = std::env::var("TEST_DATABASE_URL")
-        .expect("TEST_DATABASE_URL must be set to run server tests");
-    PgPool::connect(&url).await.expect("failed to connect to test database")
+    POOL.get_or_init(|| async {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .expect("TEST_DATABASE_URL must be set to run server tests");
+        let pool = PgPool::connect(&url).await.expect("failed to connect to test database");
+        server::migrate::run(&pool).await.expect("failed to apply test migrations");
+        pool
+    })
+    .await
+    .clone()
 }
 
 /// Begin a transaction that will be rolled back when dropped.

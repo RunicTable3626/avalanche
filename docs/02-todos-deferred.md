@@ -12,7 +12,6 @@
 - Scroll position: remove invisible "bottom" anchor hack in ConversationView (Color.clear spacer) when scroll position saving is implemented
 - Account switcher UI for multi-account support
 - My QR Code screen uses `accounts.first` — should use the active/selected account once multi-account is implemented
-- Scope the ATS exception for `ts.net` (in `mobile/ios/Actnet/project.yml` → `info.properties.NSAppTransportSecurity`) before any non-dev build. It currently applies to all of `ts.net` and to every build config so a Tailscale-hosted dev server is reachable over HTTP. For TestFlight / App Store builds the exception should be removed entirely (or wrapped in a debug-only configuration), and dev should switch to TLS via `tailscale cert`.
 
 ## Privacy / identity
 - Consider allowing `did:local:` DIDs for human (non-bot) accounts, not just bots. Allowing `did:local:` for humans would let small orgs run a homeserver without publishing identities globally.

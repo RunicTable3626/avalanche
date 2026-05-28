@@ -1,7 +1,9 @@
 //! HTTP-level integration tests for the DID resolution endpoint.
 //!
 //! Uses tower's `oneshot` to drive the full Axum handler stack in-process.
-//! Requires `TEST_DATABASE_URL` to be set and the schema to be applied.
+//! Requires `TEST_DATABASE_URL` to be set. Schema migrations are applied
+//! automatically on first connect via the same embedded migrator the server
+//! binary uses.
 //!
 //! Unlike `db_tests.rs`, these tests cannot use the transaction-rollback
 //! pattern because handlers manage their own connections. Each registration
@@ -16,13 +18,31 @@ use base64::prelude::*;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sqlx::PgPool;
+use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
 use server::{config::Config, routes, state::AppState};
 
+static SETUP: OnceCell<()> = OnceCell::const_new();
+
+/// Apply migrations once across the whole test binary and disable the per-IP
+/// rate limit (tests share a long-lived dev DB; accumulated counters across
+/// runs would otherwise trip the registration limit). Each test still gets
+/// its own `PgPool` so connection budgets don't contend across parallel tests.
+async fn ensure_setup(url: &str) {
+    SETUP
+        .get_or_init(|| async {
+            unsafe { std::env::set_var("ACTNET_DISABLE_IP_RATE_LIMITS", "1") };
+            let pool = PgPool::connect(url).await.expect("failed to connect to test database");
+            server::migrate::run(&pool).await.expect("failed to apply test migrations");
+        })
+        .await;
+}
+
 async fn test_state() -> AppState {
     let url = std::env::var("TEST_DATABASE_URL")
         .expect("TEST_DATABASE_URL must be set to run server tests");
+    ensure_setup(&url).await;
     let pool = PgPool::connect(&url).await.expect("failed to connect to test database");
     let config = Config {
         database_url: url,
@@ -48,8 +68,13 @@ async fn test_state() -> AppState {
 /// PLC-directory verification + identity-key-signature checks. The auth tests
 /// that consume this helper exercise endpoints that are bot/human-agnostic.
 async fn register_dummy(app: &axum::Router) -> Value {
+    // Random identity_key so parallel tests don't collide on the
+    // (identity_key, nanos)-derived DID generated for bot accounts.
+    use rand::TryRngCore as _;
+    let mut ik = [0u8; 32];
+    rand::rngs::OsRng.unwrap_err().try_fill_bytes(&mut ik).unwrap();
     let body = serde_json::json!({
-        "identity_key":     BASE64_STANDARD.encode([1u8; 32]),
+        "identity_key":     BASE64_STANDARD.encode(ik),
         "registration_id":  1,
         "device_id":        1,
         "signed_prekey": {

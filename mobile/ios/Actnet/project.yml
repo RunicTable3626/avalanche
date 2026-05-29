@@ -49,6 +49,13 @@ targets:
         # iPad-multitasking validator (error 90474) is satisfied.
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait"
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        # Declares the app's encryption qualifies for the mass-market
+        # exemption (only standard algorithms — Curve25519, AES-GCM, HKDF,
+        # SHA-256, ML-KEM, Ed25519). Baking this in avoids the
+        # export-compliance questionnaire on every TestFlight upload. The
+        # annual BIS self-classification report (5D992.c) is a separate,
+        # off-Apple obligation that kicks in at public-App-Store release.
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         # Substituted from .env at xcodegen time. Carried as a build setting
         # so $(RELAY_URL) inside Info.{Debug,Release}.plist resolves at
         # Xcode build time. Read at runtime by PushManager (empty → push

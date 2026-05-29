@@ -49,6 +49,26 @@ fn ffi_runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| tokio::runtime::Runtime::new().expect("failed to create tokio runtime"))
 }
 
+/// Install a tracing subscriber that writes formatted log lines to stderr.
+/// Idempotent — subsequent calls are no-ops. `filter` uses `RUST_LOG`
+/// syntax (e.g. `"info"`, `"app_core=debug,net=debug"`); an invalid filter
+/// falls back to `"info"`.
+///
+/// Xcode captures stderr from the running app into its debug console, so
+/// after calling this from Swift on launch, Rust `tracing::*!` output
+/// shows up alongside Swift `print()`.
+#[uniffi::export]
+pub fn init_logging(filter: String) {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let env_filter = EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = fmt()
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_target(true)
+        .try_init();
+}
+
 /// A Project available on the homeserver.
 #[derive(uniffi::Record)]
 pub struct ProjectInfoFfi {
@@ -1724,7 +1744,7 @@ async fn reconnect_loop(weak: std::sync::Weak<AppCore>) {
                 }
             }
             Err(e) => {
-                tracing::debug!("[ws] connect failed: {e}");
+                tracing::warn!("[ws] connect failed: {e}");
             }
         }
 

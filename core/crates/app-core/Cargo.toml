@@ -29,6 +29,7 @@ bs58               = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 reqwest            = { workspace = true }
 tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 prost-build           = "0.14"

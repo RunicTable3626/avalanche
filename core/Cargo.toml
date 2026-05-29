@@ -65,8 +65,9 @@ uniffi = "0.29"
 # Error handling
 thiserror = "2"
 
-# WebSocket client
-tokio-tungstenite = "0.26"
+# WebSocket client. `native-tls` matches reqwest's default TLS backend so
+# the iOS binary ships one TLS stack (Apple Secure Transport via native-tls).
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
 
 # Serialization

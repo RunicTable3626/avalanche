@@ -13,6 +13,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        #if DEBUG
+        initLogging(filter: "app_core=debug,net=info,store=info,crypto=info")
+        #else
+        initLogging(filter: "info")
+        #endif
         UNUserNotificationCenter.current().delegate = self
         let sand100 = UIColor(red: 1.0, green: 0.945, blue: 0.914, alpha: 1.0)
         let plum500 = UIColor(red: 0.420, green: 0.243, blue: 0.314, alpha: 1.0)

@@ -8,6 +8,7 @@
 //! underlying zkgroup primitives, so that swapping in MLS later
 //! requires no changes outside this module.
 
+pub mod endorsements;
 pub mod group_key;
 pub mod server_params;
 

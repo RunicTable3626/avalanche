@@ -123,6 +123,7 @@ dependencies = [
  "aes-gcm",
  "base32",
  "base64 0.22.1",
+ "bincode",
  "bs58",
  "crypto",
  "libsignal-protocol",
@@ -144,6 +145,7 @@ dependencies = [
  "tracing-subscriber",
  "types",
  "uniffi",
+ "zkcredential",
 ]
 
 [[package]]

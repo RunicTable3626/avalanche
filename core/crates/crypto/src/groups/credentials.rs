@@ -171,6 +171,10 @@ impl EncryptedMemberId {
     pub(crate) fn ciphertext(&self) -> &Ciphertext<DidEncryptionDomain> {
         &self.0
     }
+
+    pub(crate) fn from_ciphertext(ct: Ciphertext<DidEncryptionDomain>) -> Self {
+        Self(ct)
+    }
 }
 
 impl AuthCredentialDidResponse {

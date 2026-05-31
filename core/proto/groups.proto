@@ -1,0 +1,117 @@
+syntax = "proto3";
+package actnet.groups;
+
+// Encrypted group state (§3.1). This message is the plaintext that lives
+// inside the server's `encrypted_state` blob; the server never sees this
+// shape. Clients re-derive it from the previous state + applied actions on
+// every revision, then encrypt under the group master key (§3.3 step 6).
+
+message GroupState {
+  // Server-visible routing identifier; redundantly carried so a recipient
+  // that decrypts an opaque blob can sanity-check it belongs to the group
+  // they thought it did.
+  bytes group_id = 1;
+  // Unix millis when the group was created.
+  int64 created_at_ms = 2;
+  // DID of the founder. Carried for display; the server never sees it.
+  string creator_did = 3;
+  // Monotonically increasing revision. Equals the server's
+  // `current_revision`.
+  uint64 revision = 4;
+
+  // Group metadata.
+  string title = 10;
+  string description = 11;
+  // Disappearing-message timer, seconds. 0 = disabled.
+  uint32 expiry_seconds = 12;
+  // Avatar reference + key (TODO: fill in once attachment plumbing exists).
+  reserved 13 to 19;
+
+  // Membership snapshot. The server stores its own routing subset in
+  // `member_credentials` / `members_pending` / `members_pending_approval`;
+  // this list is the client-authoritative copy, including the cleartext
+  // DID + display info that the server doesn't get to see.
+  repeated Member members = 20;
+  repeated PendingInvite pending_invites = 21;
+  repeated PendingApproval pending_approvals = 22;
+
+  // Policy mirror. The server has its own copy too (§3.1) — clients trust
+  // this one for display/local checks; the server's copy is what gates
+  // actions on submit.
+  Policy policy = 30;
+
+  reserved 31 to 63;
+}
+
+message Member {
+  string did = 1;
+  // 64-byte zkgroup ciphertext (§2.3). Redundant given `did` + master key,
+  // but cheap to store and lets clients skip a re-encrypt when emitting
+  // actions.
+  bytes encrypted_member_id = 2;
+  Role role = 3;
+  int64 joined_at_ms = 4;
+  // 32-byte AES profile key for this member, carried in the encrypted
+  // state so newcomers can immediately decrypt every member's profile blob.
+  bytes profile_key = 5;
+}
+
+message PendingInvite {
+  // Full DID is unknown to the inviter — they only had the
+  // encrypted_member_id from the directory. Carry the EMI; clients with
+  // the master key can map it back to a DID for display via the local
+  // contact graph.
+  bytes encrypted_member_id = 1;
+  Role role = 2;
+  string inviter_did = 3;
+  int64 invited_at_ms = 4;
+}
+
+message PendingApproval {
+  bytes encrypted_member_id = 1;
+  int64 requested_at_ms = 2;
+}
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_MEMBER = 1;
+  ROLE_ADMIN = 2;
+}
+
+enum JoinPolicy {
+  JOIN_POLICY_UNSPECIFIED = 0;
+  JOIN_POLICY_CLOSED = 1;
+  JOIN_POLICY_REQUEST_TO_JOIN = 2;
+  JOIN_POLICY_OPEN_LINK = 3;
+}
+
+message Policy {
+  // Per-action role minimums. modify_member_role and modify_policy are
+  // protocol-fixed Admin and not represented here (§3.3).
+  Role invite_members_role = 1;
+  Role remove_members_role = 2;
+  Role modify_title_role = 3;
+  Role modify_description_role = 4;
+  Role modify_expiry_role = 5;
+
+  JoinPolicy join_policy = 10;
+  // Empty bytes = no link password set.
+  bytes invite_link_password = 11;
+  bool announcement_only = 12;
+}
+
+// Sub-encrypted action payloads (§3.3). The server holds the ciphertext
+// inside the actions blob but never the plaintext. Carried in
+// `GroupChange.actions.modify_*` fields.
+
+message ModifyTitle {
+  string new_title = 1;
+}
+
+message ModifyDescription {
+  string new_description = 1;
+}
+
+message ModifyExpiry {
+  uint32 new_expiry_seconds = 1;
+}

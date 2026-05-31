@@ -1,0 +1,423 @@
+//! HTTP client methods for the `/v1/groups` endpoints
+//! (`docs/03-groups.md` §3.3–§3.4).
+//!
+//! Two authentication models live here:
+//!
+//! - **Session-auth** (bearer token via [`Client::send_authed`]): the
+//!   `server-params`, `credentials`, and `POST /v1/groups` (create)
+//!   endpoints — the server may transiently see the requester's DID.
+//! - **Presentation-auth** (`X-Group-Auth` header, no bearer token): every
+//!   other group endpoint. The header carries an
+//!   `AuthCredentialDidPresentation` the server verifies against the
+//!   group's stored `group_public_params`; no DID is ever sent or seen.
+//!
+//! All payloads use URL-safe-no-pad base64 — see the convention pinned in
+//! `core/crates/server/src/routes/groups.rs`.
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+
+use crate::error::NetError;
+use crate::Client;
+
+fn b64(bytes: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn b64d(s: &str) -> Result<Vec<u8>, NetError> {
+    URL_SAFE_NO_PAD
+        .decode(s.as_bytes())
+        .map_err(|e| NetError::Base64(e.to_string()))
+}
+
+// ── server params ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct GroupServerParams {
+    pub version: i32,
+    pub params: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct GroupServerParamsRaw {
+    version: i32,
+    params: String,
+}
+
+// ── credentials ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct IssuedGroupCredential {
+    pub bytes: Vec<u8>,
+    pub redemption_time: u64,
+}
+
+#[derive(Deserialize)]
+struct IssueCredentialRaw {
+    response: String,
+    redemption_time: u64,
+}
+
+// ── create group ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct CreateGroupRequest {
+    pub group_public_params: Vec<u8>,
+    pub encrypted_state: Vec<u8>,
+    pub founder_encrypted_member_id: Vec<u8>,
+    pub founder_group_push_pseudonym: Vec<u8>,
+    pub policy: GroupPolicyWire,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateGroupResponse {
+    /// 32-byte group_id, URL-safe-no-pad-base64 (so the caller can drop
+    /// it straight into path-shaped URLs without re-encoding).
+    pub group_id: String,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupPolicyWire {
+    pub invite_members_role: i16,
+    pub remove_members_role: i16,
+    pub modify_title_role: i16,
+    pub modify_description_role: i16,
+    pub modify_expiry_role: i16,
+    pub join_policy: i16,
+    /// Optional invite-link password (base64, URL-safe-no-pad).
+    pub invite_link_password: Option<String>,
+    pub announcement_only: bool,
+}
+
+#[derive(Deserialize)]
+struct CreateGroupResponseRaw {
+    group_id: String,
+    revision: i64,
+}
+
+// ── get group / get changes ─────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct GetGroupResponse {
+    pub revision: i64,
+    pub encrypted_state: Vec<u8>,
+    pub group_public_params: Vec<u8>,
+    pub policy: GroupPolicyWire,
+}
+
+#[derive(Deserialize)]
+struct GetGroupResponseRaw {
+    revision: i64,
+    encrypted_state: String,
+    group_public_params: String,
+    policy: GroupPolicyWire,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupChange {
+    pub revision: i64,
+    pub encrypted_state: Vec<u8>,
+    /// JSON-encoded actions blob; opaque from this layer.
+    pub actions: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChangesResponse {
+    pub changes: Vec<GroupChange>,
+    pub current_revision: i64,
+}
+
+#[derive(Deserialize)]
+struct ChangesResponseRaw {
+    changes: Vec<GroupChangeRaw>,
+    current_revision: i64,
+}
+
+#[derive(Deserialize)]
+struct GroupChangeRaw {
+    revision: i64,
+    encrypted_state: String,
+    actions: String,
+}
+
+// ── submit changes ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SubmitChangeRequest {
+    pub revision: i64,
+    /// Base64 URL-safe-no-pad of the new encrypted state blob.
+    pub new_encrypted_state: String,
+    pub actions: GroupActionsWire,
+}
+
+/// Mirrors `ActionsWire` in the server. Base64 fields are URL-safe-no-pad.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GroupActionsWire {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invite_members: Vec<InviteMemberWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promote_pending_members: Option<PromoteSelfWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decline_invite: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modify_member_role: Vec<RoleAssignmentWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_via_link: Option<JoinViaLinkWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_join_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approve_join_request: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_join_request: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modify_policy: Option<GroupPolicyWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modify_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modify_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modify_expiry: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteMemberWire {
+    pub encrypted_member_id: String,
+    pub role: i16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteSelfWire {
+    pub encrypted_profile_key: String,
+    pub group_push_pseudonym: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleAssignmentWire {
+    pub encrypted_member_id: String,
+    pub role: i16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinViaLinkWire {
+    pub encrypted_profile_key: String,
+    pub group_push_pseudonym: String,
+    pub invite_link_password: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubmitChangeResponse {
+    pub revision: i64,
+    /// `Some(true)` = added directly as member (OpenLink),
+    /// `Some(false)` = added to pending-approval queue,
+    /// `None` = action was not a `join_via_link`.
+    pub join_landed_as_member: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct SubmitChangeResponseRaw {
+    revision: i64,
+    join_result: Option<String>,
+}
+
+impl Client {
+    // ── public: server params ───────────────────────────────────────────
+
+    /// Fetch the server's zkgroup public params (no auth).
+    pub async fn get_group_server_params(&self) -> Result<GroupServerParams, NetError> {
+        let url = format!("{}/v1/groups/server-params", self.server_url());
+        let resp = self.http_get_public(&url).await?;
+        let raw: GroupServerParamsRaw = resp.json().await?;
+        Ok(GroupServerParams {
+            version: raw.version,
+            params: b64d(&raw.params)?,
+        })
+    }
+
+    // ── session-auth: issue credential ──────────────────────────────────
+
+    /// Daily credential refresh.
+    pub async fn issue_group_credential(
+        &self,
+        did: &str,
+        redemption_time: u64,
+    ) -> Result<IssuedGroupCredential, NetError> {
+        let body = serde_json::json!({
+            "did": did,
+            "redemption_time": redemption_time,
+        });
+        let resp = self
+            .send_authed(reqwest::Method::POST, "/v1/groups/credentials", |b| b.json(&body))
+            .await?;
+        let raw: IssueCredentialRaw = check_json(resp).await?;
+        Ok(IssuedGroupCredential {
+            bytes: b64d(&raw.response)?,
+            redemption_time: raw.redemption_time,
+        })
+    }
+
+    // ── session-auth: create group ──────────────────────────────────────
+
+    pub async fn create_group(
+        &self,
+        req: &CreateGroupRequest,
+    ) -> Result<CreateGroupResponse, NetError> {
+        let body = serde_json::json!({
+            "group_public_params": b64(&req.group_public_params),
+            "encrypted_state": b64(&req.encrypted_state),
+            "founder_encrypted_member_id": b64(&req.founder_encrypted_member_id),
+            "founder_group_push_pseudonym": b64(&req.founder_group_push_pseudonym),
+            "policy": req.policy,
+        });
+        let resp = self
+            .send_authed(reqwest::Method::POST, "/v1/groups", |b| b.json(&body))
+            .await?;
+        let raw: CreateGroupResponseRaw = check_json(resp).await?;
+        Ok(CreateGroupResponse {
+            group_id: raw.group_id,
+            revision: raw.revision,
+        })
+    }
+
+    // ── presentation-auth: get group / changes ──────────────────────────
+
+    pub async fn get_group(
+        &self,
+        group_id_b64: &str,
+        presentation: &[u8],
+    ) -> Result<GetGroupResponse, NetError> {
+        let url = format!("{}/v1/groups/{}", self.server_url(), group_id_b64);
+        let resp = self.presentation_request(reqwest::Method::GET, &url, presentation, None).await?;
+        let raw: GetGroupResponseRaw = check_json(resp).await?;
+        Ok(GetGroupResponse {
+            revision: raw.revision,
+            encrypted_state: b64d(&raw.encrypted_state)?,
+            group_public_params: b64d(&raw.group_public_params)?,
+            policy: raw.policy,
+        })
+    }
+
+    pub async fn get_group_changes(
+        &self,
+        group_id_b64: &str,
+        from_revision: i64,
+        presentation: &[u8],
+    ) -> Result<ChangesResponse, NetError> {
+        let url = format!(
+            "{}/v1/groups/{}/changes?from_revision={}",
+            self.server_url(),
+            group_id_b64,
+            from_revision,
+        );
+        let resp = self.presentation_request(reqwest::Method::GET, &url, presentation, None).await?;
+        let raw: ChangesResponseRaw = check_json(resp).await?;
+        Ok(ChangesResponse {
+            changes: raw
+                .changes
+                .into_iter()
+                .map(|c| {
+                    Ok::<_, NetError>(GroupChange {
+                        revision: c.revision,
+                        encrypted_state: b64d(&c.encrypted_state)?,
+                        actions: b64d(&c.actions)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            current_revision: raw.current_revision,
+        })
+    }
+
+    // ── presentation-auth: submit changes ───────────────────────────────
+
+    pub async fn submit_group_changes(
+        &self,
+        group_id_b64: &str,
+        req: &SubmitChangeRequest,
+        presentation: &[u8],
+    ) -> Result<SubmitChangeResponse, NetError> {
+        let url = format!("{}/v1/groups/{}/changes", self.server_url(), group_id_b64);
+        let body = serde_json::to_value(req).map_err(|e| NetError::Base64(e.to_string()))?;
+        let resp = self
+            .presentation_request(reqwest::Method::POST, &url, presentation, Some(body))
+            .await?;
+        let raw: SubmitChangeResponseRaw = check_json(resp).await?;
+        Ok(SubmitChangeResponse {
+            revision: raw.revision,
+            join_landed_as_member: raw.join_result.as_deref().map(|s| s == "member"),
+        })
+    }
+
+    // ── presentation-auth: rotate push binding ──────────────────────────
+
+    pub async fn rotate_group_push_binding(
+        &self,
+        group_id_b64: &str,
+        new_pseudonym: &[u8],
+        presentation: &[u8],
+    ) -> Result<(), NetError> {
+        let url = format!(
+            "{}/v1/groups/{}/push_binding",
+            self.server_url(),
+            group_id_b64,
+        );
+        let body = serde_json::json!({
+            "new_group_push_pseudonym": b64(new_pseudonym),
+        });
+        let resp = self
+            .presentation_request(reqwest::Method::POST, &url, presentation, Some(body))
+            .await?;
+        if !resp.status().is_success() {
+            return Err(NetError::Server(
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            ));
+        }
+        Ok(())
+    }
+
+    // ── helpers (only used by groups) ───────────────────────────────────
+
+    async fn http_get_public(&self, url: &str) -> Result<reqwest::Response, NetError> {
+        let resp = self.http_client().get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(NetError::Server(
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            ));
+        }
+        Ok(resp)
+    }
+
+    async fn presentation_request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        presentation: &[u8],
+        json_body: Option<serde_json::Value>,
+    ) -> Result<reqwest::Response, NetError> {
+        let mut req = self
+            .http_client()
+            .request(method, url)
+            .header("x-group-auth", b64(presentation));
+        if let Some(body) = json_body {
+            req = req.json(&body);
+        }
+        Ok(req.send().await?)
+    }
+}
+
+async fn check_json<T: for<'de> Deserialize<'de>>(
+    resp: reqwest::Response,
+) -> Result<T, NetError> {
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(NetError::Server(
+            status.as_u16(),
+            resp.text().await.unwrap_or_default(),
+        ));
+    }
+    Ok(resp.json().await?)
+}

@@ -186,6 +186,10 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         return msgs
     }
 
+    // Group methods inherit the no-op defaults from
+    // `AppCoreProtocol+Defaults.swift`; override here if a preview needs
+    // a more interesting behavior.
+
     func enqueueMessage(from senderDid: String, text: String) {
         lock.lock()
         let now = Int64(Date().timeIntervalSince1970 * 1000)

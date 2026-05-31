@@ -17,6 +17,7 @@
 //! `Client`.
 
 pub mod error;
+pub mod groups;
 pub mod types;
 pub mod ws;
 
@@ -96,6 +97,13 @@ impl Client {
 
     pub fn server_url(&self) -> &str {
         &self.server_url
+    }
+
+    /// Borrow the underlying reqwest client. Crate-private; only the
+    /// `groups` module needs it to build presentation-authenticated
+    /// requests that bypass the bearer-token plumbing.
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.http
     }
 
     /// Get the current session token, if set. Used by the WebSocket client.

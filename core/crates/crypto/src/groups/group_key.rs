@@ -26,6 +26,7 @@ use rand::TryRngCore;
 use zkcredential::attributes::{Domain, KeyPair, PublicKey, derive_default_generator_points};
 
 use crate::error::CryptoError;
+use crate::groups::credentials::{DidStruct, EncryptedMemberId};
 
 /// Encryption domain for `DidStruct`-shaped attributes (the DID-bound member
 /// id). Distinct from libsignal's `UidEncryptionDomain` so that ciphertexts
@@ -137,6 +138,18 @@ impl GroupKey {
     /// and (later) to encrypt member ids server-side.
     pub(crate) fn did_enc_key_pair(&self) -> &DidEncryptionKeyPair {
         &self.did_enc_key_pair
+    }
+
+    /// Compute the `EncryptedMemberId` for an arbitrary DID under this
+    /// group key. Used by clients to refer to *other* members in actions
+    /// (e.g. `invite_members`, `remove_members`) without needing them to
+    /// produce a presentation. Equivalent to the ciphertext baked into a
+    /// presentation produced by the holder of that DID — see
+    /// `AuthCredentialDid::present`'s `member_id_ciphertext`.
+    pub fn encrypt_member_id(&self, did: &str) -> EncryptedMemberId {
+        let did_struct = DidStruct::from_did(did);
+        let ct = self.did_enc_key_pair.encrypt_arbitrary_attribute(&did_struct);
+        EncryptedMemberId::from_ciphertext(ct)
     }
 
     /// Bundle of the public values the server needs in order to verify

@@ -3,15 +3,16 @@ package actnet;
 
 message ContentMessage {
   oneof body {
-    TextMessage    text    = 1;
-    ReceiptMessage receipt = 2;
+    TextMessage    text          = 1;
+    ReceiptMessage receipt       = 2;
+    GroupContext   group_context = 3;
   }
   // Reserved for upcoming body variants (typing, timer-change, group
   // control, call signaling, etc.). Field numbers inside a `oneof` share
   // the parent message's number space, so reservations live here at the
   // message level. Pick a number from this block when adding a new
-  // variant; never reuse 1-2 even if removed.
-  reserved 3 to 14;
+  // variant; never reuse 1-3 even if removed.
+  reserved 4 to 14;
   uint64 timestamp_ms = 15;
   // Sender's profile key (32 bytes, AES-256-GCM). When present, recipients
   // can fetch and decrypt the sender's encrypted profile blob. Attached to
@@ -28,6 +29,29 @@ message TextMessage {
   string body = 1;
   // Future: attachments, mentions, reply_to, formatting.
   reserved 2 to 10;
+}
+
+// Invite-flow group bootstrap DM (docs/03-groups.md §3.10). The admin's
+// client sends this as the per-recipient envelope after submitting
+// `invite_members`. The recipient stores `group_master_key` locally,
+// derives the group identifier client-side, and then fetches the group
+// state to see themselves in the pending list.
+message GroupContext {
+  // 32-byte zkgroup master key. Bootstraps every other group-derived key
+  // (group_id, encryption key, did-enc key pair).
+  bytes group_master_key = 1;
+  // Server URL hosting this group. The invitee may need to join this
+  // server first (§3.12); their client handles that automatically.
+  string hosting_server_url = 2;
+  // Display-only: DID of the inviter.
+  string inviter_did = 3;
+  // Unix millis when the invite was issued.
+  int64 invited_at_ms = 4;
+  // Optional invite-link password the invitee can use if they prefer the
+  // `join_via_link` path over `promote_pending_members` (e.g. when their
+  // pending row has expired). Empty bytes = "no password supplied".
+  bytes invite_link_password = 5;
+  reserved 6 to 10;
 }
 
 message ReceiptMessage {

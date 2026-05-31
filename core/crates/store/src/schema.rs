@@ -129,4 +129,51 @@ pub const ALTER_MIGRATIONS: &[&str] = &[
     // Local device_id assigned to this client (defaults to 1 — single device).
     // Persisted so login/recovery don't have to assume a fixed value.
     "ALTER TABLE account ADD COLUMN device_id INTEGER NOT NULL DEFAULT 1",
+    // ── Groups (docs/03-groups.md) ────────────────────────────────────────
+    // Per-group state. group_id is the server-visible routing id (32 bytes,
+    // derived from master_key). Both stored base64-url-no-pad as TEXT for
+    // ergonomics with the URL-safe-no-pad convention server-side.
+    //
+    // `encrypted_state_plaintext` is the proto::groups::GroupState bytes the
+    // client most recently decrypted; cached so the UI can render without a
+    // round-trip through libsignal's blob decrypt.
+    //
+    // `policy_*` columns mirror the server's group_policy so we can render
+    // permissions without first decrypting state. They're authoritative on
+    // the server; clients trust the server's copy at fetch time and update
+    // these columns on every successful fetch.
+    "CREATE TABLE IF NOT EXISTS groups (\
+        group_id                    TEXT    PRIMARY KEY,\
+        master_key                  BLOB    NOT NULL,\
+        hosting_server_url          TEXT    NOT NULL,\
+        revision                    INTEGER NOT NULL DEFAULT 0,\
+        encrypted_state_plaintext   BLOB    NOT NULL DEFAULT x'',\
+        policy_invite_members_role      INTEGER NOT NULL DEFAULT 1,\
+        policy_remove_members_role      INTEGER NOT NULL DEFAULT 1,\
+        policy_modify_title_role        INTEGER NOT NULL DEFAULT 1,\
+        policy_modify_description_role  INTEGER NOT NULL DEFAULT 1,\
+        policy_modify_expiry_role       INTEGER NOT NULL DEFAULT 1,\
+        policy_join_policy              INTEGER NOT NULL DEFAULT 0,\
+        policy_invite_link_password     BLOB,\
+        policy_announcement_only        INTEGER NOT NULL DEFAULT 0,\
+        group_push_pseudonym        BLOB,\
+        created_at                  INTEGER NOT NULL\
+    )",
+    // Cached daily zkgroup credential, one per (server_url, did,
+    // redemption_time). `bytes` is bincode-serialized `AuthCredentialDid`.
+    // Old rows can be pruned by redemption_time.
+    "CREATE TABLE IF NOT EXISTS group_credentials (\
+        server_url       TEXT    NOT NULL,\
+        did              TEXT    NOT NULL,\
+        redemption_time  INTEGER NOT NULL,\
+        bytes            BLOB    NOT NULL,\
+        PRIMARY KEY (server_url, did, redemption_time)\
+    )",
+    // Cached server_params per homeserver. Populated lazily on first use.
+    "CREATE TABLE IF NOT EXISTS group_server_params (\
+        server_url   TEXT    PRIMARY KEY,\
+        version      INTEGER NOT NULL,\
+        bytes        BLOB    NOT NULL,\
+        fetched_at   INTEGER NOT NULL\
+    )",
 ];

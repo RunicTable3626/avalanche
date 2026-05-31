@@ -264,13 +264,16 @@ Response:
 
 ```
 {
-  current_revision: u64,
+  revision: u64,
   encrypted_state: bytes,
-  server_public_params: bytes  // so client can verify future presentations
+  group_public_params: bytes,  // so a client joining via invite link can derive the encryption key
+  policy: Policy                // server-readable, see §3.3
 }
 ```
 
-**Fetch is membership-gated.** Server verifies the presentation, extracts the actor's `encrypted_member_id`, and checks it appears in `member_credentials[group_id]`. Non-members are rejected with 403, even if they possess a valid auth credential and a valid `GroupSecretParams` derived from a leaked `GroupMasterKey`. This is the same actor-eligibility check used for admin-class actions in §3.3 step 2, applied to read operations. It is the load-bearing reason the master key on its own (without server cooperation) cannot read group state — see §3.10 "Security note on what the master key grants."
+The homeserver's `ServerPublicParams` (used to verify credential issuance) lives at the separate `GET /v1/groups/server-params` endpoint — clients fetch it once at first contact and cache it.
+
+**Fetch is membership-gated.** Server verifies the presentation, extracts the actor's `encrypted_member_id`, and checks it appears in `member_credentials[group_id]`. Non-members are rejected with **404** (not 403): the response is intentionally indistinguishable from "no such group", so an attacker holding a valid credential but no membership can't probe for the existence of arbitrary groups. This matches the info-flow leak rule in §3.11 ("Error responses don't leak existence") applied to read endpoints. It is the load-bearing reason the master key on its own (without server cooperation) cannot read group state — see §3.10 "Security note on what the master key grants."
 
 Members fetching incrementally:
 
@@ -534,10 +537,10 @@ Source-IP correlation between this send POST and the user's other authenticated 
 
 #### Daily credential refresh
 
-To send sealed-sender group messages anonymously, the client needs three credential artifacts ahead of time. These are bundled into a single daily refresh:
+To send sealed-sender group messages anonymously, the client needs three credential artifacts ahead of time. Eventually these will be bundled into a single daily refresh:
 
 ```
-POST /v1/groups/credentials/refresh
+POST /v1/groups/credentials/refresh        // future shape (Stage 5 step 6+)
 Headers: Authorization: <session bearer>     // identified — server knows who's refreshing
 Body: { redemption_time, groups: [group_id, ...] }
 Response: {
@@ -545,6 +548,15 @@ Response: {
   sender_certificate:     SenderCertificate,                   // for the sealed-sender envelope
   endorsements_per_group: { group_id → GroupSendEndorsementsResponse }  // for the send-tokens
 }
+```
+
+The shape that exists today after Stage 5 step 4 returns only the auth credential — the sealed-sender envelope and endorsements come in with step 6 (group sends):
+
+```
+POST /v1/groups/credentials
+Headers: Authorization: <session bearer>
+Body: { did, redemption_time }   // server verifies `did` matches the session's account
+Response: { response, redemption_time }   // bincode-serialized AuthCredentialDidResponse
 ```
 
 The refresh is identifiable (server knows which DID is fetching credentials at which time). Anonymity kicks in at *send time*, not at *refresh time*. This is the same trade Signal makes: daily credential issuance is identified, daily send activity is anonymous within the issuance window.
@@ -617,10 +629,20 @@ Tracked here for visibility; each needs an answer before Stage 5 is unblocked.
 
 Rough order, assuming the open questions above are answered:
 
-1. Add `libsignal-zkgroup` (and `zkcredential`) to the workspace. Bring up `ServerSecretParams` generation + storage on the homeserver.
-2. Implement `crypto::groups::credentials` (`AuthCredentialDid` on `zkcredential`). Unit tests covering issue / receive / present / verify.
-3. Implement `crypto::groups::GroupKey` wrappers around libsignal's `GroupSecretParams`. Unit tests on blob and member-id encryption.
-4. Server: `POST /v1/groups` (create), `POST /v1/groups/{id}/changes` (update), `GET /v1/groups/{id}`, `GET /v1/groups/{id}/changes?from_revision=`, `POST /v1/groups/{id}/push_binding` (rotate group pseudonym). Schema for `groups` and `member_credentials` tables (the latter with `group_push_pseudonym` column, no DID column — see §3.9). Apply rate limiting.
+1. **[done]** Add `zkgroup` and `zkcredential` to the workspace; the workspace `[patch.crates-io]` rewrites `curve25519-dalek` 4.1.3 to Signal's fork (zkgroup requires it). `crypto::groups::ServerSecretParams` bundles `zkgroup::ServerSecretParams` *plus* a dedicated `zkcredential::credentials::CredentialKeyPair` for `AuthCredentialDid` — the latter is needed because zkgroup's internal `generic_credential_key_pair` is `pub(crate)` and inaccessible from outside the crate. Persisted on the homeserver via migration `010_groups.sql`'s prior `zkgroup_server_params` table, served at `GET /v1/groups/server-params`.
+2. **[done]** `crypto::groups::credentials` defines `DidStruct` (the DID-as-two-Ristretto-points attribute, see §2.3), `AuthCredentialDid`, `AuthCredentialDidResponse`, `AuthCredentialDidPresentation`, and `EncryptedMemberId`. Issue / receive / present / verify covered by unit tests including roundtrip, wrong-DID, wrong-redemption-time, non-day-aligned, wrong-group, wrong-server-key cases.
+3. **[done, partial]** `crypto::groups::GroupKey` wraps `GroupMasterKey`, derives `GroupSecretParams` and a `DidEncryptionDomain` key pair from the master key. Exposes `generate`/`from_bytes`/`to_bytes`/`group_id`/`encrypt_state`/`decrypt_state`/`public_params`. `encrypt_member`/`decrypt_member` are deferred — see §2.3 for the one-way encoding discussion. `GroupPublicParams` (group_id + did_enc_public_key) is the public counterpart uploaded at create-group time and used server-side to verify presentations.
+4. **[done]** Server endpoints:
+   - `GET /v1/groups/server-params` (public) — publish `ServerPublicParams`.
+   - `POST /v1/groups` (session-auth) — founder uploads `GroupPublicParams`, initial encrypted state, their own admin row. 409 on duplicate `group_id`.
+   - `POST /v1/groups/credentials` (session-auth) — daily credential refresh. Server verifies the requested DID matches the session's account before issuing.
+   - `GET /v1/groups/{id}` and `GET /v1/groups/{id}/changes?from_revision=` (presentation-auth, membership-gated; non-members get 404 to hide existence per §3.11 info-flow leak rule, NOT 403 as originally sketched in §3.4).
+   - `POST /v1/groups/{id}/changes` (presentation-auth) — full §3.3 action handler: classify self-vs-admin, revision freshness, per-class eligibility, role check against `group_policy`, transactional apply of all 11 action types (invite/promote/decline/remove/role-change/join-via-link with OpenLink vs RequestToJoin branching/cancel/approve/deny/modify_policy/sub-encrypted modify_*), revision bump + history append.
+   - `POST /v1/groups/{id}/push_binding` (presentation-auth) — rotate `group_push_pseudonym`.
+
+   Schema: migration `010_groups.sql` with `groups`, `group_state_history` (256-revision ring buffer), `member_credentials`, `members_pending`, `members_pending_approval`. Every column annotated per §9 invariant 1; pending tables use day-aligned timestamps per §3.9 rule 5. Rate limiting: per-account on session-authed endpoints (create / credentials issuance); per-IP on presentation-authed write endpoints (changes / push_binding), the only handle available since presentation auth doesn't bind to an account. Per-group rate limiting is deferred — the existing `rate_limit_counters` table is keyed on `account_id`; per-group needs a parallel table.
+
+   **Convention pinned during step 4:** group endpoints speak URL-safe-no-pad base64 everywhere (URL paths, headers, JSON bodies, response bodies). One alphabet, one decoder. Other endpoints in the server keep their existing standard base64.
 5. `app-core`: `create_group`, `invite_member`, `accept_invite`, `decline_invite`, `join_via_link`, `cancel_join_request`, `approve_join_request`, `deny_join_request`, `remove_member`, `change_role`, `fetch_group_state`, `apply_pending_changes`, `rotate_group_pseudonyms` (scheduled job). `invite_member` internally submits `invite_members` and sends the per-recipient `GroupContext` DM (§3.10). `join_via_link` returns an enum indicating immediate-member vs pending-approval (server-decided) so the UI renders the right state. Sync FFI, blocking on the global tokio runtime, per existing convention.
 6. Group send: per-recipient encrypted message via `sealed_sender_multi_recipient_encrypt` + `GroupSendEndorsement`, on a dedicated send endpoint that accepts `GroupSendFullToken` (not session credential) for authentication — see open question #4 for the three-layer requirement and the IP-correlation caveat. Server fan-out by `(encrypted_member_id, group_push_pseudonym)` from `member_credentials`.
 7. Push: per-group pseudonym registration at join via the existing `register_push_with_relay` (`core/crates/net/src/lib.rs:519`) — **no new relay endpoint needed**, the relay's `/v1/register` is reused. Wakeups on new revisions and new messages forwarded to relay by group pseudonym.

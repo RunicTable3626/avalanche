@@ -82,6 +82,6 @@ Signing, expiry, usage limits, and closed registration are all server/Project co
 - Token signing and validation
 - Expiry and usage limits
 - Onboarding flows (server step webview content)
-- Auto-enrollment into groups
+- Auto-enrollment into groups — admin-side UI for constructing tokens with a `group_invitations` array of `{group_master_key, invite_link_password}` entries. (`group_id` is derived client-side from the master key; not included in the token.) The receiving substrate (`docs/03-groups.md` §3.10 "Inviting someone who doesn't have an account yet") applies them via `join_with_link` or `request_to_join` after registration.
 - Post-onboarding redirect (e.g., open a DM, navigate to a channel)
 - In-app invite creation UI

@@ -439,12 +439,14 @@ Built: iOS app (SwiftUI) with UniFFI bindings to Rust core. Account creation wit
 
 ### Stage 4 — Ship it: invite flow, notifications, deployment
 
+**Status: Complete.**
+
 **What gets built:**
 
 - **Invite links:** QR code / shareable link flow for single-server discovery. Scan or tap a link → install app (or open it) → land on the server with the inviter as a contact. Links use `https://go.theavalanche.net/invite/<server>/<token>` Universal Links.
 - **Notifications:** Local notifications when a message arrives while the app is backgrounded. APNs integration via the push relay for wakeups when the app is killed. Content-free payloads only — the relay sees pseudonyms, not user identities.
 - **Homeserver deployment:** Production homeserver on real infrastructure. TLS, backups, monitoring. Server admin tooling for generating invite tokens.
-- **App Store submission:** Provisioning, review, TestFlight → public release. Bundle ID `net.theavalanche.app`, team `7FVK3RR3TV`.
+- **App Store submission:** Provisioning, review, TestFlight. Bundle ID `net.theavalanche.app`, team `7FVK3RR3TV`.
 
 **Why now:** The crypto and protocol layers are solid. The app needs to be usable by real people — that means they need to find each other, get notified, and install from the App Store. Everything else (groups, projects, federation) can wait until there are real users sending real messages.
 

@@ -66,7 +66,7 @@ This avoids surprise BLE activity and gives users explicit control over when the
 
 **DMs:** Signal Double Ratchet ciphertext, flooded through the mesh. Addressed by a short derived recipient tag (see section 2.5). Only works with existing Signal sessions. Same E2E security as the homeserver path.
 
-**Group messages:** Sender Key ciphertext, flooded through the mesh. Addressed by a short derived group tag (see section 2.5). Only works with groups you're already a member of.
+**Group messages:** Sender Key ciphertext, flooded through the mesh. Addressed by a short derived group tag (see section 2.5). Only works with groups you're already a member of. **This covers both group types** — action-bound (zkgroup) and cross-server casual — because both use Sender Keys for message content; the difference between the two types is their server-side authorization layer (credentials + endorsements vs nothing), which is irrelevant on mesh. For action-bound groups specifically, what does *not* survive mesh is the zkgroup machinery: state mutations (add/remove member, role changes), credential issuance, and send endorsements — all of those require the homeserver. Steady-state messaging is unaffected. See `docs/03-groups.md` §7 for the zkgroup-side framing.
 
 **Broadcast:** Plaintext messages visible to everyone on the mesh. A "local mesh" channel that appears alongside your conversations while in mesh mode. Useful for open coordination when E2E encryption isn't needed or when you need to reach people you don't have Signal sessions with.
 

@@ -64,6 +64,15 @@ Options:
 
 This means the `crypto` crate gets a new submodule `crypto::groups::credentials` that defines `AuthCredentialDid` on top of `zkcredential`. The `groups` module's interface to the rest of the system stays scheme-agnostic, so a later MLS swap stays possible.
 
+**One-way encoding.** Signal's credential carries a 16-byte UUID — short enough that the encoding it uses is reversible: given the group key, a client can decrypt a member ciphertext and read back the UUID. Our credential carries a DID, which is variable-length (typically 30+ bytes) and doesn't fit the same encoding. We chose the simplest workaround: hash the DID into a deterministic ciphertext shape, accepting that the result isn't directly reversible. So given a DID, anyone with the group key can compute `encrypt_member(did) → encrypted_member_id`; the other direction is not available.
+
+This is fine because nothing in the protocol needs to reverse it:
+
+- **Server side:** the server stores `encrypted_member_id`s to enforce membership but never reverses them — it doesn't hold the group key, and §3.9 rule 2 prohibits any `(encrypted_member_id → did)` table. The membership-opacity property is structural, not a consequence of this encoding choice.
+- **Client side:** when a client needs to render "Alice removed Bob" after receiving an action that names `encrypted_member_id`s, it reads the encrypted state blob (§3.2), which contains the canonical `(did, encrypted_member_id, role, …)` table per member, and looks the DID up there.
+
+If a future use case demands client-side reversibility, we can swap in a longer reversible encoding. It's a local change to `DidStruct` and doesn't affect the server.
+
 ### 2.4 API surface for `crypto::groups`
 
 The Rust interface, scheme-agnostic at the boundary:
@@ -80,7 +89,10 @@ impl GroupKey {
     pub fn encrypt_state(&self, plaintext: &[u8]) -> Vec<u8>;
     pub fn decrypt_state(&self, ciphertext: &[u8]) -> Result<Vec<u8>>;
     pub fn encrypt_member(&self, did: &Did) -> EncryptedMemberId;
-    pub fn decrypt_member(&self, c: &EncryptedMemberId) -> Result<Did>;
+    // No `decrypt_member` today — clients recover DIDs from the encrypted
+    // state blob and re-run `encrypt_member` to match. If a use case emerges,
+    // adding one is a local change to the `DidStruct` encoding (§2.3); the
+    // server-side opacity property does not depend on its absence.
 }
 
 pub struct AuthCredential(/* opaque */);
@@ -107,7 +119,7 @@ Group state lives in two layers — distinguishing them matters for the storage 
 **Encrypted state blob** (opaque to the server; the source of truth for clients):
 
 - **Group identity:** `group_id` (derived, public), `created_at`, `creator_did`.
-- **Members:** list of `(encrypted_member_id, role, joined_at, profile_key_ciphertext)`. Roles: `Admin`, `Member`. (Guest is a Stage-6+ extension; defer.)
+- **Members:** list of `(did, encrypted_member_id, role, joined_at, profile_key_ciphertext)`. Roles: `Admin`, `Member`. (Guest is a Stage-6+ extension; defer.) The `did` is carried in cleartext *inside the encrypted blob* so members can render names and so that the one-way `encrypt_member` map (§2.3) is invertible to clients-who-hold-the-master-key. The server, which doesn't have the master key, sees neither.
 - **Metadata:** title, description, avatar reference + key.
 - **Policy:** expiry timer (seconds), announcement-only flag, join policy (`InviteOnly`, `RequestToJoin`, `OpenLink(token)`).
 - **Revision:** monotonically increasing `u64`. Each accepted change increments by 1.
@@ -132,7 +144,7 @@ The four views are kept consistent by the change-application logic (§3.3): ever
 - `current_revision` (server can see the revision number — it's a counter, not secret)
 - `encrypted_state` (bytea, latest revision)
 - `encrypted_state_history` (last 256 revisions; server keeps a ring buffer so clients catching up from an old revision can fetch deltas — see §3.4)
-- `member_credentials` (table: `group_id`, `encrypted_member_id` (UuidCiphertext), `role`, `group_push_pseudonym`) — server uses this to enforce membership, validate roles (§3.3), and route pushes without learning who members are. The `encrypted_member_id` is the libsignal `UuidCiphertext` derived from the member's DID under the group key. `role` is `Admin` or `Member`; the encrypted state blob is authoritative for clients but the server's copy is sufficient for the server's enforcement role.
+- `member_credentials` (table: `group_id`, `encrypted_member_id`, `role`, `group_push_pseudonym`) — server uses this to enforce membership, validate roles (§3.3), and route pushes without learning who members are. The `encrypted_member_id` is a fixed-size (~64 byte) ciphertext produced by encrypting the member's DID under a key derived from the group master key; see §2.3 for the encoding and `crypto::groups` for the implementation. The server doesn't hold the master key and §3.9 rule 2 prevents any server-side `(encrypted_member_id → did)` index, so membership opacity is structural. `role` is `Admin` or `Member`; the encrypted state blob is authoritative for clients but the server's copy is sufficient for the server's enforcement role.
 - `members_pending` (table: `group_id`, `encrypted_member_id`, `role`, `jittered_timestamp`) — invited users awaiting acceptance. See §3.10. (Inviter identity lives in the encrypted state blob for client display; not stored server-side.)
 - `members_pending_approval` (table: `group_id`, `encrypted_member_id`, `group_push_pseudonym`, `jittered_timestamp`) — join requesters awaiting admin approval. See §3.10. Requester provides their pseudonym at request time so admin approval doesn't need it.
 - `group_policy` (record on the group row, or a small joined table) — per-action-type minimum role, join policy (`Closed | RequestToJoin | OpenLink`), invite link password (`Option<Bytes>`), announcement-only flag. See §3.1 for the rationale and §3.3 for the wire shape and how it's used. Updated atomically when a `modify_policy` action is applied.
@@ -190,7 +202,7 @@ Policy {
 }
 ```
 
-The `Actions` envelope is **partly visible to the server**, partly sub-encrypted. The server can see the *structure* (which operations, which `encrypted_member_id`s, which roles, the policy values) but not the content of sensitive sub-fields (title, description, expiry timer, encrypted_profile_keys). Note that `encrypted_member_id` itself is still opaque to the server (it's a `UuidCiphertext` under the group key the server doesn't have), so visibility of the structure does not de-anonymize members.
+The `Actions` envelope is **partly visible to the server**, partly sub-encrypted. The server can see the *structure* (which operations, which `encrypted_member_id`s, which roles, the policy values) but not the content of sensitive sub-fields (title, description, expiry timer, encrypted_profile_keys). Note that `encrypted_member_id` itself is still opaque to the server (it's encrypted under the group key the server doesn't have), so visibility of the structure does not de-anonymize members.
 
 **Self-actions vs. admin actions.** Actions are split into two classes:
 - **Admin-class actions** (`invite_members`, `remove_members`, `modify_*`, `approve_join_request`, `deny_join_request`, etc.) are submitted by an existing member with sufficient role. Multiple admin-class actions may be batched in a single `GroupChange`.
@@ -502,7 +514,7 @@ Headers:
 Body (proto):
   envelope:    bytes                    // multi-recipient sealed-sender envelope from layer 1
   recipients:  [{
-    encrypted_member_id: UuidCiphertext,
+    encrypted_member_id: EncryptedMemberId,   // see §2.3, §3.2
     send_token:          GroupSendFullToken,
   }, ...]
 ```
@@ -752,15 +764,7 @@ The properties below are invariants the implementation must hold. Each names a t
 
 **Test.** `core/crates/server/tests/send_endpoint_unauthenticated.rs`. (a) Compile-time: a static-typed test that the handler function does not accept the auth-extractor type. (b) Runtime: a test that sends a valid envelope WITH a session bearer and verifies the server ignores the bearer (and returns the same response as without it).
 
-### Invariant 5: type-level encrypted_member_id opacity
-
-**Property.** No `pub fn` in `core/crates/crypto/src/groups*.rs` returns a `Did` (or anything that converts to `Did`) when given only an `EncryptedMemberId`. The only path from `EncryptedMemberId` to `Did` is `GroupKey::decrypt_member(&self, &EncryptedMemberId) -> Result<Did>`.
-
-**Why.** Makes accidental decryption-without-the-key a compile error.
-
-**Test.** `core/crates/crypto/tests/encrypted_member_id_opacity.rs`. (Compile-only test.) Attempts to call various `pub fn`s that take `EncryptedMemberId` without a `GroupKey` and bind the result to a `Did`. Tests are expected to fail compilation; the test runner verifies this via `compile_fail` annotation (standard `trybuild` pattern).
-
-### Invariant 6: state updates are transactional
+### Invariant 5: state updates are transactional
 
 **Property.** Every code path that mutates `groups`, `member_credentials`, `members_pending`, `members_pending_approval`, or `group_policy` does so within a `pool.begin()` transaction, not a `pool.acquire()`. The transaction commits exactly once at the end of the request handler. Partial commits are impossible.
 
@@ -768,7 +772,7 @@ The properties below are invariants the implementation must hold. Each names a t
 
 **Test.** `core/crates/server/tests/transactional_writes.rs`. AST walk via `syn` over `core/crates/server/src/routes/group*.rs` and `core/crates/server/src/db/group*.rs`. For each function that writes to a group table, verify it takes `&mut Transaction<'_, Postgres>` (not `&mut PgConnection` directly). Functions that take `&mut PgConnection` and are not called from a transactional caller fail the test.
 
-### Invariant 7: send endpoint discards connection metadata
+### Invariant 6: send endpoint discards connection metadata
 
 **Property.** The send endpoint's handler does not call `tracing::*` (or any logging function) with the request's source IP, TLS session, or any header value other than the request body fields.
 
@@ -776,7 +780,7 @@ The properties below are invariants the implementation must hold. Each names a t
 
 **Test.** `core/crates/server/tests/send_endpoint_no_metadata_logging.rs`. AST walk: for the send endpoint handler and any functions it calls, verify no expression of type `IpAddr`, `SocketAddr`, `&Request<_>`, or `HeaderMap` is passed to a logging macro.
 
-### Invariant 8: forbidden joins
+### Invariant 7: forbidden joins
 
 **Property.** No SQL query in `core/crates/server/src/db/group*.rs` joins `member_credentials` (or `members_pending*`) with `accounts` or with the DM `push_pseudonyms` table. (Group push pseudonyms live in `member_credentials` directly; no join is needed for routing.)
 
@@ -784,7 +788,7 @@ The properties below are invariants the implementation must hold. Each names a t
 
 **Test.** `core/crates/server/tests/forbidden_joins.rs`. Regex over `db/group*.rs` SQL string literals; flag any query containing both `member_credentials` (or `members_pending*`) and `accounts` or `push_pseudonyms`. False positives can be whitelisted with an `#[allow(forbidden_join, reason = "...")]` annotation on the surrounding function.
 
-### Invariant 9: §3.9 discipline coverage
+### Invariant 8: §3.9 discipline coverage
 
 **Property.** Every rule in §3.9 ("Schema discipline for membership opacity") is enforced by at least one of the invariants above. If a §3.9 rule isn't covered by a test, this invariant fails.
 

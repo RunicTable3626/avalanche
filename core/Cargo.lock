@@ -724,8 +724,13 @@ name = "crypto"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bincode",
+ "curve25519-dalek",
  "libsignal-protocol",
+ "partial-default",
+ "poksho",
  "rand 0.9.4",
+ "serde",
  "test-utils",
  "thiserror 2.0.18",
  "tokio",

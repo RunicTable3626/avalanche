@@ -6,8 +6,13 @@
 //! primitives, so that swapping in MLS later requires no changes outside this
 //! module.
 
+pub mod credentials;
 pub mod group_key;
 pub mod server_params;
 
+pub use credentials::{
+    AuthCredentialDid, AuthCredentialDidPresentation, AuthCredentialDidResponse,
+    EncryptedMemberId, RedemptionTime,
+};
 pub use group_key::{GroupId, GroupKey};
 pub use server_params::{ServerPublicParams, ServerSecretParams};

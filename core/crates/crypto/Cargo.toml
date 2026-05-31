@@ -8,6 +8,11 @@ types              = { workspace = true }
 libsignal-protocol = { workspace = true }
 zkgroup            = { workspace = true }
 zkcredential       = { workspace = true }
+poksho             = { workspace = true }
+curve25519-dalek   = { workspace = true }
+partial-default    = { workspace = true }
+serde              = { workspace = true }
+bincode            = { workspace = true }
 rand               = { workspace = true }
 async-trait        = { workspace = true }
 thiserror          = { workspace = true }

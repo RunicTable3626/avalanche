@@ -20,9 +20,39 @@
 //! implementing them in isolation would risk locking in a wire format we
 //! then have to change.
 
+use curve25519_dalek::ristretto::RistrettoPoint;
+use poksho::{ShoApi, ShoHmacSha256};
 use rand::TryRngCore;
+use zkcredential::attributes::{Domain, KeyPair, PublicKey, derive_default_generator_points};
 
 use crate::error::CryptoError;
+
+/// Encryption domain for `DidStruct`-shaped attributes (the DID-bound member
+/// id). Distinct from libsignal's `UidEncryptionDomain` so that ciphertexts
+/// for the two attribute types can't be statically confused; the derived key
+/// is also distinct, since they use different SHO labels.
+///
+/// `type Attribute` is set to `[RistrettoPoint; 2]` (the raw shape) rather
+/// than `DidStruct` directly, because the latter lives in
+/// `crypto::groups::credentials` and the `Domain` trait is implemented here
+/// in `group_key`. `DidStruct` impls `Attribute` so it can be encrypted with
+/// a `KeyPair<DidEncryptionDomain>` despite the type mismatch.
+pub struct DidEncryptionDomain;
+
+impl Domain for DidEncryptionDomain {
+    type Attribute = [RistrettoPoint; 2];
+
+    const ID: &'static str = "Actnet_ZKGroup_20260531_DidEncryption";
+
+    #[allow(non_snake_case)]
+    fn G_a() -> [RistrettoPoint; 2] {
+        static STORAGE: std::sync::OnceLock<[RistrettoPoint; 2]> = std::sync::OnceLock::new();
+        *derive_default_generator_points::<Self>(&STORAGE)
+    }
+}
+
+pub type DidEncryptionKeyPair = KeyPair<DidEncryptionDomain>;
+pub type DidEncryptionPublicKey = PublicKey<DidEncryptionDomain>;
 
 /// Server-visible group routing identifier. Derived deterministically from
 /// the master key; safe to expose because it leaks neither the key nor
@@ -37,6 +67,13 @@ pub struct GroupId(pub [u8; 32]);
 pub struct GroupKey {
     bytes: [u8; zkgroup::GROUP_MASTER_KEY_LEN],
     secret: zkgroup::groups::GroupSecretParams,
+    did_enc_key_pair: DidEncryptionKeyPair,
+}
+
+fn derive_did_key(master: &[u8; zkgroup::GROUP_MASTER_KEY_LEN]) -> DidEncryptionKeyPair {
+    let mut sho = ShoHmacSha256::new(b"Actnet_ZKGroup_20260531_DidEncKey_DeriveFromMasterKey");
+    sho.absorb_and_ratchet(master);
+    KeyPair::<DidEncryptionDomain>::derive_from(&mut sho)
 }
 
 impl GroupKey {
@@ -51,7 +88,12 @@ impl GroupKey {
     pub fn from_bytes(bytes: [u8; zkgroup::GROUP_MASTER_KEY_LEN]) -> Self {
         let master = zkgroup::groups::GroupMasterKey::new(bytes);
         let secret = zkgroup::groups::GroupSecretParams::derive_from_master_key(master);
-        Self { bytes, secret }
+        let did_enc_key_pair = derive_did_key(&bytes);
+        Self {
+            bytes,
+            secret,
+            did_enc_key_pair,
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; zkgroup::GROUP_MASTER_KEY_LEN] {
@@ -85,9 +127,22 @@ impl GroupKey {
     /// Borrow the underlying `GroupSecretParams` for use in the credentials
     /// module (presentation generation needs it). Kept crate-private so
     /// callers outside `crypto::groups` stay scheme-agnostic.
-    #[allow(dead_code)] // used by upcoming credentials module
+    #[allow(dead_code)] // used by upcoming endorsement / member encryption code
     pub(crate) fn secret_params(&self) -> &zkgroup::groups::GroupSecretParams {
         &self.secret
+    }
+
+    /// The `DidEncryptionDomain` key pair derived from the master key.
+    /// Used to encrypt DID-bearing attributes during credential presentation
+    /// and (later) to encrypt member ids server-side.
+    pub(crate) fn did_enc_key_pair(&self) -> &DidEncryptionKeyPair {
+        &self.did_enc_key_pair
+    }
+
+    /// The public half of the DID encryption key pair, used by the server to
+    /// verify presentations without learning member identities.
+    pub(crate) fn did_enc_public_key(&self) -> &DidEncryptionPublicKey {
+        &self.did_enc_key_pair.public_key
     }
 }
 

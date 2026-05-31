@@ -28,6 +28,17 @@ libsignal-protocol = { git = "https://github.com/signalapp/libsignal", rev = "4c
 # groups (see docs/03-groups.md).
 zkgroup       = { git = "https://github.com/signalapp/libsignal", rev = "4c460615cdbe4ed53b23a5d1bf71493514bf2a80" }
 zkcredential  = { git = "https://github.com/signalapp/libsignal", rev = "4c460615cdbe4ed53b23a5d1bf71493514bf2a80" }
+# poksho's SHO is used directly in the credentials module to derive Ristretto
+# points (and the DID encryption key) from public inputs. Same pinned commit.
+poksho        = { git = "https://github.com/signalapp/libsignal", rev = "4c460615cdbe4ed53b23a5d1bf71493514bf2a80" }
+# Exposed in `zkcredential::attributes::Attribute`'s public signature, so we
+# need a direct dep to implement that trait. 4.1.3 is the version zkcredential
+# pins; the workspace patch below rewrites it to the Signal fork.
+curve25519-dalek = { version = "4.1.3", features = ["serde"] }
+# Required for any type embedded inside zkcredential's `Credential` /
+# `IssuanceProof` (they derive PartialDefault).
+partial-default  = { version = "0.1", features = ["derive"] }
+bincode          = "1.3"
 rand = "0.9"
 # p256, aes-gcm, sha2 are kept on the 0.x series that shares rand_core 0.6 with
 # libsignal's pinned commit. Upgrading these to their latest (which uses rand_core

@@ -3,16 +3,18 @@ package actnet;
 
 message ContentMessage {
   oneof body {
-    TextMessage    text          = 1;
-    ReceiptMessage receipt       = 2;
-    GroupContext   group_context = 3;
+    TextMessage             text                      = 1;
+    ReceiptMessage          receipt                   = 2;
+    GroupContext            group_context             = 3;
+    SenderKeyDistribution   sender_key_distribution   = 4;
+    GroupMessage            group_message             = 5;
   }
   // Reserved for upcoming body variants (typing, timer-change, group
   // control, call signaling, etc.). Field numbers inside a `oneof` share
   // the parent message's number space, so reservations live here at the
   // message level. Pick a number from this block when adding a new
-  // variant; never reuse 1-3 even if removed.
-  reserved 4 to 14;
+  // variant; never reuse 1-5 even if removed.
+  reserved 6 to 14;
   uint64 timestamp_ms = 15;
   // Sender's profile key (32 bytes, AES-256-GCM). When present, recipients
   // can fetch and decrypt the sender's encrypted profile blob. Attached to
@@ -52,6 +54,37 @@ message GroupContext {
   // pending row has expired). Empty bytes = "no password supplied".
   bytes invite_link_password = 5;
   reserved 6 to 10;
+}
+
+// Sender Keys distribution (docs/03-groups.md §6, libsignal's
+// SenderKeyDistributionMessage). Carried over the existing pairwise
+// DM transport. Recipients call `crypto::sender_keys::process_skdm` to
+// install the sender's key for `(group_id, distribution_id)`; future
+// `GroupMessage`s from that sender become decryptable.
+message SenderKeyDistribution {
+  // 32-byte server-visible group id; lets the recipient route to the
+  // correct group's local state.
+  bytes group_id        = 1;
+  // 16-byte UUID derived deterministically from the group master key
+  // (see app-core's `groups::distribution_id_for`). All members of a
+  // group compute the same value; the per-sender ratchet state is keyed
+  // on `(sender_address, distribution_id)`.
+  bytes distribution_id = 2;
+  // Serialized `SenderKeyDistributionMessage` bytes.
+  bytes skdm            = 3;
+  reserved 4 to 10;
+}
+
+// A group message encrypted under the sender's Sender Key. Carried over
+// the pairwise DM transport for Stage 5 (no sealed-sender envelope yet —
+// see §3.11 for the eventual sender-opacity wrapping).
+message GroupMessage {
+  bytes group_id        = 1;
+  bytes distribution_id = 2;
+  // Serialized `SenderKeyMessage` bytes; decode with
+  // `crypto::sender_keys::group_decrypt`.
+  bytes ciphertext      = 3;
+  reserved 4 to 10;
 }
 
 message ReceiptMessage {

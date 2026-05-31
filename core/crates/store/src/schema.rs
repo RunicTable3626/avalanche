@@ -176,4 +176,15 @@ pub const ALTER_MIGRATIONS: &[&str] = &[
         bytes        BLOB    NOT NULL,\
         fetched_at   INTEGER NOT NULL\
     )",
+    // libsignal SenderKeyStore. Each row holds one sender's SenderKeyRecord
+    // for one (group-derived) distribution_id. `address` is the
+    // "name.device_id" form (same as `sessions`). `distribution_id` is a
+    // 16-byte UUID rendered as canonical hyphenated text — that's what
+    // `uuid::Uuid::to_string()` produces and what we store directly.
+    "CREATE TABLE IF NOT EXISTS sender_keys (\
+        address          TEXT NOT NULL,\
+        distribution_id  TEXT NOT NULL,\
+        record           BLOB NOT NULL,\
+        PRIMARY KEY (address, distribution_id)\
+    )",
 ];

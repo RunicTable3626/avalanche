@@ -1792,17 +1792,19 @@ impl AppCore {
         self.inner.lock().await.device_id
     }
 
-    /// Async variant of `create_group` (for tests / testbot).
+    /// Async variant of `create_group` (for tests / testbot). Seeds the
+    /// founder's own Sender Key locally on success.
     pub async fn create_group_async(
         &self,
         title: &str,
         description: &str,
         expiry_seconds: u32,
     ) -> Result<groups::CreatedGroup, AppError> {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         let did = inner.did.clone();
+        let device_id = inner.device_id;
         let server_url = inner.client.server_url().to_string();
-        groups::create_group(
+        let created = groups::create_group(
             &inner.store,
             &inner.client,
             &server_url,
@@ -1811,7 +1813,14 @@ impl AppCore {
             description,
             expiry_seconds,
         )
-        .await
+        .await?;
+        let mk: [u8; 32] = created
+            .master_key
+            .clone()
+            .try_into()
+            .map_err(|_| AppError::Protocol("master_key length != 32".into()))?;
+        let _ = groups::seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
+        Ok(created)
     }
 
     /// Async variant of `fetch_group_state`.
@@ -1825,9 +1834,9 @@ impl AppCore {
         groups::fetch_group_state(&inner.store, &inner.client, &server_url, &did, group_id).await
     }
 
-    /// Async variant of `invite_member`. Also sends the `GroupContext` DM
-    /// to the recipient (best-effort). Unlike the sync FFI version this
-    /// doesn't talk to the WebSocket — tests use the HTTP path.
+    /// Async variant of `invite_member`. Also sends the `GroupContext`
+    /// DM + the inviter's SKDM (best-effort). Unlike the sync FFI
+    /// version this doesn't talk to the WebSocket — tests use HTTP.
     pub async fn invite_member_async(
         &self,
         group_id: &str,
@@ -1836,13 +1845,19 @@ impl AppCore {
     ) -> Result<(), AppError> {
         let mut inner = self.inner.lock().await;
         let did = inner.did.clone();
+        let device_id = inner.device_id;
         let row = inner
             .store
             .load_group(group_id)
             .await?
             .ok_or_else(|| AppError::Protocol("group not found".into()))?;
         let hosting_server_url = row.hosting_server_url.clone();
-        let master_key = row.master_key.clone();
+        let master_key_vec = row.master_key.clone();
+        let mk: [u8; 32] = master_key_vec
+            .clone()
+            .try_into()
+            .map_err(|_| AppError::Protocol("master_key length != 32".into()))?;
+        let group_id_bytes = groups::b64d(group_id)?;
         groups::invite_member(
             &inner.store,
             &inner.client,
@@ -1852,9 +1867,12 @@ impl AppCore {
             role,
         )
         .await?;
+
+        let skdm = groups::seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
+
         let ctx = ContentMessage {
             body: Some(Body::GroupContext(proto::GroupContext {
-                group_master_key: master_key,
+                group_master_key: master_key_vec,
                 hosting_server_url,
                 inviter_did: did.clone(),
                 invited_at_ms: Timestamp::now().as_millis(),
@@ -1866,13 +1884,84 @@ impl AppCore {
         inner
             .send_dm(None, recipient_did, &ctx.encode_to_vec(), None)
             .await?;
+        let skdm_msg = ContentMessage {
+            body: Some(Body::SenderKeyDistribution(proto::SenderKeyDistribution {
+                group_id: group_id_bytes,
+                distribution_id: groups::distribution_id_for(&mk).as_bytes().to_vec(),
+                skdm,
+            })),
+            timestamp_ms: Timestamp::now().as_millis() as u64,
+            profile_key: Vec::new(),
+        };
+        inner
+            .send_dm(None, recipient_did, &skdm_msg.encode_to_vec(), None)
+            .await?;
         Ok(())
     }
 
+    /// Async variant of `accept_invite`. After promoting, generates our
+    /// own Sender Key and broadcasts the SKDM as a DM to every other
+    /// member listed in our cached group state.
     pub async fn accept_invite_async(&self, group_id: &str) -> Result<(), AppError> {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         let did = inner.did.clone();
-        groups::accept_invite(&inner.store, &inner.client, &did, group_id).await
+        let device_id = inner.device_id;
+        groups::accept_invite(&inner.store, &inner.client, &did, group_id).await?;
+
+        let mk = groups::master_key_for(&inner.store, group_id).await?;
+        let skdm = groups::seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
+        let group_id_bytes = groups::b64d(group_id)?;
+        let recipients = groups::other_member_dids(&inner.store, group_id, &did).await?;
+        for rdid in recipients {
+            let skdm_msg = ContentMessage {
+                body: Some(Body::SenderKeyDistribution(
+                    proto::SenderKeyDistribution {
+                        group_id: group_id_bytes.clone(),
+                        distribution_id: groups::distribution_id_for(&mk).as_bytes().to_vec(),
+                        skdm: skdm.clone(),
+                    },
+                )),
+                timestamp_ms: Timestamp::now().as_millis() as u64,
+                profile_key: Vec::new(),
+            };
+            inner
+                .send_dm(None, &rdid, &skdm_msg.encode_to_vec(), None)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Async variant of `send_group_message`. Encrypts under our Sender
+    /// Key and fans out the same `proto::GroupMessage` as a DM to every
+    /// other current member.
+    pub async fn send_group_message_async(
+        &self,
+        group_id: &str,
+        plaintext: &[u8],
+    ) -> Result<(), AppError> {
+        let mut inner = self.inner.lock().await;
+        let did = inner.did.clone();
+        let device_id = inner.device_id;
+        let mk = groups::master_key_for(&inner.store, group_id).await?;
+        let ciphertext =
+            groups::encrypt_group_content(&mut inner.store, &did, device_id, &mk, plaintext)
+                .await?;
+        let group_id_bytes = groups::b64d(group_id)?;
+        let msg = ContentMessage {
+            body: Some(Body::GroupMessage(proto::GroupMessage {
+                group_id: group_id_bytes,
+                distribution_id: groups::distribution_id_for(&mk).as_bytes().to_vec(),
+                ciphertext,
+            })),
+            timestamp_ms: Timestamp::now().as_millis() as u64,
+            profile_key: inner.own_profile_key().await,
+        };
+        let encoded = msg.encode_to_vec();
+        let recipients = groups::other_member_dids(&inner.store, group_id, &did).await?;
+        for rdid in recipients {
+            inner.send_dm(None, &rdid, &encoded, None).await?;
+        }
+        Ok(())
     }
 
     /// Block on the next batch of events from the reconnect task. Async

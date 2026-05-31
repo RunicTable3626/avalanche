@@ -145,6 +145,7 @@ dependencies = [
  "tracing-subscriber",
  "types",
  "uniffi",
+ "uuid",
  "zkcredential",
 ]
 
@@ -737,6 +738,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "types",
+ "uuid",
  "zkcredential",
  "zkgroup",
 ]

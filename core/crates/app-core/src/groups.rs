@@ -27,6 +27,9 @@ use rand::TryRngCore as _;
 use crypto::groups::{
     AuthCredentialDid, AuthCredentialDidResponse, GroupKey, RedemptionTime, ServerPublicParams,
 };
+use crypto::sender_keys;
+use libsignal_protocol::{DeviceId, ProtocolAddress};
+use uuid::Uuid;
 use net::groups::{
     CreateGroupRequest as NetCreateGroupRequest, GroupActionsWire, GroupPolicyWire,
     InviteMemberWire, JoinViaLinkWire, PromoteSelfWire, RoleAssignmentWire, SubmitChangeRequest,
@@ -57,6 +60,36 @@ pub fn b64d(s: &str) -> Result<Vec<u8>, AppError> {
     URL_SAFE_NO_PAD
         .decode(s.as_bytes())
         .map_err(|e| AppError::Protocol(format!("base64 decode: {e}")))
+}
+
+/// Derive the libsignal `distribution_id` for a group, deterministically
+/// from its zkgroup master key. All members compute the same value, so we
+/// don't need to negotiate or remember per-sender state; each sender's
+/// own ratchet is keyed on `(sender_address, distribution_id)` inside
+/// the `SenderKeyStore`.
+///
+/// `distribution_id` is a 16-byte opaque blob from libsignal's
+/// perspective. We derive it as the first 16 bytes of
+/// `SHA-256(DOMAIN || master_key)` and pack into a `Uuid`. The domain
+/// string is a fixed prefix so a hypothetical future deterministic UUID
+/// over the same master key (some other purpose) can't collide.
+pub fn distribution_id_for(master_key: &[u8; 32]) -> Uuid {
+    use sha2::{Digest as _, Sha256};
+    const DOMAIN: &[u8] = b"actnet-sk-distribution-id-v1";
+    let mut hasher = Sha256::new();
+    hasher.update(DOMAIN);
+    hasher.update(master_key);
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+fn sender_protocol_address(did: &str, device_id: u32) -> ProtocolAddress {
+    ProtocolAddress::new(
+        did.to_string(),
+        DeviceId::try_from(device_id).expect("device_id must be > 0"),
+    )
 }
 
 fn day_aligned_now() -> u64 {
@@ -864,6 +897,117 @@ pub async fn rotate_group_pseudonym(
     Ok(new_pseudonym)
 }
 
+// ── Sender Keys: SKDM exchange + content encrypt/decrypt ────────────────
+//
+// All four entry points below are thin wrappers around `crypto::sender_keys`
+// that translate between our `(did, device_id, master_key)` model and
+// libsignal's `(ProtocolAddress, distribution_id)` API. They take the
+// store directly so callers can sequence DM I/O around them without
+// holding the mutex across the libsignal calls.
+
+/// Generate (or refresh) the local sender key for this group; return
+/// the wire bytes the caller should ship to every other member.
+/// Idempotent — repeated calls within one chain return matching bytes.
+pub async fn seed_own_sender_key(
+    store: &mut store::Store,
+    did: &str,
+    device_id: u32,
+    master_key: &[u8; 32],
+) -> Result<Vec<u8>, AppError> {
+    let dist_id = distribution_id_for(master_key);
+    let sender = sender_protocol_address(did, device_id);
+    let skdm = sender_keys::create_skdm(store, &sender, dist_id).await?;
+    Ok(skdm)
+}
+
+/// Install a peer's distribution message into the local
+/// `SenderKeyStore`. After this completes, `decrypt_group_content` calls
+/// for messages from `(sender_did, sender_device_id)` will succeed.
+pub async fn process_inbound_skdm(
+    store: &mut store::Store,
+    sender_did: &str,
+    sender_device_id: u32,
+    skdm_bytes: &[u8],
+) -> Result<(), AppError> {
+    let sender = sender_protocol_address(sender_did, sender_device_id);
+    sender_keys::process_skdm(store, &sender, skdm_bytes).await?;
+    Ok(())
+}
+
+/// Encrypt `plaintext` under our own sender key for the group. Output is
+/// a serialized `SenderKeyMessage` ready to ship inside a
+/// `proto::GroupMessage`.
+pub async fn encrypt_group_content(
+    store: &mut store::Store,
+    did: &str,
+    device_id: u32,
+    master_key: &[u8; 32],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let dist_id = distribution_id_for(master_key);
+    let sender = sender_protocol_address(did, device_id);
+    let ct = sender_keys::group_encrypt(store, &sender, dist_id, plaintext).await?;
+    Ok(ct)
+}
+
+/// Decrypt a `SenderKeyMessage` (received inside a `proto::GroupMessage`)
+/// using the locally cached sender key for `(sender_did, sender_device_id)`.
+pub async fn decrypt_group_content(
+    store: &mut store::Store,
+    sender_did: &str,
+    sender_device_id: u32,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let sender = sender_protocol_address(sender_did, sender_device_id);
+    let plaintext = sender_keys::group_decrypt(store, &sender, ciphertext).await?;
+    Ok(plaintext)
+}
+
+/// Read the cached `GroupState` plaintext for `group_id_b64_s` and
+/// return the DIDs of every current full member except `excluding_did`.
+/// Used to enumerate SKDM-distribution and group-send recipients.
+pub async fn other_member_dids(
+    store: &store::Store,
+    group_id_b64_s: &str,
+    excluding_did: &str,
+) -> Result<Vec<String>, AppError> {
+    let row = store
+        .load_group(group_id_b64_s)
+        .await?
+        .ok_or_else(|| AppError::Protocol("group not found".into()))?;
+    if row.encrypted_state_plaintext.is_empty() {
+        return Ok(Vec::new());
+    }
+    let state = gproto::GroupState::decode(row.encrypted_state_plaintext.as_slice())
+        .map_err(|e| AppError::Protocol(format!("decode cached GroupState: {e}")))?;
+    Ok(state
+        .members
+        .into_iter()
+        .filter_map(|m| {
+            if !m.did.is_empty() && m.did != excluding_did {
+                Some(m.did)
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+/// Master-key bytes for a stored group. Convenience: most call sites need
+/// the 32-byte array form, not the raw `Vec`.
+pub async fn master_key_for(
+    store: &store::Store,
+    group_id_b64_s: &str,
+) -> Result<[u8; 32], AppError> {
+    let row = store
+        .load_group(group_id_b64_s)
+        .await?
+        .ok_or_else(|| AppError::Protocol("group not found".into()))?;
+    row.master_key
+        .try_into()
+        .map_err(|_| AppError::Protocol("master_key length != 32".into()))
+}
+
 // ── inbound GroupContext DM ──────────────────────────────────────────────
 
 /// Persist a freshly received `GroupContext` DM. The caller has already
@@ -924,8 +1068,9 @@ impl AppCore {
         expiry_seconds: u32,
     ) -> Result<CreatedGroupFfi, AppErrorFfi> {
         ffi_runtime().block_on(async {
-            let inner = self.inner.lock().await;
+            let mut inner = self.inner.lock().await;
             let did = inner.did.clone();
+            let device_id = inner.device_id;
             let server_url = inner.client.server_url().to_string();
             let created = create_group(
                 &inner.store,
@@ -937,6 +1082,16 @@ impl AppCore {
                 expiry_seconds,
             )
             .await?;
+            // Seed our own sender key for this group locally. No other
+            // members exist yet, so there's no SKDM to ship — the
+            // recipients of future invites will receive it as part of
+            // the invite-flow DM.
+            let mk: [u8; 32] = created
+                .master_key
+                .clone()
+                .try_into()
+                .map_err(|_| AppError::Protocol("master_key length != 32".into()))?;
+            let _ = seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
             Ok::<_, AppError>(CreatedGroupFfi {
                 group_id: created.group_id,
                 master_key: created.master_key,
@@ -962,8 +1117,10 @@ impl AppCore {
     }
 
     /// Submit `invite_members` and send the per-recipient `GroupContext`
-    /// substrate DM (§3.10). The invite is best-effort on the DM side —
-    /// the server-side pending row is the recoverable receipt.
+    /// substrate DM (§3.10) plus an SKDM so the invitee can decrypt our
+    /// future group messages. Both DMs are best-effort on the wire —
+    /// the server-side pending row is the recoverable receipt; if a DM
+    /// is lost the invitee's client surfaces "this invite looks stale".
     pub fn invite_member(
         &self,
         group_id: String,
@@ -974,6 +1131,7 @@ impl AppCore {
             let ws = self.ws.lock().expect("ws mutex poisoned").clone();
             let mut inner = self.inner.lock().await;
             let did = inner.did.clone();
+            let device_id = inner.device_id;
 
             // Resolve hosting server URL from the local row before issuing
             // any actions; the GroupContext DM needs it.
@@ -983,7 +1141,12 @@ impl AppCore {
                 .await?
                 .ok_or_else(|| AppError::Protocol("group not found".into()))?;
             let hosting_server_url = row.hosting_server_url.clone();
-            let master_key = row.master_key.clone();
+            let master_key_vec = row.master_key.clone();
+            let mk: [u8; 32] = master_key_vec
+                .clone()
+                .try_into()
+                .map_err(|_| AppError::Protocol("master_key length != 32".into()))?;
+            let group_id_bytes = b64d(&group_id)?;
 
             invite_member(
                 &inner.store,
@@ -995,11 +1158,15 @@ impl AppCore {
             )
             .await?;
 
+            // Generate (or refresh) our own SKDM for this group, so we
+            // can ship it alongside the GroupContext.
+            let skdm = seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
+
             // Send GroupContext to the invitee. Errors are logged but not
             // propagated — the pending row is the receipt.
             let ctx = ContentMessage {
                 body: Some(Body::GroupContext(proto::GroupContext {
-                    group_master_key: master_key,
+                    group_master_key: master_key_vec,
                     hosting_server_url,
                     inviter_did: did.clone(),
                     invited_at_ms: Timestamp::now().as_millis(),
@@ -1014,6 +1181,27 @@ impl AppCore {
             {
                 tracing::warn!("[groups] GroupContext DM to {recipient_did} failed: {e}");
             }
+
+            // Send our SKDM as a separate DM. Same best-effort handling —
+            // if it's lost, the invitee will see our future group
+            // messages as undecryptable, and we re-send on demand (TODO:
+            // missing-key recovery path).
+            let skdm_msg = ContentMessage {
+                body: Some(Body::SenderKeyDistribution(proto::SenderKeyDistribution {
+                    group_id: group_id_bytes,
+                    distribution_id: distribution_id_for(&mk).as_bytes().to_vec(),
+                    skdm,
+                })),
+                timestamp_ms: Timestamp::now().as_millis() as u64,
+                profile_key: Vec::new(),
+            };
+            if let Err(e) = inner
+                .send_dm(ws.as_ref(), &recipient_did, &skdm_msg.encode_to_vec(), None)
+                .await
+            {
+                tracing::warn!("[groups] SKDM DM to {recipient_did} failed: {e}");
+            }
+
             Ok::<_, AppError>(())
         })
         .map_err(AppErrorFfi::from)
@@ -1021,9 +1209,39 @@ impl AppCore {
 
     pub fn accept_invite(&self, group_id: String) -> Result<(), AppErrorFfi> {
         ffi_runtime().block_on(async {
-            let inner = self.inner.lock().await;
+            let ws = self.ws.lock().expect("ws mutex poisoned").clone();
+            let mut inner = self.inner.lock().await;
             let did = inner.did.clone();
-            accept_invite(&inner.store, &inner.client, &did, &group_id).await
+            let device_id = inner.device_id;
+            accept_invite(&inner.store, &inner.client, &did, &group_id).await?;
+
+            // Now that we're a full member, generate our own sender key
+            // and distribute it to every existing member so they can
+            // decrypt our future group messages.
+            let mk = master_key_for(&inner.store, &group_id).await?;
+            let skdm = seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
+            let group_id_bytes = b64d(&group_id)?;
+            let recipients = other_member_dids(&inner.store, &group_id, &did).await?;
+            for rdid in recipients {
+                let skdm_msg = ContentMessage {
+                    body: Some(Body::SenderKeyDistribution(
+                        proto::SenderKeyDistribution {
+                            group_id: group_id_bytes.clone(),
+                            distribution_id: distribution_id_for(&mk).as_bytes().to_vec(),
+                            skdm: skdm.clone(),
+                        },
+                    )),
+                    timestamp_ms: Timestamp::now().as_millis() as u64,
+                    profile_key: Vec::new(),
+                };
+                if let Err(e) = inner
+                    .send_dm(ws.as_ref(), &rdid, &skdm_msg.encode_to_vec(), None)
+                    .await
+                {
+                    tracing::warn!("[groups] SKDM DM to {rdid} failed: {e}");
+                }
+            }
+            Ok::<_, AppError>(())
         })
         .map_err(AppErrorFfi::from)
     }
@@ -1161,6 +1379,48 @@ impl AppCore {
             let inner = self.inner.lock().await;
             let did = inner.did.clone();
             apply_pending_changes(&inner.store, &inner.client, &did, &group_id).await
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// Send a group message to every other current member. Encrypted
+    /// once under our Sender Key for the group, then fanned out as a
+    /// per-recipient DM carrying the same `proto::GroupMessage` body.
+    ///
+    /// This Stage 5 path uses the existing /v1/messages transport. The
+    /// sealed-sender wrapping and dedicated send endpoint (§3.11) layer
+    /// in at PR 2.
+    pub fn send_group_message(
+        &self,
+        group_id: String,
+        plaintext: Vec<u8>,
+    ) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let ws = self.ws.lock().expect("ws mutex poisoned").clone();
+            let mut inner = self.inner.lock().await;
+            let did = inner.did.clone();
+            let device_id = inner.device_id;
+            let mk = master_key_for(&inner.store, &group_id).await?;
+            let ciphertext =
+                encrypt_group_content(&mut inner.store, &did, device_id, &mk, &plaintext).await?;
+            let group_id_bytes = b64d(&group_id)?;
+            let msg = ContentMessage {
+                body: Some(Body::GroupMessage(proto::GroupMessage {
+                    group_id: group_id_bytes,
+                    distribution_id: distribution_id_for(&mk).as_bytes().to_vec(),
+                    ciphertext,
+                })),
+                timestamp_ms: Timestamp::now().as_millis() as u64,
+                profile_key: inner.own_profile_key().await,
+            };
+            let encoded = msg.encode_to_vec();
+            let recipients = other_member_dids(&inner.store, &group_id, &did).await?;
+            for rdid in recipients {
+                if let Err(e) = inner.send_dm(ws.as_ref(), &rdid, &encoded, None).await {
+                    tracing::warn!("[groups] GroupMessage DM to {rdid} failed: {e}");
+                }
+            }
+            Ok::<_, AppError>(())
         })
         .map_err(AppErrorFfi::from)
     }

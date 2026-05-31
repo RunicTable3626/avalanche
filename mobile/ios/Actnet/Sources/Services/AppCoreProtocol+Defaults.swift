@@ -94,4 +94,5 @@ extension AppCoreProtocol {
     func changeMemberRole(groupId: String, encryptedMemberId: String, newRole: Int16) throws {}
     func applyPendingGroupChanges(groupId: String) throws -> Int64 { 0 }
     func rotateGroupPseudonym(groupId: String) throws -> Data { Data(count: 24) }
+    func sendGroupMessage(groupId: String, plaintext: Data) throws {}
 }

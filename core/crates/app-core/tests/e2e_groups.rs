@@ -82,4 +82,31 @@ async fn create_invite_accept_promote_remove_roundtrip() {
         .unwrap();
     assert_eq!(alice_state.members.len(), 2);
     assert!(alice_state.pending_invites.is_empty());
+
+    // 7. Alice drains the SKDM DM Bob sent on accept (no event emitted —
+    // SKDMs are plumbing — but processing installs Bob's sender key into
+    // Alice's local store).
+    let _ = alice.receive_messages_async().await.unwrap();
+
+    // 8. Alice sends a Sender-Keys-encrypted group message; Bob decrypts.
+    let plaintext = b"hello group, this is alice";
+    alice
+        .send_group_message_async(&created.group_id, plaintext)
+        .await
+        .unwrap();
+
+    let group_msgs = bob.receive_messages_async().await.unwrap();
+    assert_eq!(group_msgs.len(), 1, "bob should receive one group message");
+    assert_eq!(group_msgs[0].plaintext, plaintext);
+    assert_eq!(group_msgs[0].sender_did, alice.did_async().await);
+
+    // 9. Bob replies; Alice decrypts.
+    let reply = b"thanks alice";
+    bob.send_group_message_async(&created.group_id, reply)
+        .await
+        .unwrap();
+    let alice_msgs = alice.receive_messages_async().await.unwrap();
+    assert_eq!(alice_msgs.len(), 1);
+    assert_eq!(alice_msgs[0].plaintext, reply);
+    assert_eq!(alice_msgs[0].sender_did, bob.did_async().await);
 }

@@ -403,6 +403,67 @@ impl signal::KyberPreKeyStore for Store {
     }
 }
 
+// ── SenderKeyStore ────────────────────────────────────────────────────────────
+//
+// Used by libsignal's Sender Keys ratchet (group_encrypt / group_decrypt).
+// Keyed on `(sender_address, distribution_id)`; multiple distribution_ids
+// per sender are normal (e.g. one per group they're a member of).
+
+#[async_trait(?Send)]
+impl signal::SenderKeyStore for Store {
+    async fn store_sender_key(
+        &mut self,
+        sender: &signal::ProtocolAddress,
+        distribution_id: uuid::Uuid,
+        record: &signal::SenderKeyRecord,
+    ) -> Result<(), signal::SignalProtocolError> {
+        let addr = addr_key(sender);
+        let dist = distribution_id.to_string();
+        let bytes = record.serialize()?;
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO sender_keys \
+                       (address, distribution_id, record) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![addr, dist, bytes],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| StoreError::Db(e).into())
+    }
+
+    async fn load_sender_key(
+        &mut self,
+        sender: &signal::ProtocolAddress,
+        distribution_id: uuid::Uuid,
+    ) -> Result<Option<signal::SenderKeyRecord>, signal::SignalProtocolError> {
+        let addr = addr_key(sender);
+        let dist = distribution_id.to_string();
+        let result = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT record FROM sender_keys \
+                       WHERE address = ?1 AND distribution_id = ?2",
+                )?;
+                let mut rows = stmt.query(rusqlite::params![addr, dist])?;
+                Ok(rows.next()?.map(|row| {
+                    let bytes: Vec<u8> = row.get(0)?;
+                    Ok::<_, rusqlite::Error>(bytes)
+                }))
+            })
+            .await
+            .map_err(StoreError::Db)?;
+
+        match result {
+            Some(Ok(bytes)) => Ok(Some(signal::SenderKeyRecord::deserialize(&bytes)?)),
+            Some(Err(e)) => Err(StoreError::Corrupt(e.to_string()).into()),
+            None => Ok(None),
+        }
+    }
+}
+
 // ── crypto::Store blanket impl ────────────────────────────────────────────────
 
 impl crypto::Store for Store {}

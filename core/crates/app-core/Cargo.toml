@@ -23,6 +23,7 @@ serde_json         = { workspace = true }
 prost              = "0.14"
 bincode            = { workspace = true }
 zkcredential       = { workspace = true }
+uuid               = { workspace = true }
 p256               = { workspace = true }
 aes-gcm            = { workspace = true }
 sha2               = { workspace = true }

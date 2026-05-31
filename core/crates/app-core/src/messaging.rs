@@ -324,6 +324,45 @@ impl AppCoreInner {
                             }
                             decrypted.push(raw);
                         }
+                        Some(Body::SenderKeyDistribution(skdm_msg)) => {
+                            // Install the sender's group key locally so
+                            // future `GroupMessage`s from them decrypt.
+                            // No app-level event — SKDM is plumbing.
+                            if let Err(e) = groups::process_inbound_skdm(
+                                &mut self.store,
+                                &raw.sender_did,
+                                raw.sender_device_id,
+                                &skdm_msg.skdm,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "[groups] failed to process inbound SKDM: {e}"
+                                );
+                            }
+                        }
+                        Some(Body::GroupMessage(gm)) => {
+                            match groups::decrypt_group_content(
+                                &mut self.store,
+                                &raw.sender_did,
+                                raw.sender_device_id,
+                                &gm.ciphertext,
+                            )
+                            .await
+                            {
+                                Ok(plaintext) => {
+                                    decrypted.push(DecryptedMessage {
+                                        plaintext,
+                                        ..raw
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "[groups] failed to decrypt GroupMessage: {e}"
+                                    );
+                                }
+                            }
+                        }
                         None => {
                             // ContentMessage with no body — backward compat.
                             decrypted.push(raw);
@@ -494,6 +533,46 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
             }
             drop(inner);
             let _ = core.event_tx.send(IncomingEvent::Message { msg: decrypted });
+        }
+        Some(Body::SenderKeyDistribution(skdm_msg)) => {
+            // Install the sender's group key locally so future
+            // `GroupMessage`s from them decrypt.
+            let mut inner = core.inner.lock().await;
+            if let Err(e) = groups::process_inbound_skdm(
+                &mut inner.store,
+                &decrypted.sender_did,
+                decrypted.sender_device_id,
+                &skdm_msg.skdm,
+            )
+            .await
+            {
+                tracing::warn!("[groups] failed to process inbound SKDM: {e}");
+            }
+            // No app-level event — SKDM is plumbing, not content.
+        }
+        Some(Body::GroupMessage(gm)) => {
+            // Decrypt under the sender's cached Sender Key; surface as a
+            // normal Message event with plaintext substituted.
+            let mut inner = core.inner.lock().await;
+            match groups::decrypt_group_content(
+                &mut inner.store,
+                &decrypted.sender_did,
+                decrypted.sender_device_id,
+                &gm.ciphertext,
+            )
+            .await
+            {
+                Ok(plaintext) => {
+                    let out = DecryptedMessage {
+                        plaintext,
+                        ..decrypted
+                    };
+                    let _ = core.event_tx.send(IncomingEvent::Message { msg: out });
+                }
+                Err(e) => {
+                    tracing::warn!("[groups] failed to decrypt GroupMessage: {e}");
+                }
+            }
         }
         None => {
             // ContentMessage with no body — emit as raw bytes (backward compat).

@@ -20,4 +20,7 @@ pub enum CryptoError {
 
     #[error("unexpected ciphertext type")]
     InvalidCiphertext,
+
+    #[error("zkgroup deserialization failed")]
+    ZkgroupDeserialize,
 }

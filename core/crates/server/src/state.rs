@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
+use crypto::groups::ServerSecretParams;
+
 use crate::config::Config;
 
 /// A pending message delivery to push to a connected device. The WebSocket
@@ -55,14 +57,19 @@ pub struct AppState {
     pub config: Config,
     /// Connected WebSocket devices: internal device PK -> sender channel.
     pub ws_connections: Arc<RwLock<HashMap<i64, mpsc::UnboundedSender<WsPush>>>>,
+    /// The homeserver's zkgroup signing key, loaded once at startup and held
+    /// in memory thereafter. Used to issue auth credentials and group send
+    /// endorsements; never transmitted off the server.
+    pub zkgroup_secret: Arc<ServerSecretParams>,
 }
 
 impl AppState {
-    pub fn new(db: sqlx::PgPool, config: Config) -> Self {
+    pub fn new(db: sqlx::PgPool, config: Config, zkgroup_secret: ServerSecretParams) -> Self {
         Self {
             db,
             config,
             ws_connections: Arc::new(RwLock::new(HashMap::new())),
+            zkgroup_secret: Arc::new(zkgroup_secret),
         }
     }
 }

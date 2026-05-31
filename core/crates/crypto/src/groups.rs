@@ -1,13 +1,13 @@
-//! Anonymous credentials for action-bound groups (Stage 4).
+//! Anonymous credentials and encrypted-state primitives for action-bound
+//! groups. Wraps libsignal's `zkgroup` and `zkcredential` crates.
 //!
-//! This module will wrap libsignal's zkgroup implementation — the Signal
-//! Private Group System (Chase, Perrin, Zaverucha 2019). Group members prove
-//! membership without revealing which member they are, and messages carry no
-//! sender identity visible to the server (sealed sender).
-//!
-//! Stubbed here to establish the module boundary. Implemented alongside the
-//! homeserver's credential-issuance endpoint in Stage 4.
+//! See `docs/03-groups.md` for the design. This module is the scheme-agnostic
+//! boundary between `app-core` / `server` and the underlying zkgroup
+//! primitives, so that swapping in MLS later requires no changes outside this
+//! module.
 
-// Stage 4: zkgroup anonymous credentials for action-bound groups.
-// Stubbed here to establish the module boundary; implemented alongside
-// the homeserver's credential-issuance endpoint.
+pub mod group_key;
+pub mod server_params;
+
+pub use group_key::{GroupId, GroupKey};
+pub use server_params::{ServerPublicParams, ServerSecretParams};

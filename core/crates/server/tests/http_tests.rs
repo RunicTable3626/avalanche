@@ -21,7 +21,8 @@ use sqlx::PgPool;
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
-use server::{config::Config, routes, state::AppState};
+use crypto::groups::ServerSecretParams;
+use server::{config::Config, db, routes, state::AppState};
 
 static SETUP: OnceCell<()> = OnceCell::const_new();
 
@@ -59,7 +60,17 @@ async fn test_state() -> AppState {
         server_name: "Test".into(),
         invite_domain: "go.example.test".into(),
     };
-    AppState::new(pool, config)
+    let mut conn = pool.acquire().await.expect("acquire");
+    let bytes = db::zkgroup_params::load_or_init(
+        &mut conn,
+        db::zkgroup_params::CURRENT_VERSION,
+        || ServerSecretParams::generate().to_bytes(),
+    )
+    .await
+    .expect("load zkgroup params");
+    drop(conn);
+    let zkgroup_secret = ServerSecretParams::from_bytes(&bytes).expect("decode params");
+    AppState::new(pool, config, zkgroup_secret)
 }
 
 /// Register a dummy account and return the parsed response body.
@@ -417,4 +428,35 @@ async fn auth_token_without_nonce_returns_422() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn get_groups_server_params_returns_decodable_public_params() {
+    let state = test_state().await;
+    let app = routes::router().with_state(state.clone());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/groups/server-params")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(body["version"], db::zkgroup_params::CURRENT_VERSION);
+    let encoded = body["params"].as_str().expect("params field");
+    let decoded = BASE64_STANDARD.decode(encoded).expect("base64 decode");
+
+    // Bytes must decode as ServerPublicParams and match what the loaded
+    // ServerSecretParams derives — i.e. the endpoint isn't returning stale
+    // or otherwise mismatched material.
+    let public = crypto::groups::ServerPublicParams::from_bytes(&decoded)
+        .expect("decode ServerPublicParams");
+    assert_eq!(public.to_bytes(), state.zkgroup_secret.public_params().to_bytes());
 }

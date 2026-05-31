@@ -12,7 +12,8 @@ use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use server::{config::Config, routes, state::AppState, tasks};
+use crypto::groups::ServerSecretParams;
+use server::{config::Config, db, routes, state::AppState, tasks};
 
 #[tokio::main]
 async fn main() {
@@ -63,7 +64,22 @@ async fn main() {
 
     tracing::info!(bind = %config.bind_addr, "starting server");
 
-    let state = AppState::new(pool, config.clone());
+    // Load (or generate-and-persist on first boot) the homeserver's zkgroup
+    // signing key. Failure here is fatal: without it we can't issue group
+    // credentials. See docs/03-groups.md §2.1.
+    let zkgroup_secret = {
+        let mut conn = pool.acquire().await.expect("failed to acquire db connection");
+        let bytes = db::zkgroup_params::load_or_init(
+            &mut conn,
+            db::zkgroup_params::CURRENT_VERSION,
+            || ServerSecretParams::generate().to_bytes(),
+        )
+        .await
+        .expect("failed to load zkgroup server params");
+        ServerSecretParams::from_bytes(&bytes).expect("stored zkgroup params are corrupt")
+    };
+
+    let state = AppState::new(pool, config.clone(), zkgroup_secret);
     tasks::spawn_all(state.clone());
     let app = routes::router()
         .with_state(state)

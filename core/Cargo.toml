@@ -23,6 +23,11 @@ store          = { path = "crates/store" }
 # Cryptography
 # Pinned to a specific commit for reproducible builds. Update deliberately.
 libsignal-protocol = { git = "https://github.com/signalapp/libsignal", rev = "4c460615cdbe4ed53b23a5d1bf71493514bf2a80" }
+# zkgroup and zkcredential live in the same libsignal repo at the same pinned
+# commit; they're the anonymous-credential primitives used by action-bound
+# groups (see docs/03-groups.md).
+zkgroup       = { git = "https://github.com/signalapp/libsignal", rev = "4c460615cdbe4ed53b23a5d1bf71493514bf2a80" }
+zkcredential  = { git = "https://github.com/signalapp/libsignal", rev = "4c460615cdbe4ed53b23a5d1bf71493514bf2a80" }
 rand = "0.9"
 # p256, aes-gcm, sha2 are kept on the 0.x series that shares rand_core 0.6 with
 # libsignal's pinned commit. Upgrading these to their latest (which uses rand_core
@@ -76,3 +81,10 @@ uuid  = { version = "1", features = ["v4", "serde"] }
 
 # Testing
 proptest = "1"
+
+# zkgroup depends on a Signal fork of curve25519-dalek (it has private fields
+# zkgroup needs to reach into for Ristretto-based proofs). The fork is API-
+# compatible with crates.io 4.1.x for everything else. Without this patch,
+# transitive dependencies pull in the upstream 4.1.3 and we get a diamond.
+[patch.crates-io]
+curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }

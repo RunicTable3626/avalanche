@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 types              = { workspace = true }
 libsignal-protocol = { workspace = true }
+zkgroup            = { workspace = true }
+zkcredential       = { workspace = true }
 rand               = { workspace = true }
 async-trait        = { workspace = true }
 thiserror          = { workspace = true }

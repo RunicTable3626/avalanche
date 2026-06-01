@@ -672,7 +672,12 @@ struct SendGroupMessageRequest {
 #[derive(Deserialize)]
 struct SendRecipientWire {
     service_id_fixed_width: String,
-    recipient_group_pseudonym: String,
+    /// Sender-supplied `encrypted_member_id` for this recipient (sender
+    /// computes it from the recipient's DID + group key). Server uses it
+    /// to look up the recipient's current `group_push_pseudonym` via
+    /// `member_credentials`. A wrong EMI produces an undeliverable
+    /// envelope (recipient's keys don't match), not a security issue.
+    encrypted_member_id: String,
 }
 
 #[derive(Serialize)]
@@ -727,25 +732,38 @@ async fn send_group_message(
         fanout_by_sid.insert(f.service_id_fixed_width, f);
     }
 
-    // Build the recipient ServiceId set for token verification.
+    // Build the recipient ServiceId set for token verification and resolve
+    // each EMI to a pseudonym via `member_credentials`.
     let mut recipient_service_ids: Vec<libsignal_core::ServiceId> =
         Vec::with_capacity(body.recipients.len());
     let mut recipient_targets: Vec<(Vec<u8>, &crypto::sealed_sender::RecipientFanout)> =
         Vec::with_capacity(body.recipients.len());
-    for r in &body.recipients {
-        let sid_bytes = b64_decode(&r.service_id_fixed_width, "service_id_fixed_width")?;
-        let sid_arr: [u8; 17] = sid_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| ServerError::BadRequest("service_id_fixed_width must be 17 bytes".into()))?;
-        let sid = libsignal_core::ServiceId::parse_from_service_id_fixed_width_binary(&sid_arr)
-            .ok_or_else(|| ServerError::BadRequest("invalid service_id".into()))?;
-        let fanout = *fanout_by_sid
-            .get(&sid_arr)
-            .ok_or_else(|| ServerError::BadRequest("recipient not in envelope".into()))?;
-        let pseudonym = b64_decode(&r.recipient_group_pseudonym, "recipient_group_pseudonym")?;
-        recipient_service_ids.push(sid);
-        recipient_targets.push((pseudonym, fanout));
+    {
+        let mut conn = state.db.acquire().await?;
+        for r in &body.recipients {
+            let sid_bytes = b64_decode(&r.service_id_fixed_width, "service_id_fixed_width")?;
+            let sid_arr: [u8; 17] = sid_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| {
+                    ServerError::BadRequest("service_id_fixed_width must be 17 bytes".into())
+                })?;
+            let sid =
+                libsignal_core::ServiceId::parse_from_service_id_fixed_width_binary(&sid_arr)
+                    .ok_or_else(|| ServerError::BadRequest("invalid service_id".into()))?;
+            let fanout = *fanout_by_sid
+                .get(&sid_arr)
+                .ok_or_else(|| ServerError::BadRequest("recipient not in envelope".into()))?;
+            let emi = b64_decode(&r.encrypted_member_id, "encrypted_member_id")?;
+            let pseudonym =
+                db::groups::member_pseudonym(&mut conn, &group_id, &emi)
+                    .await?
+                    .ok_or_else(|| {
+                        ServerError::BadRequest("recipient not a member of this group".into())
+                    })?;
+            recipient_service_ids.push(sid);
+            recipient_targets.push((pseudonym, fanout));
+        }
     }
 
     // Verify the endorsement token authorizes this exact recipient set.

@@ -88,24 +88,32 @@ async fn create_invite_accept_promote_remove_roundtrip() {
     // Alice's local store).
     let _ = alice.receive_messages_async().await.unwrap();
 
-    // 8. Alice sends a Sender-Keys-encrypted group message; Bob decrypts.
+    // 8. Alice sends a sealed-sender group message; Bob drains via the
+    //    HTTP offline-pickup path (production uses WS push, but for tests
+    //    HTTP fetch hits the same crypto and ack path).
     let plaintext = b"hello group, this is alice";
     alice
         .send_group_message_async(&created.group_id, plaintext)
         .await
         .unwrap();
 
-    let group_msgs = bob.receive_messages_async().await.unwrap();
+    let group_msgs = bob
+        .fetch_group_messages_async(&created.group_id)
+        .await
+        .unwrap();
     assert_eq!(group_msgs.len(), 1, "bob should receive one group message");
     assert_eq!(group_msgs[0].plaintext, plaintext);
     assert_eq!(group_msgs[0].sender_did, alice.did_async().await);
 
-    // 9. Bob replies; Alice decrypts.
+    // 9. Bob replies; Alice drains.
     let reply = b"thanks alice";
     bob.send_group_message_async(&created.group_id, reply)
         .await
         .unwrap();
-    let alice_msgs = alice.receive_messages_async().await.unwrap();
+    let alice_msgs = alice
+        .fetch_group_messages_async(&created.group_id)
+        .await
+        .unwrap();
     assert_eq!(alice_msgs.len(), 1);
     assert_eq!(alice_msgs[0].plaintext, reply);
     assert_eq!(alice_msgs[0].sender_did, bob.did_async().await);

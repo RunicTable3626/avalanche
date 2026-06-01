@@ -128,6 +128,15 @@ pub fn did_to_uuid(did: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+/// Canonical libsignal `ServiceId` string (`Aci::from(UUID(did))`) for a
+/// given DID. Used everywhere we need a `ProtocolAddress.name()`: session
+/// store, identity store, sealed-sender envelopes. The sealed-sender wire
+/// format requires this exact form (libsignal parses the name as a
+/// ServiceId), so all session/identity-store keys are kept in this shape.
+pub fn did_to_service_id_string(did: &str) -> String {
+    Aci::from(did_to_uuid(did)).service_id_string()
+}
+
 /// Server-visible public material for a group. Contains the routing
 /// `group_id` and the public material needed to verify a presentation —
 /// everything stock zkgroup needs, nothing identity-bearing.

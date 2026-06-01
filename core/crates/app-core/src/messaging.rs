@@ -168,8 +168,9 @@ impl AppCoreInner {
         expiry_secs: Option<i64>,
         force_refresh: bool,
     ) -> Result<OutboundMessage, AppError> {
+        let recipient_sid = crypto::groups::did_to_service_id_string(recipient_did);
         let recipient_addr = DeviceAddress::new(
-            AccountId::new(recipient_did),
+            AccountId::new(&recipient_sid),
             DeviceId::new(recipient_device_id),
         );
 
@@ -178,7 +179,7 @@ impl AppCoreInner {
         } else {
             use libsignal_protocol::SessionStore;
             let protocol_addr = libsignal_protocol::ProtocolAddress::new(
-                recipient_did.to_string(),
+                recipient_sid.clone(),
                 libsignal_protocol::DeviceId::try_from(recipient_device_id).unwrap(),
             );
             self.store
@@ -397,8 +398,9 @@ impl AppCoreInner {
             .ok_or_else(|| AppError::Protocol("message missing sender_device_id".into()))?
             as u32;
 
+        let sender_sid = crypto::groups::did_to_service_id_string(sender_did);
         let sender_addr = DeviceAddress::new(
-            AccountId::new(sender_did),
+            AccountId::new(&sender_sid),
             DeviceId::new(sender_device_id),
         );
 

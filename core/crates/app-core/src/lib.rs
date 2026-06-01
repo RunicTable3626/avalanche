@@ -772,7 +772,7 @@ impl AppCore {
             }
 
             let local_address = DeviceAddress::new(
-                AccountId::new(&did),
+                AccountId::new(&crypto::groups::did_to_service_id_string(&did)),
                 DeviceId::new(new_device_id),
             );
 
@@ -1653,7 +1653,7 @@ impl AppCore {
             ),
         }).await?;
         let local_address = DeviceAddress::new(
-            AccountId::new(&reg_resp.did),
+            AccountId::new(&crypto::groups::did_to_service_id_string(&reg_resp.did)),
             DeviceId::new(device_id),
         );
 
@@ -1685,7 +1685,7 @@ impl AppCore {
         let device_id = reg.device_id;
 
         let local_address = DeviceAddress::new(
-            AccountId::new(&reg.account_id),
+            AccountId::new(&crypto::groups::did_to_service_id_string(&reg.account_id)),
             DeviceId::new(device_id),
         );
 
@@ -1931,9 +1931,32 @@ impl AppCore {
         Ok(())
     }
 
-    /// Async variant of `send_group_message`. Encrypts under our Sender
-    /// Key and fans out the same `proto::GroupMessage` as a DM to every
-    /// other current member.
+    /// Drain queued sealed-sender group messages for `group_id` via the
+    /// HTTP offline-pickup endpoint, decrypt + validate each, and return
+    /// the plaintexts in delivery order. Acked server-side as part of
+    /// the call. Used by the e2e tests; the production receive path is
+    /// the WS `GroupDeliverRequest` push.
+    pub async fn fetch_group_messages_async(
+        &self,
+        group_id: &str,
+    ) -> Result<Vec<groups::ReceivedGroupMessage>, AppError> {
+        let mut inner = self.inner.lock().await;
+        let did = inner.did.clone();
+        let server_url = inner.client.server_url().to_string();
+        let AppCoreInner {
+            ref mut store,
+            ref client,
+            ..
+        } = *inner;
+        groups::fetch_group_messages(store, client, &server_url, &did, group_id).await
+    }
+
+    /// Async variant of `send_group_message`. Builds a sealed-sender SSv2
+    /// envelope over a SenderKey ciphertext of `plaintext` and POSTs it to
+    /// `/v1/groups/{id}/send`. Per-recipient routing is by
+    /// `group_push_pseudonym` (looked up server-side from the EMI we
+    /// supply); the server cannot link the message to either the sender
+    /// or the recipient DIDs.
     pub async fn send_group_message_async(
         &self,
         group_id: &str,
@@ -1942,25 +1965,16 @@ impl AppCore {
         let mut inner = self.inner.lock().await;
         let did = inner.did.clone();
         let device_id = inner.device_id;
-        let mk = groups::master_key_for(&inner.store, group_id).await?;
-        let ciphertext =
-            groups::encrypt_group_content(&mut inner.store, &did, device_id, &mk, plaintext)
-                .await?;
-        let group_id_bytes = groups::b64d(group_id)?;
-        let msg = ContentMessage {
-            body: Some(Body::GroupMessage(proto::GroupMessage {
-                group_id: group_id_bytes,
-                distribution_id: groups::distribution_id_for(&mk).as_bytes().to_vec(),
-                ciphertext,
-            })),
-            timestamp_ms: Timestamp::now().as_millis() as u64,
-            profile_key: inner.own_profile_key().await,
-        };
-        let encoded = msg.encode_to_vec();
-        let recipients = groups::other_member_dids(&inner.store, group_id, &did).await?;
-        for rdid in recipients {
-            inner.send_dm(None, &rdid, &encoded, None).await?;
-        }
+        let server_url = inner.client.server_url().to_string();
+        let AppCoreInner {
+            ref mut store,
+            ref client,
+            ..
+        } = *inner;
+        groups::send_group_message(
+            store, client, &server_url, &did, device_id, group_id, plaintext,
+        )
+        .await?;
         Ok(())
     }
 

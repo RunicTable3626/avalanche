@@ -84,6 +84,46 @@ struct GroupEndorsementsRaw {
     expiration_unix_seconds: u64,
 }
 
+// ── group send / fetch ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct GroupSendRequest {
+    pub envelope: Vec<u8>,
+    pub token: Vec<u8>,
+    pub recipients: Vec<GroupSendRecipient>,
+    pub expiry_secs: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupSendRecipient {
+    pub service_id_fixed_width: Vec<u8>,
+    pub encrypted_member_id: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct GroupSendResponseRaw {
+    message_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueuedGroupMessage {
+    pub id: i64,
+    pub ciphertext: Vec<u8>,
+    pub enqueued_at: String,
+}
+
+#[derive(Deserialize)]
+struct FetchGroupMessagesRaw {
+    messages: Vec<QueuedGroupMessageRaw>,
+}
+
+#[derive(Deserialize)]
+struct QueuedGroupMessageRaw {
+    id: i64,
+    ciphertext: String,
+    enqueued_at: String,
+}
+
 // ── create group ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -308,6 +348,81 @@ impl Client {
             response: b64d(&raw.response)?,
             expiration_unix_seconds: raw.expiration_unix_seconds,
         })
+    }
+
+    // ── sealed-sender group send (no auth header) ───────────────────────
+
+    pub async fn send_group_message(
+        &self,
+        group_id_b64: &str,
+        req: &GroupSendRequest,
+    ) -> Result<Vec<i64>, NetError> {
+        let url = format!("{}/v1/groups/{}/send", self.server_url(), group_id_b64);
+        let body = serde_json::json!({
+            "envelope": b64(&req.envelope),
+            "token": b64(&req.token),
+            "recipients": req
+                .recipients
+                .iter()
+                .map(|r| serde_json::json!({
+                    "service_id_fixed_width": b64(&r.service_id_fixed_width),
+                    "encrypted_member_id":     b64(&r.encrypted_member_id),
+                }))
+                .collect::<Vec<_>>(),
+            "expiry_secs": req.expiry_secs,
+        });
+        let resp = self.http_client().post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            return Err(NetError::Server(
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            ));
+        }
+        let raw: GroupSendResponseRaw = check_json(resp).await?;
+        Ok(raw.message_ids)
+    }
+
+    // ── presentation-auth: drain queued group messages (offline pickup) ──
+
+    pub async fn fetch_group_messages(
+        &self,
+        group_id_b64: &str,
+        presentation: &[u8],
+    ) -> Result<Vec<QueuedGroupMessage>, NetError> {
+        let url = format!("{}/v1/groups/{}/messages", self.server_url(), group_id_b64);
+        let resp = self
+            .presentation_request(reqwest::Method::GET, &url, presentation, None)
+            .await?;
+        let raw: FetchGroupMessagesRaw = check_json(resp).await?;
+        let mut out = Vec::with_capacity(raw.messages.len());
+        for m in raw.messages {
+            out.push(QueuedGroupMessage {
+                id: m.id,
+                ciphertext: b64d(&m.ciphertext)?,
+                enqueued_at: m.enqueued_at,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn ack_group_messages(
+        &self,
+        group_id_b64: &str,
+        message_ids: Vec<i64>,
+        presentation: &[u8],
+    ) -> Result<(), NetError> {
+        let url = format!("{}/v1/groups/{}/messages", self.server_url(), group_id_b64);
+        let body = serde_json::json!({ "message_ids": message_ids });
+        let resp = self
+            .presentation_request(reqwest::Method::DELETE, &url, presentation, Some(body))
+            .await?;
+        if !resp.status().is_success() {
+            return Err(NetError::Server(
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            ));
+        }
+        Ok(())
     }
 
     // ── session-auth: create group ──────────────────────────────────────

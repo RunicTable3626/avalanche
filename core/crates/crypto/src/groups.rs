@@ -12,7 +12,9 @@ pub mod endorsements;
 pub mod group_key;
 pub mod server_params;
 
-pub use group_key::{did_to_uuid, EncryptedMemberId, GroupId, GroupKey, GroupPublicParams};
+pub use group_key::{
+    did_to_service_id_string, did_to_uuid, EncryptedMemberId, GroupId, GroupKey, GroupPublicParams,
+};
 pub use server_params::{ServerPublicParams, ServerSecretParams};
 
 // Re-export the stock zkgroup credential types used by app-core and

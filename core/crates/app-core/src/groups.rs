@@ -42,7 +42,8 @@ use types::Timestamp;
 use crate::error::{AppError, AppErrorFfi};
 use crate::proto::{self, content_message::Body, groups as gproto, ContentMessage};
 use crate::{
-    ffi_runtime, AppCore, CreatedGroupFfi, GroupSummaryFfi, JoinResultFfi, summary_to_ffi,
+    ffi_runtime, AppCore, AppCoreInner, CreatedGroupFfi, GroupSummaryFfi, JoinResultFfi,
+    summary_to_ffi,
 };
 
 /// Seconds per day; redemption times are day-aligned (§3.11).
@@ -89,7 +90,7 @@ pub fn distribution_id_for(master_key: &[u8; 32]) -> Uuid {
 
 fn sender_protocol_address(did: &str, device_id: u32) -> ProtocolAddress {
     ProtocolAddress::new(
-        did.to_string(),
+        crypto::groups::did_to_service_id_string(did),
         DeviceId::try_from(device_id).expect("device_id must be > 0"),
     )
 }
@@ -1005,6 +1006,224 @@ pub async fn decrypt_group_content(
     Ok(plaintext)
 }
 
+// ── sealed-sender group send / fetch ─────────────────────────────────────
+
+/// A group message decrypted from a sealed-sender envelope. Carries the
+/// sender's identity (validated against the pinned trust root) and the
+/// inner plaintext bytes — the same bytes the sender passed to
+/// [`send_group_message`].
+#[derive(Debug, Clone)]
+pub struct ReceivedGroupMessage {
+    pub message_id: i64,
+    pub group_id_b64: String,
+    pub sender_did: String,
+    pub sender_device_id: u32,
+    pub plaintext: Vec<u8>,
+}
+
+/// Send `plaintext` to every other current member of the group via the
+/// sealed-sender path. Builds the SenderKey ciphertext, the SSv2 envelope,
+/// and a `GroupSendFullToken` over the recipient set, then POSTs to
+/// `/v1/groups/{id}/send`. Caller-supplied `plaintext` is the inner payload
+/// (typically a `ContentMessage` proto with `body = Text/Receipt/...`).
+pub async fn send_group_message(
+    store: &mut store::Store,
+    client: &net::Client,
+    server_url: &str,
+    sender_did: &str,
+    sender_device_id: u32,
+    group_id_b64: &str,
+    plaintext: &[u8],
+) -> Result<Vec<i64>, AppError> {
+    let mk = master_key_for(store, group_id_b64).await?;
+    let group_key = GroupKey::from_bytes(mk);
+    let other_dids = other_member_dids(store, group_id_b64, sender_did).await?;
+    if other_dids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Inner SenderKey ciphertext over the caller's payload.
+    let senderkey_ct =
+        encrypt_group_content(store, sender_did, sender_device_id, &mk, plaintext).await?;
+
+    // Today's credential + sender cert (cached together in group_credentials).
+    let public = ensure_server_params(store, client, server_url).await?;
+    let cred = ensure_credential(store, client, server_url, sender_did, &public).await?;
+    let today = day_aligned_now();
+    let (_cred_bytes, sender_cert_bytes, _exp) = store
+        .load_group_credential(server_url, sender_did, today)
+        .await?
+        .ok_or_else(|| AppError::Protocol("sender cert not cached after refresh".into()))?;
+
+    // Fresh endorsements for this group (one MAC over the full member set).
+    let presentation = build_presentation_bytes(&public, &cred, &group_key)?;
+    let endo = client
+        .get_group_endorsements(group_id_b64, &presentation)
+        .await?;
+    let mut all_dids: Vec<String> = Vec::with_capacity(other_dids.len() + 1);
+    all_dids.push(sender_did.to_string());
+    all_dids.extend(other_dids.iter().cloned());
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time before epoch")
+        .as_secs();
+    let endorsements_in_order = crypto::groups::endorsements::receive_endorsements(
+        &endo.response,
+        &all_dids,
+        &group_key,
+        &public,
+        now_secs,
+    )
+    .map_err(|e| AppError::Protocol(format!("receive endorsements: {e}")))?;
+    // Drop our own (index 0) — token covers only the recipients.
+    let recipient_endorsements: Vec<Vec<u8>> = endorsements_in_order.into_iter().skip(1).collect();
+    let token = crypto::groups::endorsements::token_for_recipients(
+        &recipient_endorsements,
+        &group_key,
+        endo.expiration_unix_seconds,
+    )
+    .map_err(|e| AppError::Protocol(format!("token_for_recipients: {e}")))?;
+
+    // One ProtocolAddress per (recipient, device); per-recipient wire entries
+    // pair the ServiceId with the EMI we precompute so the server can resolve
+    // each recipient to a `group_push_pseudonym`.
+    let mut destinations: Vec<ProtocolAddress> = Vec::new();
+    let mut wire_recipients: Vec<net::groups::GroupSendRecipient> = Vec::new();
+    for did in &other_dids {
+        let uuid = did_to_uuid(did);
+        let sid = libsignal_core::ServiceId::from(Aci::from(uuid));
+        let sid_name = sid.service_id_string();
+        let sid_fixed = sid.service_id_fixed_width_binary().to_vec();
+        let emi_bytes = zkgroup::serialize(&group_key.encrypt_member_id(did));
+        let device_ids = client.fetch_devices(did).await?;
+        if device_ids.is_empty() {
+            return Err(AppError::Protocol(format!(
+                "no active devices for recipient {did}"
+            )));
+        }
+        for dev_id in device_ids {
+            let dev = DeviceId::try_from(dev_id as u32)
+                .map_err(|_| AppError::Protocol("device_id 0 is reserved".into()))?;
+            destinations.push(ProtocolAddress::new(sid_name.clone(), dev));
+        }
+        wire_recipients.push(net::groups::GroupSendRecipient {
+            service_id_fixed_width: sid_fixed,
+            encrypted_member_id: emi_bytes,
+        });
+    }
+
+    let group_id_bytes = b64d(group_id_b64)?;
+    let envelope = crypto::sealed_sender::encrypt_group_envelope(
+        store,
+        &sender_cert_bytes,
+        Some(group_id_bytes.clone()),
+        &senderkey_ct,
+        &destinations,
+    )
+    .await?;
+
+    let ids = client
+        .send_group_message(
+            group_id_b64,
+            &net::groups::GroupSendRequest {
+                envelope,
+                token,
+                recipients: wire_recipients,
+                expiry_secs: None,
+            },
+        )
+        .await?;
+    Ok(ids)
+}
+
+/// Drain queued sealed-sender group messages for one group via HTTP, run
+/// each through the receive pipeline (validate sender cert →
+/// `sender_keys::group_decrypt`), and ack them server-side. Returns the
+/// validated, decrypted messages in delivery order.
+pub async fn fetch_group_messages(
+    store: &mut store::Store,
+    client: &net::Client,
+    server_url: &str,
+    recipient_did: &str,
+    group_id_b64: &str,
+) -> Result<Vec<ReceivedGroupMessage>, AppError> {
+    let mk = master_key_for(store, group_id_b64).await?;
+    let group_key = GroupKey::from_bytes(mk);
+    let public = ensure_server_params(store, client, server_url).await?;
+    let cred = ensure_credential(store, client, server_url, recipient_did, &public).await?;
+    let presentation = build_presentation_bytes(&public, &cred, &group_key)?;
+
+    let queued = client
+        .fetch_group_messages(group_id_b64, &presentation)
+        .await?;
+    if queued.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let trust_root = load_sender_cert_trust_root(store, client, server_url).await?;
+    let now_ms = Timestamp::now().as_millis() as u64;
+
+    let mut decoded = Vec::with_capacity(queued.len());
+    let mut acked = Vec::with_capacity(queued.len());
+    for msg in queued {
+        let env = match crypto::sealed_sender::decrypt_envelope_to_usmc(store, &msg.ciphertext)
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("[groups] sealed-sender decrypt failed: {e}");
+                acked.push(msg.id);
+                continue;
+            }
+        };
+        let info = match crypto::sender_cert::validate_sender_cert(
+            &env.sender_cert_bytes,
+            &trust_root,
+            now_ms,
+        ) {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!("[groups] sender cert validation failed: {e}");
+                acked.push(msg.id);
+                continue;
+            }
+        };
+        let plaintext = match decrypt_group_content(
+            store,
+            &info.sender_did,
+            info.sender_device_id,
+            &env.contents,
+        )
+        .await
+        {
+            Ok(pt) => pt,
+            Err(e) => {
+                tracing::warn!("[groups] group_decrypt failed: {e}");
+                acked.push(msg.id);
+                continue;
+            }
+        };
+        decoded.push(ReceivedGroupMessage {
+            message_id: msg.id,
+            group_id_b64: group_id_b64.to_string(),
+            sender_did: info.sender_did,
+            sender_device_id: info.sender_device_id,
+            plaintext,
+        });
+        acked.push(msg.id);
+    }
+
+    if !acked.is_empty() {
+        if let Err(e) = client
+            .ack_group_messages(group_id_b64, acked, &presentation)
+            .await
+        {
+            tracing::warn!("[groups] ack_group_messages failed: {e}");
+        }
+    }
+    Ok(decoded)
+}
+
 /// Read the cached `GroupState` plaintext for `group_id_b64_s` and
 /// return the DIDs of every current full member except `excluding_did`.
 /// Used to enumerate SKDM-distribution and group-send recipients.
@@ -1438,30 +1657,25 @@ impl AppCore {
         plaintext: Vec<u8>,
     ) -> Result<(), AppErrorFfi> {
         ffi_runtime().block_on(async {
-            let ws = self.ws.lock().expect("ws mutex poisoned").clone();
             let mut inner = self.inner.lock().await;
             let did = inner.did.clone();
             let device_id = inner.device_id;
-            let mk = master_key_for(&inner.store, &group_id).await?;
-            let ciphertext =
-                encrypt_group_content(&mut inner.store, &did, device_id, &mk, &plaintext).await?;
-            let group_id_bytes = b64d(&group_id)?;
-            let msg = ContentMessage {
-                body: Some(Body::GroupMessage(proto::GroupMessage {
-                    group_id: group_id_bytes,
-                    distribution_id: distribution_id_for(&mk).as_bytes().to_vec(),
-                    ciphertext,
-                })),
-                timestamp_ms: Timestamp::now().as_millis() as u64,
-                profile_key: inner.own_profile_key().await,
-            };
-            let encoded = msg.encode_to_vec();
-            let recipients = other_member_dids(&inner.store, &group_id, &did).await?;
-            for rdid in recipients {
-                if let Err(e) = inner.send_dm(ws.as_ref(), &rdid, &encoded, None).await {
-                    tracing::warn!("[groups] GroupMessage DM to {rdid} failed: {e}");
-                }
-            }
+            let server_url = inner.client.server_url().to_string();
+            let AppCoreInner {
+                ref mut store,
+                ref client,
+                ..
+            } = *inner;
+            send_group_message(
+                store,
+                client,
+                &server_url,
+                &did,
+                device_id,
+                &group_id,
+                &plaintext,
+            )
+            .await?;
             Ok::<_, AppError>(())
         })
         .map_err(AppErrorFfi::from)

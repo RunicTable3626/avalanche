@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ChatsView: View {
     @EnvironmentObject var appState: AppState
-    @State private var showDevSettings = false
+    @State private var showAccounts = false
     @State private var showCompose = false
     @State private var navigationPath = NavigationPath()
 
@@ -33,7 +33,7 @@ struct ChatsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        showDevSettings = true
+                        showAccounts = true
                     } label: {
                         Image(systemName: "gearshape")
                             .font(.subheadline)
@@ -52,8 +52,8 @@ struct ChatsView: View {
                     RecoveryKeyBanner()
                 }
             }
-            .sheet(isPresented: $showDevSettings) {
-                DevSettingsView()
+            .sheet(isPresented: $showAccounts) {
+                AccountsView()
             }
             .sheet(isPresented: $showCompose) {
                 ComposeMessageView()

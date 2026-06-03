@@ -5,7 +5,6 @@ struct SplashView: View {
     @State private var showScanner = false
     @State private var showLinkEntry = false
     @State private var showRecovery = false
-    @State private var showDevSettings = false
     @State private var pendingInvite: InviteToken?
     @State private var isValidatingDeepLink = false
 
@@ -60,15 +59,6 @@ struct SplashView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
             .background(Color.avPaper)
-            .overlay(alignment: .topTrailing) {
-                Button {
-                    showDevSettings = true
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.subheadline)
-                        .padding()
-                }
-            }
             .navigationDestination(isPresented: $showScanner) {
                 QRScannerView()
             }
@@ -77,9 +67,6 @@ struct SplashView: View {
             }
             .navigationDestination(isPresented: $showRecovery) {
                 RecoveryExplainerView()
-            }
-            .sheet(isPresented: $showDevSettings) {
-                DevSettingsView()
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(item: $pendingInvite) { token in

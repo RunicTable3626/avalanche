@@ -4,10 +4,13 @@ import Foundation
 
 /// Manages WebAuthn passkey registration and authentication ceremonies.
 ///
-/// - Registration: Creates a new passkey and derives a 32-byte symmetric key
-///   via the PRF extension. The symmetric key encrypts the recovery blob.
-/// - Authentication: Retrieves an existing passkey and re-derives the same
-///   symmetric key for recovery blob decryption.
+/// - Registration: Creates a new passkey with the signup server URL as the
+///   userHandle, and returns the raw 32-byte PRF output. The Rust core
+///   derives both the DID rotation key and the recovery-blob encryption key
+///   from this output via HKDF — the iOS side just shuttles the bytes.
+/// - Authentication: Retrieves an existing passkey and returns the raw PRF
+///   output plus the original signup server URL from the userHandle, which
+///   together let the Rust core recompute the DID without any server lookup.
 ///
 /// The relying party is `theavalanche.net` — shared across all actnet servers
 /// so passkeys work for recovery regardless of which server the user is on.
@@ -17,38 +20,40 @@ final class PasskeyManager: NSObject {
     /// The relying party domain for all actnet passkeys.
     static let relyingParty = "theavalanche.net"
 
-    /// Fixed PRF salt used to derive the recovery symmetric key.
-    /// Same salt during registration and authentication produces the same key.
+    /// Fixed PRF salt used during both registration and assertion. The
+    /// authenticator's PRF output is deterministic for `(passkey, salt)`, so
+    /// the same salt always yields the same 32 bytes.
     private static let prfSalt = Data("actnet-recovery-v1".utf8)
 
     /// Result of a passkey registration ceremony.
     struct RegistrationResult {
-        /// 32-byte symmetric key derived from PRF extension output.
-        let recoveryKey: Data
-        /// The DID stored in the credential's user handle, for recovery lookup.
-        let userHandle: Data
+        /// Raw 32-byte PRF output. Rust derives rotation key + blob key from this.
+        let prfOutput: Data
     }
 
     /// Result of a passkey authentication ceremony.
     struct AuthenticationResult {
-        /// 32-byte symmetric key derived from PRF extension output.
-        let recoveryKey: Data
-        /// The DID stored in the credential's user handle.
-        let did: String
+        /// Raw 32-byte PRF output. Rust derives rotation key + blob key from this.
+        let prfOutput: Data
+        /// The signup server URL stored in the credential's userHandle. Used
+        /// to recompute the genesis op and derive the DID.
+        let signupServerUrl: String
     }
 
     private var registrationContinuation: CheckedContinuation<RegistrationResult, Error>?
     private var authenticationContinuation: CheckedContinuation<AuthenticationResult, Error>?
 
-    /// Register a new passkey for an identity.
+    /// Register a new passkey for a fresh identity.
     ///
     /// - Parameters:
-    ///   - did: The DID to store in the passkey's user handle (for recovery lookup).
-    ///   - displayName: The display name shown in the passkey manager.
+    ///   - signupServerUrl: The homeserver URL the user is signing up at.
+    ///     Stored in `user.id` so that recovery can recompute the DID.
+    ///   - displayName: Human-readable label shown in the OS passkey picker
+    ///     (e.g. `"Sam @ safe-haven.org"`).
     ///   - anchor: The presentation anchor (window) for the system sheet.
-    /// - Returns: The PRF-derived recovery key and credential info.
+    /// - Returns: The raw PRF output.
     func register(
-        did: String,
+        signupServerUrl: String,
         displayName: String,
         anchor: ASPresentationAnchor
     ) async throws -> RegistrationResult {
@@ -57,7 +62,7 @@ final class PasskeyManager: NSObject {
         )
 
         let challenge = Self.generateChallenge()
-        let userHandle = Data(did.utf8)
+        let userHandle = Data(signupServerUrl.utf8)
 
         let request = provider.createCredentialRegistrationRequest(
             challenge: challenge,
@@ -65,7 +70,8 @@ final class PasskeyManager: NSObject {
             userID: userHandle
         )
 
-        // Request PRF extension for symmetric key derivation.
+        // Request PRF eval at creation — the authenticator returns the PRF
+        // output alongside the new credential.
         let inputValues = ASAuthorizationPublicKeyCredentialPRFAssertionInput.InputValues(
             saltInput1: Self.prfSalt
         )
@@ -112,18 +118,6 @@ final class PasskeyManager: NSObject {
             self.authenticationContinuation = continuation
             controller.performRequests()
         }
-    }
-
-    /// Derive a 32-byte symmetric key from PRF output using HKDF.
-    private static func deriveRecoveryKey(from prfOutput: Data) -> Data {
-        let inputKey = SymmetricKey(data: prfOutput)
-        let derivedKey = HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: inputKey,
-            salt: Data("actnet-recovery-blob".utf8),
-            info: Data("AES-256-GCM".utf8),
-            outputByteCount: 32
-        )
-        return derivedKey.withUnsafeBytes { Data($0) }
     }
 
     /// Generate a random challenge for the WebAuthn ceremony.
@@ -174,11 +168,7 @@ extension PasskeyManager: ASAuthorizationControllerDelegate {
         }
 
         let prfData = prfKey.withUnsafeBytes { Data($0) }
-        let recoveryKey = Self.deriveRecoveryKey(from: prfData)
-        let result = RegistrationResult(
-            recoveryKey: recoveryKey,
-            userHandle: credential.rawClientDataJSON
-        )
+        let result = RegistrationResult(prfOutput: prfData)
         registrationContinuation?.resume(returning: result)
         registrationContinuation = nil
     }
@@ -194,11 +184,10 @@ extension PasskeyManager: ASAuthorizationControllerDelegate {
         }
 
         let prfData = prfOutput.first.withUnsafeBytes { Data($0) }
-        let recoveryKey = Self.deriveRecoveryKey(from: prfData)
-        let did = String(data: credential.userID, encoding: .utf8) ?? ""
+        let signupServerUrl = String(data: credential.userID, encoding: .utf8) ?? ""
         let result = AuthenticationResult(
-            recoveryKey: recoveryKey,
-            did: did
+            prfOutput: prfData,
+            signupServerUrl: signupServerUrl
         )
         authenticationContinuation?.resume(returning: result)
         authenticationContinuation = nil

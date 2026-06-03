@@ -377,8 +377,12 @@ impl PreparedAccount {
     /// Generate identity + rotation keys and derive a `did:plc` locally.
     /// Does not contact the server. Consumed by `AppCore.finalizeAccount`.
     #[napi]
-    pub async fn create(server_url: String) -> napi::Result<PreparedAccount> {
-        let inner = tokio::task::spawn_blocking(move || core::PreparedAccount::new(server_url))
+    pub async fn create(
+        server_url: String,
+        prf_output: Buffer,
+    ) -> napi::Result<PreparedAccount> {
+        let prf = prf_output.to_vec();
+        let inner = tokio::task::spawn_blocking(move || core::PreparedAccount::new(server_url, prf))
             .await
             .map_err(join_err)?
             .map_err(to_napi)?;
@@ -407,12 +411,12 @@ impl AppCore {
         server_url: String,
         db_path: String,
         db_key: String,
-        recovery_key: Buffer,
+        prf_output: Buffer,
         display_name: String,
     ) -> napi::Result<AppCore> {
-        let rk = recovery_key.to_vec();
+        let prf = prf_output.to_vec();
         let inner = tokio::task::spawn_blocking(move || {
-            core::AppCore::create_account(server_url, db_path, db_key, rk, display_name)
+            core::AppCore::create_account(server_url, db_path, db_key, prf, display_name)
         })
         .await
         .map_err(join_err)?
@@ -445,13 +449,11 @@ impl AppCore {
         prepared: &PreparedAccount,
         db_path: String,
         db_key: String,
-        recovery_key: Buffer,
         display_name: String,
     ) -> napi::Result<AppCore> {
         let prepared = prepared.inner.clone();
-        let rk = recovery_key.to_vec();
         let inner = tokio::task::spawn_blocking(move || {
-            core::AppCore::finalize_account(prepared, db_path, db_key, rk, display_name)
+            core::AppCore::finalize_account(prepared, db_path, db_key, display_name)
         })
         .await
         .map_err(join_err)?
@@ -463,14 +465,14 @@ impl AppCore {
     pub async fn recover_from_blob(
         server_url: String,
         did: String,
-        recovery_key: Buffer,
+        prf_output: Buffer,
         db_path: String,
         db_key: String,
         display_name: String,
     ) -> napi::Result<AppCore> {
-        let rk = recovery_key.to_vec();
+        let prf = prf_output.to_vec();
         let inner = tokio::task::spawn_blocking(move || {
-            core::AppCore::recover_from_blob(server_url, did, rk, db_path, db_key, display_name)
+            core::AppCore::recover_from_blob(server_url, did, prf, db_path, db_key, display_name)
         })
         .await
         .map_err(join_err)?
@@ -701,12 +703,12 @@ impl AppCore {
     #[napi]
     pub async fn update_recovery_blob(
         &self,
-        recovery_key: Buffer,
+        prf_output: Buffer,
         servers: Vec<String>,
     ) -> napi::Result<()> {
         let core = self.inner.clone();
-        let rk = recovery_key.to_vec();
-        tokio::task::spawn_blocking(move || core.update_recovery_blob(rk, servers))
+        let prf = prf_output.to_vec();
+        tokio::task::spawn_blocking(move || core.update_recovery_blob(prf, servers))
             .await
             .map_err(join_err)?
             .map_err(to_napi)
@@ -989,10 +991,10 @@ pub async fn resolve_homeserver_from_plc(did: String) -> napi::Result<String> {
 pub async fn download_recovery_blob(
     server_url: String,
     did: String,
-    recovery_key: Buffer,
+    prf_output: Buffer,
 ) -> napi::Result<Vec<String>> {
-    let rk = recovery_key.to_vec();
-    tokio::task::spawn_blocking(move || core::download_recovery_blob(server_url, did, rk))
+    let prf = prf_output.to_vec();
+    tokio::task::spawn_blocking(move || core::download_recovery_blob(server_url, did, prf))
         .await
         .map_err(join_err)?
         .map_err(to_napi)

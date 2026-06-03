@@ -65,7 +65,7 @@ struct PasskeyExplainerView: View {
 
                 Button {
                     // TODO: Recovery phrase generation flow
-                    register(recoveryKey: Data())
+                    register(prfOutput: Data())
                 } label: {
                     Text("Use a recovery phrase instead")
                         .font(.subheadline)
@@ -73,7 +73,7 @@ struct PasskeyExplainerView: View {
                 .disabled(isRegistering)
 
                 Button {
-                    register(recoveryKey: Data())
+                    register(prfOutput: Data())
                 } label: {
                     Text("Skip recovery setup")
                         .font(.caption)
@@ -105,29 +105,31 @@ struct PasskeyExplainerView: View {
                     return
                 }
 
-                // Stage 1: pre-compute the DID locally so the passkey credential
-                // can be created with the real DID as its user handle. This is
-                // what makes recovery work later — the assertion returns the DID,
-                // and we use it to fetch the recovery blob from the home server.
-                let prepared = try await appState.prepareAccount(
-                    serverUrl: inviteToken.serverUrl.absoluteString
-                )
-
+                // Stage 1: run the passkey ceremony first. The credential's
+                // `user.id` is set to the signup server URL — that's what lets
+                // recovery recompute the DID later without prompting the user.
+                let labelForPicker = "\(displayName) @ \(inviteToken.serverName)"
                 let passkeyManager = PasskeyManager()
                 let result = try await passkeyManager.register(
-                    did: prepared.did(),
-                    displayName: displayName,
+                    signupServerUrl: inviteToken.serverUrl.absoluteString,
+                    displayName: labelForPicker,
                     anchor: window
                 )
 
-                // Stage 2: submit PLC genesis + register with the homeserver,
-                // encrypting the recovery blob under the passkey's PRF-derived key.
+                // Stage 2: derive the rotation key from the PRF output and
+                // build both PLC ops. The DID drops out of this.
+                let prepared = try await appState.prepareAccount(
+                    serverUrl: inviteToken.serverUrl.absoluteString,
+                    prfOutput: result.prfOutput
+                )
+
+                // Stage 3: submit the PLC ops, encrypt the recovery blob with
+                // the PRF-derived key, and register with the homeserver.
                 try await appState.finalizePreparedAccount(
                     prepared: prepared,
                     serverUrl: inviteToken.serverUrl.absoluteString,
                     serverName: inviteToken.serverName,
-                    displayName: displayName,
-                    recoveryKey: result.recoveryKey
+                    displayName: displayName
                 )
 
                 if let redirect = inviteToken.postOnboardingRedirect,
@@ -146,7 +148,7 @@ struct PasskeyExplainerView: View {
         }
     }
 
-    private func register(recoveryKey: Data) {
+    private func register(prfOutput: Data) {
         isRegistering = true
         errorMessage = nil
         Task {
@@ -155,7 +157,7 @@ struct PasskeyExplainerView: View {
                     serverUrl: inviteToken.serverUrl.absoluteString,
                     serverName: inviteToken.serverName,
                     displayName: displayName,
-                    recoveryKey: recoveryKey
+                    prfOutput: prfOutput
                 )
                 // createAccount sets isOnboarding = false, which navigates to MainTabView.
                 // If the invite has a post-onboarding redirect, follow it.

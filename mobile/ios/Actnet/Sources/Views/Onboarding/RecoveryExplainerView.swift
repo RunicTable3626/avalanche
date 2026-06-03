@@ -8,7 +8,7 @@ struct RecoveryExplainerView: View {
     @State private var showRecoveryConsole = false
     @State private var showPhraseEntry = false
     @State private var errorMessage: String?
-    @State private var recoveryKey: Data?
+    @State private var prfOutput: Data?
     @State private var recoveryDid: String?
 
     var body: some View {
@@ -63,20 +63,19 @@ struct RecoveryExplainerView: View {
         .navigationTitle("Recovery")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(isPresented: $showRecoveryConsole) {
-            RecoveryConsoleView(recoveryKey: recoveryKey ?? Data(), did: recoveryDid ?? "")
+            RecoveryConsoleView(prfOutput: prfOutput ?? Data(), did: recoveryDid ?? "")
         }
         .sheet(isPresented: $showPhraseEntry) {
             RecoveryPhraseEntryView(onComplete: { phrase in
                 showPhraseEntry = false
-                // Derive key from phrase using SHA-256 (simple derivation for now).
-                // A proper KDF (Argon2, scrypt) would be better but this matches
-                // the current design's simplicity.
+                // Treat the phrase as a 32-byte seed by hashing it. Rust's
+                // HKDF expects a 32-byte input; the hash plays the same role
+                // a passkey PRF output would.
                 let phraseData = Data(phrase.utf8)
                 let hash = SHA256Hash.hash(data: phraseData)
-                recoveryKey = Data(hash)
-                // For phrase-based recovery, we don't have the DID from a passkey.
-                // The user will need to enter a server URL manually.
-                // For now, show the console which will prompt for it.
+                prfOutput = Data(hash)
+                // Phrase recovery doesn't know the signup server URL; the
+                // console prompts for it and asks Rust to recompute the DID.
                 recoveryDid = ""
                 showRecoveryConsole = true
             })
@@ -98,14 +97,21 @@ struct RecoveryExplainerView: View {
                 let passkeyManager = PasskeyManager()
                 let result = try await passkeyManager.authenticate(anchor: window)
 
+                // Recompute the DID from the passkey's PRF output and the
+                // signup server URL stored in the credential's userHandle.
+                let derivedDid = try deriveDidFromPasskey(
+                    prfOutput: result.prfOutput,
+                    signupServerUrl: result.signupServerUrl
+                )
+
                 // Check if this identity is already signed in on this device.
-                if appState.accounts.contains(where: { $0.id == result.did }) {
+                if appState.accounts.contains(where: { $0.id == derivedDid }) {
                     errorMessage = "This identity is already signed in on this device."
                     return
                 }
 
-                recoveryKey = result.recoveryKey
-                recoveryDid = result.did
+                prfOutput = result.prfOutput
+                recoveryDid = derivedDid
                 showRecoveryConsole = true
             } catch let error as ASAuthorizationError where error.code == .canceled {
                 // User cancelled — no error message needed.

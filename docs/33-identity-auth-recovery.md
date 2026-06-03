@@ -11,11 +11,49 @@ Actnet has no phone numbers or emails. Identity is a DID (`did:plc`), a cryptogr
 
 This separation is what makes recovery possible: you can lose your signing key and use a rotation key to issue a new one.
 
+### Recovery authority: the passkey owns the rotation key
+
+The user's passkey (or written-down recovery phrase) is the sole authority over the DID. The **rotation key is deterministically derived from the passkey** via the WebAuthn PRF extension — it is not stored on any server. As long as the passkey survives, the user retains full control of the DID, regardless of what happens to any server.
+
+Concretely, the PRF output is treated as seed material and run through HKDF with two distinct labels:
+
+- `"actnet-rotation-v1"` → DID rotation keypair (P-256, deterministic from passkey).
+- `"actnet-blob-v1"` → symmetric key for the recovery blob (see below).
+
+A written-down recovery phrase produces the same two outputs via the same KDF, just with the phrase replacing the PRF as the seed.
+
+**The device identity key is *not* derived from the passkey.** It is generated randomly per device at signup time, consistent with libsignal's per-device identity model. This means the DID is `f(derived_rotation_pub, random_identity_pub, server_url)` — not purely a function of the passkey. See "How the DID stays recoverable" below for how we still reconstruct it from the passkey alone.
+
+### How the DID stays recoverable from the passkey alone
+
+To make the DID derivable from just the passkey + the original signup server URL (no need to remember the DID itself), the genesis op intentionally **omits the identity key**. The DID is committed as a function of `(derived_rotation_pub, server_url)` only, and the identity key is added in an immediately-following PLC update operation signed by the same rotation key.
+
+Signup writes two PLC ops back-to-back:
+
+1. **Genesis op** — `rotation_keys = [derived_rotation_pub]`, `services = {homeserver: server_url}`, `verification_methods = {}` (empty). Signed by rotation key. **The DID is fixed by the hash of this op.**
+2. **Update op** — adds the random per-device identity key as a verification method. Signed by rotation key, with `prev` pointing at the genesis op.
+
+This separation means a recovering device with only the passkey + the original signup server URL can deterministically recompute the genesis op, derive the same DID, and from there issue a new identity key via another PLC update.
+
+**Where the original signup server URL is stored.** The passkey credential's WebAuthn `user.id` (userHandle) is set to the original signup server URL at create time. The userHandle is returned to the relying party during any future assertion ceremony, so the recovering device gets the server URL back automatically — the user never has to remember or type it. The userHandle does not change if the user later migrates discovery servers; it always reflects the *original* genesis server, because that's what's baked into the DID.
+
+The passkey's `user.displayName` is set to a human-readable label (e.g. `"Sam @ safe-haven.org"`) so the OS passkey picker can disambiguate between multiple identities. That field is cosmetic only.
+
+### Recovery blob: convenience, not authority
+
+The recovery blob is a server-side cache that lets a recovering device skip re-registration friction. It contains:
+
+- Device identity keypair (so Signal sessions continue without a safety-number change).
+- Full list of homeservers the user is a member of.
+- Profile key and display name (so the user's profile is restored without prompting).
+
+It is encrypted under the `"actnet-blob-v1"` HKDF output and replicated to every homeserver the user is a member of. **It does not contain the rotation key.** Losing every copy of the blob means losing session continuity (safety-number change) and the server list (the user re-enters one server URL manually) — not DID control. The rotation key is always recoverable from the passkey, and the DID is always recoverable from `(rotation_key, signup_server_url)`.
+
 ### Privacy: DID document and server discovery
 
-The DID document is public. To avoid leaking all of a user's organizational affiliations, the DID document lists only a single "home" homeserver as its service endpoint — whichever server the user signed up on first (changeable in settings). Cross-server message routing uses contact exchange: when two users connect, they learn each other's homeserver addresses and store them locally. The PLC directory is not used for ongoing message routing, only for initial DID verification and recovery.
+The DID document is public. To avoid leaking all of a user's organizational affiliations, the DID document lists only a single "home" homeserver as its service endpoint — whichever server the user signed up on first (changeable in settings via discovery-server migration; see `13-federation.md`). Cross-server message routing uses contact exchange: when two users connect, they learn each other's homeserver addresses and store them locally. The PLC directory is not used for ongoing message routing, only for initial DID verification and recovery.
 
-The recovery blob (stored on every homeserver the user is registered on) contains the full list of servers. During recovery, the app resolves the DID via PLC directory → finds the home server → downloads the recovery blob → discovers all other servers.
+During recovery, the app resolves the DID via the PLC directory → finds the current home server → downloads the recovery blob → discovers all other servers. If the home server is unreachable or has no blob, recovery still proceeds via the passkey path described above; the user just loses the server-list convenience and takes a safety-number change.
 
 ---
 
@@ -30,26 +68,28 @@ The recovery blob (stored on every homeserver the user is registered on) contain
 1. Scan QR / tap invite link.
 2. App validates invite token with the server.
 3. "What's your name?" screen — display name required, photo optional.
-4. "Create a passkey to protect your identity" — brief explanation ("This lets you recover your account if you lose your phone. It syncs through your password manager or iCloud Keychain."). Sam authenticates with Face ID. 1Password (or iCloud Keychain) creates and stores the passkey. (Skipping this step is possible, but discouraged - see below.)
-5. App generates keys in the background:
-   - DID rotation key (P-256 keypair)
-   - Device identity key (Ed25519 keypair)
-   - Signal protocol prekeys (signed, one-time, Kyber)
-6. App performs a WebAuthn authentication ceremony with the PRF extension, deriving a symmetric key. Encrypts the rotation key and identity keypair into a recovery blob. (Skip this step if no passkey was generated)
-7. App signs a DID genesis operation with the rotation key and submits it to the PLC directory. The DID now exists publicly.
-8. App registers with the homeserver: uploads device identity public key, prekeys, DID, and (if present) the encrypted recovery blob.
-9. Server auto-enrolls Sam into the rally's groups per the invite token.
-10. Push notification permission prompt.
-11. Sam lands in Chats with groups populated. Recovery is already active.
+4. "Create a passkey to protect your identity" — brief explanation. Sam authenticates with Face ID. The WebAuthn `create()` ceremony is configured with `user.id = <signup_server_url_bytes>`, `user.displayName = "<name> @ <server>"`, and the PRF extension is requested. 1Password (or iCloud Keychain) creates and stores the passkey. The authenticator returns the credential plus the PRF output. (Skipping this step is possible, but discouraged — see below.)
+5. App runs the PRF output through HKDF with labels `"actnet-rotation-v1"` and `"actnet-blob-v1"` to derive (a) the P-256 DID rotation keypair and (b) the 32-byte blob-encryption symmetric key.
+6. App generates the remaining keys randomly: device identity key (Ed25519 keypair) and Signal protocol prekeys (signed, one-time, Kyber).
+7. App builds the **genesis PLC operation** with `rotation_keys = [derived_rotation_pub]`, `services = {homeserver: signup_server_url}`, `verification_methods = {}`. Signs with the rotation key. The DID is now determined by the hash of this op.
+8. App builds the **identity-key update PLC operation** with `prev` pointing at the genesis op, adding the random device identity key as a verification method. Signs with the rotation key.
+9. App submits both ops to the PLC directory in order. The DID now exists publicly with a registered identity key.
+10. App encrypts `{identity_keypair, [signup_server_url], profile_key, display_name}` into the recovery blob using the blob symmetric key from step 5.
+11. App registers with the homeserver: `POST /v1/accounts` with identity key, registration_id, device_id, prekeys, DID, and the encrypted recovery blob.
+12. Server auto-enrolls Sam into the rally's groups per the invite token.
+13. Push notification permission prompt.
+14. Sam lands in Chats with groups populated. Recovery is already active.
 
 **Technical details:**
-- Passkey relying party: a universal actnet domain (e.g. `theavalanche.net`), not the homeserver's domain. (This means recovery of a passkey identity can only be done by our official mobile apps and/or web application on our domain)
-- PRF extension: a fixed salt is provided during authentication. The authenticator returns a deterministic symmetric key. This key encrypts the recovery blob (rotation key + identity keypair).
-- DID genesis operation submitted to `plc.directory` (or configured PLC directory).
+- Passkey relying party: a universal actnet domain (e.g. `theavalanche.net`), not the homeserver's domain. This means recovery of a passkey identity can only be done by our official mobile apps and/or web application on our domain.
+- `user.id` (WebAuthn userHandle): set to the signup server URL bytes. This is what gets returned during any future assertion, letting a recovering device reconstruct the genesis op without prompting the user. It never changes, even after discovery-server migration.
+- PRF extension: a fixed app-wide salt (e.g. `"actnet-recovery-v1"`) is provided during the ceremony. The authenticator returns 32 deterministic bytes from `HMAC-SHA256(passkey_secret, salt)`. HKDF-Expand with two labels then derives the rotation keypair and the blob-encryption key. Both are recoverable from the passkey alone.
+- Why two PLC ops: the genesis op must be signable before the identity key exists (because we want the DID to be derivable from just the passkey + signup server URL, with no dependency on the random per-device identity key). A second op adds the identity key as a verification method.
+- DID genesis + update operations submitted to `plc.directory` (or configured PLC directory).
 - Server registration: `POST /v1/accounts` with identity key, registration_id, device_id, prekeys, and recovery blob (stored opaque ciphertext).
 - Server stores the DID document with the device's public key as a verification method and the homeserver as a service endpoint.
-- What if the user skips recovery? Then no recovery blob is generated. This is fine, but it means if Sam loses their phone then they will not be able to sign into that identity at all. The server knows this, and can nag the user if they want.
-- We'd also be fine supporting a written-down recovery key as an alternative flow to passkey. We generate a high entropy memorable password and tell the user to write it down, then that's the key to encrypt the recovery blob. (We save it in the Secure Enclave instead of a passkey so we don't have to have them enter their password to re-encrypt server list later)
+- **What if the user skips recovery?** No passkey is created, so the rotation key is generated randomly on-device and no recovery blob is written. If Sam loses their phone they cannot recover this identity at all. The server knows this and can nag the user. This is the only case where DID control is not deterministically derivable from a user-held secret.
+- **Written-down recovery phrase:** instead of a passkey, generate a high-entropy memorable phrase and tell the user to write it down. The phrase is run through the same HKDF (same labels) to produce the rotation keypair and the blob-encryption key. Since there's no WebAuthn ceremony, the signup server URL is stored alongside the phrase (e.g. printed on the recovery card as "Server: safe-haven.org"). To avoid making the user retype the phrase every time the blob needs re-encrypting, the derived symmetric key is cached in the Secure Enclave after first entry.
 
 ---
 
@@ -108,23 +148,33 @@ Sam now has two identities. Both appear in the app. Chats from both identities a
 **Flow:**
 
 1. Install actnet on new phone. Tap "Recover existing identity."
-2. App initiates a WebAuthn authentication ceremony.
+2. App initiates a WebAuthn assertion ceremony (no `allowCredentials`, discoverable mode) with the PRF extension and the same salt as signup.
 3. 1Password syncs to the new phone and presents Sam's passkey(s). Sam selects the one for their activist identity and authenticates with Face ID.
-4. PRF extension derives the symmetric key. The WebAuthn user handle contains Sam's DID.
-5. App resolves the DID via the PLC directory → discovers the home server → downloads the encrypted recovery blob. (Fallback: Sam enters a server URL manually.)
-6. App decrypts the recovery blob with the PRF-derived key. This yields the DID rotation key, identity keypair, and the full list of homeservers.
-7. App restores the identity keypair — same identity key as before.
-8. App generates a new device_id and signs a device replacement request with the rotation key. On each homeserver: the server verifies the rotation key signature against the PLC directory, revokes the old device (invalidates its session tokens and prekey bundles), and registers the new device_id with fresh prekeys. The identity key stays the same, so contacts see no safety number change.
-9. Sam is back. Existing sessions continue seamlessly.
-10. If Sam has additional identities: Settings → Add account → "Recover existing identity" → repeat steps 2-9 with the next passkey. Each recovery is independent — one passkey per identity, one Face ID prompt each.
+4. Authenticator returns `{credentialId, userHandle = signup_server_url_bytes, prfOutput}`.
+5. App runs the PRF output through HKDF with the same two labels, producing the rotation keypair and the blob-encryption symmetric key. **At this point, regardless of any server state, Sam has full DID control.**
+6. App **recomputes the genesis op deterministically** with `(derived_rotation_pub, signup_server_url)` and `verification_methods = {}`. Hashing this op yields the original DID. No PLC lookup required to know Sam's DID.
+7. App resolves the DID via PLC to find the *current* home server (it may have been migrated since signup), and attempts to download the recovery blob.
+
+8. **Blob path (common case):** App decrypts the blob with the derived blob symmetric key. The plaintext yields the original identity keypair and the full list of homeservers.
+   - App restores the identity keypair — same identity key as before, so contacts see no safety-number change.
+   - App generates a new device_id and signs a device replacement request with the rotation key. On each homeserver in the list, the server verifies the signature against the rotation key listed in PLC, revokes the old device, and registers the new device_id with fresh prekeys.
+   - Sam is back. Existing Signal sessions continue seamlessly.
+
+9. **No-blob path (every blob copy is gone):** App generates a fresh identity keypair on-device. Signs a PLC update with the rotation key replacing the old identity verification method with the new one. Submits to PLC.
+   - App proceeds with the original signup server URL (from `userHandle`) and tries to register there. If that server no longer accepts the user, prompts Sam to enter a server URL manually.
+   - Re-registration on the chosen server uses the rotation-key-signed proof of DID ownership.
+   - Result: Sam's DID is preserved, but contacts see a safety-number change and per-server state (group memberships, queued messages, the full server list) is lost. Sam can re-add other servers later as they remember them.
+
+10. If Sam has additional identities: Settings → Add an account → "Recover a different identity" → repeat steps 2–9 with the next passkey. Each recovery is independent — one passkey per identity, one Face ID prompt each.
 
 **Technical details:**
-- WebAuthn authentication with PRF extension. Same salt as during setup produces the same symmetric key.
-- Recovery blob downloaded via `GET /v1/recovery/{did}` (new endpoint, unauthenticated — the blob is opaque ciphertext, safe to serve publicly).
-- **Device replacement:** The old and new devices share the same identity key, so the server can't distinguish them by key alone. The rotation key — which only exists in the recovery blob, not on the device during normal operation — serves as proof of authority to replace the device. The app signs a replacement request with the rotation key, the server revokes the old device_id (invalidating its session tokens so it can no longer authenticate), and registers the new device_id. This is a new server endpoint: `POST /v1/devices/replace`, authenticated by rotation key signature rather than session token.
-- If the blob includes the full identity keypair: sessions continue seamlessly, no safety number change.
-- If the blob includes only the rotation key: Sam can sign a DID update to add a new signing key, but sessions reset and contacts see a safety number change. This is the fallback if blob updates fell behind.
-- After recovery, app re-authenticates to each homeserver via challenge-response with the restored identity key.
+- WebAuthn assertion uses the same PRF salt as signup and the same HKDF labels, so the resulting rotation key, identity key (where derived), and blob key are bit-identical to those derived at signup. The rotation key is never transmitted or stored on any server.
+- `userHandle` returned by the assertion is the original signup server URL bytes; the client uses it to reconstruct the genesis op without prompting.
+- Recovery blob downloaded via `GET /v1/recovery/{did}` (unauthenticated — the blob is opaque ciphertext, safe to serve publicly).
+- **Device replacement:** The rotation key (re-derived from the passkey, never on disk during normal operation) serves as proof of authority to replace the device. The app signs a replacement request with the rotation key, the server revokes the old device_id (invalidating its session tokens so it can no longer authenticate), and registers the new device_id. This is a server endpoint `POST /v1/devices/replace`, authenticated by rotation key signature rather than session token.
+- **Blob path** preserves session continuity and the full server list. No safety-number change.
+- **No-blob path** preserves the DID and the rotation key authority. Identity key changes (safety-number change) and server list is lost. This is the fallback path; the passkey alone is always sufficient to reach it.
+- After recovery, the app re-authenticates to each homeserver via challenge-response with the restored (or freshly generated) identity key.
 
 ---
 
@@ -152,11 +202,12 @@ Passkeys are never touched during normal use. They exist solely for recovery.
 
 | Secret | Where it lives | What it's for |
 |---|---|---|
-| DID rotation key (P-256) | Device (SQLCipher) + encrypted in recovery blob on server(s) | Signing DID operations (key rotation, recovery) |
-| Device identity key (Ed25519) | Device (SQLCipher) + encrypted in recovery blob | Signal protocol: session establishment, message encryption, server auth |
+| Passkey (or written-down recovery phrase) | 1Password / iCloud Keychain / hardware key / paper | Sole authority over the DID. Via HKDF labels `"actnet-rotation-v1"` and `"actnet-blob-v1"`, deterministically produces the rotation key and the blob-encryption key. |
+| Passkey `user.id` (userHandle) | Inside the passkey credential | Stores the original signup server URL. Returned during recovery assertion so the client can reconstruct the genesis op and derive the DID without prompting. |
+| DID rotation key (P-256) | Re-derived from passkey on demand; cached in device SQLCipher during a session | Signing DID operations (genesis, identity-key updates, device replacement). **Never stored on any server.** |
+| Device identity key (Ed25519) | Device (SQLCipher) + encrypted in recovery blob | Signal protocol: session establishment, message encryption, server auth. Generated randomly per device. |
 | Prekeys (signed, one-time, Kyber) | Public halves on server; private halves on device (SQLCipher) | Signal protocol: X3DH session initiation |
-| Passkey (P-256) | 1Password / iCloud Keychain / hardware key | Deriving the symmetric key that decrypts the recovery blob |
-| Recovery blob | Homeserver(s), encrypted | Contains rotation key + identity key + server list, decryptable only with passkey |
+| Recovery blob | Homeserver(s), encrypted | Contains identity key + server list + profile data. Convenience-only: losing every copy costs session continuity and the server list, not DID control. |
 | Session token | Device (memory/keychain) | Authenticating API requests to homeserver |
 
 

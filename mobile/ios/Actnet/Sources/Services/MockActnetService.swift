@@ -141,7 +141,7 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         false
     }
 
-    func updateRecoveryBlob(recoveryKey: Data, servers: [String]) throws {
+    func updateRecoveryBlob(prfOutput: Data, servers: [String]) throws {
         // Mock: no-op
     }
 
@@ -220,7 +220,7 @@ final class MockPreparedAccount: PreparedAccountProtocol, @unchecked Sendable {
 
 /// Mock service that creates fake accounts and seeds initial conversations.
 struct MockActnetService: ActnetService {
-    func createAccount(serverUrl: String, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol {
+    func createAccount(serverUrl: String, dbPath: String, dbKey: String, prfOutput: Data, displayName: String) throws -> any AppCoreProtocol {
         Thread.sleep(forTimeInterval: 0.5) // simulate network
         return MockAppCore(displayName: displayName)
     }
@@ -229,16 +229,16 @@ struct MockActnetService: ActnetService {
         MockAppCore()
     }
 
-    func prepareAccount(serverUrl: String) throws -> any PreparedAccountProtocol {
+    func prepareAccount(serverUrl: String, prfOutput: Data) throws -> any PreparedAccountProtocol {
         MockPreparedAccount()
     }
 
-    func finalizeAccount(prepared: any PreparedAccountProtocol, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol {
+    func finalizeAccount(prepared: any PreparedAccountProtocol, dbPath: String, dbKey: String, displayName: String) throws -> any AppCoreProtocol {
         Thread.sleep(forTimeInterval: 0.5)
         return MockAppCore(did: prepared.did(), displayName: displayName)
     }
 
-    func recoverFromBlob(serverUrl: String, did: String, recoveryKey: Data, dbPath: String, dbKey: String, displayName: String) throws -> any AppCoreProtocol {
+    func recoverFromBlob(serverUrl: String, did: String, prfOutput: Data, dbPath: String, dbKey: String, displayName: String) throws -> any AppCoreProtocol {
         Thread.sleep(forTimeInterval: 0.5)
         return MockAppCore(did: did, displayName: displayName)
     }

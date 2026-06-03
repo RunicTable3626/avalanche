@@ -3,7 +3,7 @@ import SwiftUI
 struct RecoveryConsoleView: View {
     @EnvironmentObject var appState: AppState
 
-    let recoveryKey: Data
+    let prfOutput: Data
     let did: String
 
     @State private var logLines: [String] = []
@@ -135,7 +135,7 @@ struct RecoveryConsoleView: View {
                 serverUrl: serverUrl,
                 serverName: serverUrl,
                 did: targetDid,
-                recoveryKey: recoveryKey,
+                prfOutput: prfOutput,
                 displayName: ""
             )
             log("[ok] Identity restored. Replacing device on home server...")

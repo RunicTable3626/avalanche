@@ -126,6 +126,7 @@ dependencies = [
  "bincode",
  "bs58",
  "crypto",
+ "hkdf",
  "libsignal-core",
  "libsignal-protocol",
  "net",

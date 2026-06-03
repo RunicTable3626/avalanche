@@ -71,15 +71,58 @@ pub struct PlcService {
     pub endpoint: String,
 }
 
-/// Build an unsigned genesis operation.
+/// Build an unsigned genesis operation **with no identity key**.
+///
+/// The genesis op intentionally omits `verification_methods` so the resulting
+/// DID is a function of only the rotation key + signup server URL. This is
+/// what makes the DID deterministically recoverable from the passkey alone
+/// (see `33-identity-auth-recovery.md`).
+///
+/// The identity key is added immediately afterward via
+/// [`build_identity_update_op`].
 ///
 /// - `rotation_key_pub`: compressed P-256 public key bytes
-/// - `identity_key_pub`: Ed25519 public key bytes (32 bytes, from libsignal)
 /// - `server_url`: the homeserver URL to list as the service endpoint
-pub fn build_genesis_op(
+pub fn build_genesis_op(rotation_key_pub: &[u8], server_url: &str) -> PlcOperation {
+    let rotation_did_key = did_key_p256(rotation_key_pub);
+
+    let mut services = BTreeMap::new();
+    services.insert(
+        "avalanche_homeserver".to_string(),
+        PlcService {
+            r#type: "AvalancheHomeserver".to_string(),
+            endpoint: server_url.to_string(),
+        },
+    );
+
+    PlcOperation {
+        r#type: "plc_operation".to_string(),
+        rotation_keys: vec![rotation_did_key],
+        verification_methods: BTreeMap::new(),
+        also_known_as: vec![],
+        services,
+        prev: None,
+        sig: None,
+    }
+}
+
+/// Build an unsigned PLC update operation that adds the device identity key
+/// as a verification method.
+///
+/// Submitted immediately after the genesis op at signup. The rotation keys
+/// and services carry over unchanged from the genesis state; only the
+/// `verification_methods` map gains the `avalanche` entry.
+///
+/// - `rotation_key_pub`: must match the genesis rotation key
+/// - `identity_key_pub`: Ed25519 public key bytes (32 bytes, from libsignal)
+/// - `server_url`: must match the genesis service endpoint
+/// - `prev_cid`: the CID of the genesis operation (base32-encoded SHA-256
+///   of the signed CBOR encoding, per PLC spec)
+pub fn build_identity_update_op(
     rotation_key_pub: &[u8],
     identity_key_pub: &[u8],
     server_url: &str,
+    prev_cid: &str,
 ) -> PlcOperation {
     let rotation_did_key = did_key_p256(rotation_key_pub);
     let identity_did_key = did_key_ed25519(identity_key_pub);
@@ -102,9 +145,22 @@ pub fn build_genesis_op(
         verification_methods,
         also_known_as: vec![],
         services,
-        prev: None,
+        prev: Some(prev_cid.to_string()),
         sig: None,
     }
+}
+
+/// Compute the CID for a signed PLC operation, used as the `prev` reference
+/// in the next op in the chain. Per PLC spec: base32(sha256(CBOR(signed_op))),
+/// no padding, lowercase.
+pub fn plc_op_cid(signed_op: &PlcOperation) -> Result<String, AppError> {
+    let cbor_bytes = serde_ipld_dagcbor::to_vec(signed_op)
+        .map_err(|e| AppError::Protocol(format!("DAG-CBOR encode failed: {e}")))?;
+    let hash = Sha256::digest(&cbor_bytes);
+    Ok(base32::encode(
+        base32::Alphabet::Rfc4648Lower { padding: false },
+        &hash,
+    ))
 }
 
 /// Sign a PLC operation with the rotation key.
@@ -156,10 +212,10 @@ pub fn derive_did(signed_op: &PlcOperation) -> Result<String, AppError> {
     Ok(format!("did:plc:{}", &encoded[..24]))
 }
 
-/// Submit a signed genesis operation to the PLC directory.
+/// Submit a signed PLC operation (genesis or update) to the PLC directory.
 ///
 /// POST `https://plc.directory/{did}` with the signed operation as JSON body.
-pub async fn submit_genesis(did: &str, signed_op: &PlcOperation) -> Result<(), AppError> {
+pub async fn submit_op(did: &str, signed_op: &PlcOperation) -> Result<(), AppError> {
     let url = format!("{PLC_DIRECTORY_URL}/{did}");
     let client = reqwest::Client::new();
     let resp = client
@@ -175,7 +231,7 @@ pub async fn submit_genesis(did: &str, signed_op: &PlcOperation) -> Result<(), A
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         Err(AppError::Protocol(format!(
-            "PLC directory rejected genesis op: {status} — {body}"
+            "PLC directory rejected op: {status} — {body}"
         )))
     }
 }
@@ -280,13 +336,14 @@ mod tests {
     #[test]
     fn genesis_op_round_trip() {
         let (priv_key, pub_key) = generate_rotation_key();
-        let identity_key = [1u8; 32]; // fake Ed25519 key
 
-        let op = build_genesis_op(&pub_key, &identity_key, "https://example.com");
+        let op = build_genesis_op(&pub_key, "https://example.com");
         assert_eq!(op.r#type, "plc_operation");
         assert!(op.prev.is_none());
         assert!(op.sig.is_none());
         assert_eq!(op.rotation_keys.len(), 1);
+        // Genesis intentionally has no identity key — added via update op.
+        assert!(op.verification_methods.is_empty());
 
         let signed = sign_plc_op(&op, &priv_key).unwrap();
         assert!(signed.sig.is_some());
@@ -304,9 +361,8 @@ mod tests {
     fn signature_is_valid() {
         use p256::ecdsa::{signature::Verifier, VerifyingKey};
 
-        let (priv_key, _pub_key) = generate_rotation_key();
-        let identity_key = [1u8; 32];
-        let op = build_genesis_op(&_pub_key, &identity_key, "https://example.com");
+        let (priv_key, pub_key) = generate_rotation_key();
+        let op = build_genesis_op(&pub_key, "https://example.com");
 
         let signed = sign_plc_op(&op, &priv_key).unwrap();
         let sig_bytes = BASE64_URL_SAFE_NO_PAD
@@ -314,7 +370,6 @@ mod tests {
             .unwrap();
         let signature = Signature::from_bytes((&sig_bytes[..]).into()).unwrap();
 
-        // Verify against unsigned DAG-CBOR
         let mut unsigned = op.clone();
         unsigned.sig = None;
         let cbor_bytes = serde_ipld_dagcbor::to_vec(&unsigned).unwrap();
@@ -322,5 +377,51 @@ mod tests {
         let signing_key = SigningKey::from_bytes((&priv_key[..]).into()).unwrap();
         let verifying_key = VerifyingKey::from(&signing_key);
         verifying_key.verify(&cbor_bytes, &signature).unwrap();
+    }
+
+    #[test]
+    fn identity_update_op_chains_to_genesis() {
+        let (priv_key, pub_key) = generate_rotation_key();
+        let identity_key = [9u8; 32];
+        let server = "https://example.com";
+
+        let genesis = build_genesis_op(&pub_key, server);
+        let signed_genesis = sign_plc_op(&genesis, &priv_key).unwrap();
+        let did = derive_did(&signed_genesis).unwrap();
+        let cid = plc_op_cid(&signed_genesis).unwrap();
+
+        let update = build_identity_update_op(&pub_key, &identity_key, server, &cid);
+        assert_eq!(update.prev.as_deref(), Some(cid.as_str()));
+        assert_eq!(update.verification_methods.len(), 1);
+        // Rotation keys and services carry over unchanged.
+        assert_eq!(update.rotation_keys, signed_genesis.rotation_keys);
+        assert_eq!(update.services.len(), 1);
+
+        let signed_update = sign_plc_op(&update, &priv_key).unwrap();
+        assert!(signed_update.sig.is_some());
+
+        // DID is fixed by genesis, unaffected by subsequent ops.
+        let did_after = derive_did(&signed_genesis).unwrap();
+        assert_eq!(did, did_after);
+    }
+
+    #[test]
+    fn did_is_deterministic_from_rotation_and_server() {
+        // Same rotation key + server URL → same DID. Load-bearing for the
+        // "recover the DID from passkey + signup server URL alone" property
+        // documented in 33-identity-auth-recovery.md. Relies on RFC 6979
+        // deterministic ECDSA, which is the p256 crate's default for `sign`.
+        let (priv_key, pub_key) = generate_rotation_key();
+        let server = "https://example.com";
+
+        let did1 = derive_did(
+            &sign_plc_op(&build_genesis_op(&pub_key, server), &priv_key).unwrap(),
+        )
+        .unwrap();
+        let did2 = derive_did(
+            &sign_plc_op(&build_genesis_op(&pub_key, server), &priv_key).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(did1, did2, "DID must be deterministic for recovery");
     }
 }

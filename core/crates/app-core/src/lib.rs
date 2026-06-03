@@ -418,9 +418,11 @@ impl AppCore {
 impl AppCore {
     /// Create a new account on the server.
     ///
-    /// `recovery_key` is a 32-byte symmetric key (from passkey PRF or recovery phrase).
-    /// If provided, a recovery blob is encrypted and uploaded to the server.
-    /// Pass an empty vec to skip recovery setup.
+    /// `prf_output` is the 32-byte WebAuthn PRF output from the just-completed
+    /// passkey ceremony. The rotation key and the recovery-blob key are both
+    /// derived from it via HKDF. Pass an empty vec for the no-passkey path
+    /// (random rotation key, no recovery blob — identity is unrecoverable on
+    /// device loss).
     ///
     /// `display_name` is the user's chosen display name. A profile key is
     /// generated, the name is encrypted under it, and the blob is uploaded
@@ -433,7 +435,7 @@ impl AppCore {
         server_url: String,
         db_path: String,
         db_key: String,
-        recovery_key: Vec<u8>,
+        prf_output: Vec<u8>,
         display_name: String,
     ) -> Result<Arc<Self>, AppErrorFfi> {
         let rt = ffi_runtime();
@@ -443,17 +445,9 @@ impl AppCore {
             &store::DatabaseKey::from_passphrase(db_key),
         )).map_err(AppError::from).map_err(AppErrorFfi::from)?;
 
-        let rk = if recovery_key.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&recovery_key);
-            Some(arr)
-        } else {
-            None
-        };
-
-        let prepared = PreparedAccountState::prepare(server_url, true)
+        let prepared = PreparedAccountState::prepare(server_url, &prf_output, true)
             .map_err(AppErrorFfi::from)?;
-        let inner = rt.block_on(Self::create_inner(prepared, store, Some(display_name), false, rk.as_ref()))
+        let inner = rt.block_on(Self::create_inner(prepared, store, Some(display_name), false))
             .map_err(AppErrorFfi::from)?;
 
         {
@@ -488,9 +482,9 @@ impl AppCore {
             &store::DatabaseKey::from_passphrase(db_key),
         )).map_err(AppError::from).map_err(AppErrorFfi::from)?;
 
-        let prepared = PreparedAccountState::prepare(server_url, false)
+        let prepared = PreparedAccountState::prepare(server_url, &[], false)
             .map_err(AppErrorFfi::from)?;
-        let inner = rt.block_on(Self::create_inner(prepared, store, Some(display_name), true, None))
+        let inner = rt.block_on(Self::create_inner(prepared, store, Some(display_name), true))
             .map_err(AppErrorFfi::from)?;
 
         let core = Arc::new(Self::build(inner));
@@ -500,10 +494,11 @@ impl AppCore {
 
     /// Finalize account registration using a previously prepared identity.
     ///
-    /// Use this when the passkey ceremony needs the DID up front: call
-    /// [`PreparedAccount::new`] first to compute the DID locally, register the
-    /// passkey with that DID, then call this to encrypt the recovery blob,
-    /// submit the PLC genesis op, and complete server registration.
+    /// Use this when the signup flow needs the DID up front: do the passkey
+    /// ceremony, call [`PreparedAccount::new`] with the PRF output to derive
+    /// the DID, then call this to submit the PLC ops, encrypt the recovery
+    /// blob (using the same passkey-derived key), and complete server
+    /// registration.
     ///
     /// The `prepared` handle is consumed (its inner state is moved out); a
     /// second call with the same handle returns an error.
@@ -512,7 +507,6 @@ impl AppCore {
         prepared: Arc<PreparedAccount>,
         db_path: String,
         db_key: String,
-        recovery_key: Vec<u8>,
         display_name: String,
     ) -> Result<Arc<Self>, AppErrorFfi> {
         let rt = ffi_runtime();
@@ -529,15 +523,7 @@ impl AppCore {
             &store::DatabaseKey::from_passphrase(db_key),
         )).map_err(AppError::from).map_err(AppErrorFfi::from)?;
 
-        let rk = if recovery_key.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&recovery_key);
-            Some(arr)
-        } else {
-            None
-        };
-
-        let inner = rt.block_on(Self::create_inner(state, store, Some(display_name), false, rk.as_ref()))
+        let inner = rt.block_on(Self::create_inner(state, store, Some(display_name), false))
             .map_err(AppErrorFfi::from)?;
 
         {
@@ -577,18 +563,21 @@ impl AppCore {
     pub fn recover_from_blob(
         server_url: String,
         did: String,
-        recovery_key: Vec<u8>,
+        prf_output: Vec<u8>,
         db_path: String,
         db_key: String,
         display_name: String,
     ) -> Result<Arc<Self>, AppErrorFfi> {
         let rt = ffi_runtime();
         rt.block_on(async move {
-            if recovery_key.len() != 32 {
-                return Err(AppError::Protocol("recovery_key must be 32 bytes".into()));
+            if prf_output.len() != 32 {
+                return Err(AppError::Protocol("prf_output must be 32 bytes".into()));
             }
-            let mut rk = [0u8; 32];
-            rk.copy_from_slice(&recovery_key);
+            // Derive both keys from the PRF: the rotation key (re-derived,
+            // never on any server) and the blob-encryption key.
+            let (rot_seed, blob_key) = recovery::derive_recovery_keys_from_prf(&prf_output);
+            let (rotation_key_private, rotation_key_public) =
+                recovery::derive_rotation_key_from_seed(&rot_seed);
 
             // Resolve the homeserver URL from PLC for did:plc: DIDs. The
             // caller-supplied `server_url` is used as a fallback for
@@ -611,27 +600,13 @@ impl AppCore {
 
             // Download the blob and the current device list (one unauthenticated call).
             let bundle = net::Client::new(&bootstrap_server).get_recovery_blob(&did).await?;
-            let plaintext = recovery::decrypt_recovery_blob(&bundle.blob, &rk)?;
+            let plaintext = recovery::decrypt_recovery_blob(&bundle.blob, &blob_key)?;
 
             // Restore identity keypair.
             let identity_bytes = BASE64_STANDARD
                 .decode(&plaintext.identity_keypair)
                 .map_err(|_| AppError::Protocol("invalid base64 identity in blob".into()))?;
             let identity = crypto::IdentityKeyPair::deserialize(&identity_bytes)?;
-
-            // Restore rotation key (private), re-derive the public half.
-            let rotation_key_private = BASE64_STANDARD
-                .decode(&plaintext.rotation_key)
-                .map_err(|_| AppError::Protocol("invalid base64 rotation key in blob".into()))?;
-            let rotation_signing = p256::ecdsa::SigningKey::from_bytes(
-                (&rotation_key_private[..]).into(),
-            )
-            .map_err(|e| AppError::Protocol(format!("invalid rotation private key: {e}")))?;
-            let rotation_key_public = rotation_signing
-                .verifying_key()
-                .to_encoded_point(true)
-                .as_bytes()
-                .to_vec();
 
             // Pick the server we'll talk to (and that AppCore will be bound to).
             // Prefer the blob's server list; if empty, reuse the bootstrap
@@ -1214,29 +1189,26 @@ impl AppCore {
     }
 
     /// Update the recovery blob on the server (e.g. after joining a new server).
-    /// `recovery_key` is the 32-byte symmetric key from passkey PRF.
+    /// `prf_output` is the 32-byte WebAuthn PRF output; the blob-encryption
+    /// key is derived from it via HKDF.
     /// `servers` is the updated list of homeserver URLs.
     pub fn update_recovery_blob(
         &self,
-        recovery_key: Vec<u8>,
+        prf_output: Vec<u8>,
         servers: Vec<String>,
     ) -> Result<(), AppErrorFfi> {
         ffi_runtime().block_on(async {
-            if recovery_key.len() != 32 {
-                return Err(AppError::Protocol("recovery_key must be 32 bytes".into()));
+            if prf_output.len() != 32 {
+                return Err(AppError::Protocol("prf_output must be 32 bytes".into()));
             }
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&recovery_key);
+            let (_, key) = recovery::derive_recovery_keys_from_prf(&prf_output);
 
             let inner = self.inner.lock().await;
             let identity = inner.store.load_identity().await?
                 .ok_or(AppError::NoAccount)?;
-            let rotation = inner.store.load_rotation_key().await?
-                .ok_or(AppError::Protocol("no rotation key in store".into()))?;
             let own_profile = inner.store.load_own_profile().await?;
 
             let plaintext = recovery::build_recovery_plaintext(
-                &rotation.0,
                 &identity.serialize(),
                 &servers,
                 own_profile.as_ref().map(|p| p.profile_key.as_slice()).unwrap_or(&[]),
@@ -1421,26 +1393,49 @@ pub fn resolve_homeserver_from_plc(did: String) -> Result<String, AppErrorFfi> {
 
 /// Download and decrypt a recovery blob from a homeserver (unauthenticated).
 /// `server_url` is the homeserver URL, `did` is the DID to look up,
-/// `recovery_key` is the 32-byte symmetric key from passkey PRF or phrase.
-/// Returns the decrypted server list from the blob.
+/// `prf_output` is the 32-byte WebAuthn PRF output; the blob-encryption key
+/// is derived from it via HKDF. Returns the decrypted server list from the
+/// blob.
 #[uniffi::export]
 pub fn download_recovery_blob(
     server_url: String,
     did: String,
-    recovery_key: Vec<u8>,
+    prf_output: Vec<u8>,
 ) -> Result<Vec<String>, AppErrorFfi> {
     ffi_runtime().block_on(async {
-        if recovery_key.len() != 32 {
-            return Err(AppError::Protocol("recovery_key must be 32 bytes".into()));
+        if prf_output.len() != 32 {
+            return Err(AppError::Protocol("prf_output must be 32 bytes".into()));
         }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&recovery_key);
+        let (_, key) = recovery::derive_recovery_keys_from_prf(&prf_output);
 
         let client = net::Client::new(&server_url);
         let bundle = client.get_recovery_blob(&did).await?;
         let plaintext = recovery::decrypt_recovery_blob(&bundle.blob, &key)?;
         Ok(plaintext.servers)
     }).map_err(AppErrorFfi::from)
+}
+
+/// Derive the rotation-key public bytes + DID that a given PRF output and
+/// signup server URL would produce. Used by recovery flows that need to
+/// know the DID before fetching anything — particularly when the user's
+/// blob has been lost and the home server is unreachable: the passkey +
+/// the original signup server URL (stored in the WebAuthn userHandle) is
+/// enough to recompute the DID.
+#[uniffi::export]
+pub fn derive_did_from_passkey(
+    prf_output: Vec<u8>,
+    signup_server_url: String,
+) -> Result<String, AppErrorFfi> {
+    if prf_output.len() != 32 {
+        return Err(AppErrorFfi::from(AppError::Protocol(
+            "prf_output must be 32 bytes".into(),
+        )));
+    }
+    let (rot_seed, _) = recovery::derive_recovery_keys_from_prf(&prf_output);
+    let (rot_priv, rot_pub) = recovery::derive_rotation_key_from_seed(&rot_seed);
+    let genesis = plc::build_genesis_op(&rot_pub, &signup_server_url);
+    let signed = plc::sign_plc_op(&genesis, &rot_priv).map_err(AppErrorFfi::from)?;
+    plc::derive_did(&signed).map_err(AppErrorFfi::from)
 }
 
 /// Decoded invite token info returned to the mobile layer.
@@ -1536,35 +1531,78 @@ impl AppCore {
 
 // ── Prepared account state ──────────────────────────────────────────────────
 
-/// Pre-computed identity material whose DID can be known *before* server
-/// registration — useful when the passkey ceremony needs to write the DID
-/// into the credential's user handle. PLC submission is deferred to
-/// [`AppCore::finalize_account`] so that a cancelled passkey ceremony does
-/// not leave a stranded DID in the directory.
+/// Pre-computed identity material with both PLC ops already signed.
+///
+/// The rotation key is derived from the user's passkey PRF output (or
+/// random in the no-passkey path). The genesis op binds the DID to
+/// `(rotation_pub, server_url)` only — the identity key is added in a
+/// chained update op. Both ops are signed up front and submitted by
+/// [`AppCore::finalize_account`].
+///
+/// The `blob_key` (when present) is also derived from the PRF and used to
+/// encrypt the recovery blob during finalize, without needing iOS to pass
+/// the blob key separately.
 struct PreparedAccountState {
     server_url: String,
     identity: crypto::IdentityKeyPair,
     rotation_key_private: Vec<u8>,
     rotation_key_public: Vec<u8>,
-    /// Some when we're using the PLC directory (the signed genesis op is
-    /// submitted during finalize); None for the bot/test path.
+    /// Some when we're using the PLC directory; submitted during finalize.
     signed_genesis: Option<plc::PlcOperation>,
+    /// Identity-key update op chained to the genesis op. Submitted right
+    /// after genesis at finalize time so the DID document has a verification
+    /// method as soon as it's resolvable.
+    signed_identity_update: Option<plc::PlcOperation>,
     did: Option<String>,
+    /// 32-byte AES-GCM key for the recovery blob, derived from the PRF via
+    /// HKDF label `"actnet-blob-v1"`. `None` when the user skipped passkey
+    /// creation (no recovery blob is written in that case).
+    blob_key: Option<[u8; 32]>,
 }
 
 impl PreparedAccountState {
-    fn prepare(server_url: String, use_plc_directory: bool) -> Result<Self, AppError> {
+    /// Build prepared state.
+    ///
+    /// - `prf_output`: 32-byte WebAuthn PRF output. Empty/wrong-length =
+    ///   no-passkey path: random rotation key, no blob key, identity is
+    ///   unrecoverable on device loss.
+    /// - `use_plc_directory`: when `false`, no PLC ops are built; the
+    ///   account uses a server-assigned DID (bot/test path).
+    fn prepare(
+        server_url: String,
+        prf_output: &[u8],
+        use_plc_directory: bool,
+    ) -> Result<Self, AppError> {
         let identity = crypto::IdentityKeyPair::generate();
-        let (rot_priv, rot_pub) = recovery::generate_rotation_key();
 
-        let (signed_genesis, did) = if use_plc_directory {
-            let identity_pub_bytes = identity.public_key().serialize();
-            let genesis_op = plc::build_genesis_op(&rot_pub, &identity_pub_bytes, &server_url);
-            let signed = plc::sign_plc_op(&genesis_op, &rot_priv)?;
-            let did = plc::derive_did(&signed)?;
-            (Some(signed), Some(did))
+        // Derive rotation key from PRF if available, else random.
+        let (rot_priv, rot_pub, blob_key) = if prf_output.len() == 32 {
+            let (rot_seed, blob_key) = recovery::derive_recovery_keys_from_prf(prf_output);
+            let (priv_bytes, pub_bytes) = recovery::derive_rotation_key_from_seed(&rot_seed);
+            (priv_bytes, pub_bytes, Some(blob_key))
         } else {
-            (None, None)
+            let (priv_bytes, pub_bytes) = recovery::generate_rotation_key();
+            (priv_bytes, pub_bytes, None)
+        };
+
+        let (signed_genesis, signed_identity_update, did) = if use_plc_directory {
+            let genesis_op = plc::build_genesis_op(&rot_pub, &server_url);
+            let signed_genesis = plc::sign_plc_op(&genesis_op, &rot_priv)?;
+            let did = plc::derive_did(&signed_genesis)?;
+            let genesis_cid = plc::plc_op_cid(&signed_genesis)?;
+
+            let identity_pub_bytes = identity.public_key().serialize();
+            let identity_update_op = plc::build_identity_update_op(
+                &rot_pub,
+                &identity_pub_bytes,
+                &server_url,
+                &genesis_cid,
+            );
+            let signed_identity_update = plc::sign_plc_op(&identity_update_op, &rot_priv)?;
+
+            (Some(signed_genesis), Some(signed_identity_update), Some(did))
+        } else {
+            (None, None, None)
         };
 
         Ok(Self {
@@ -1573,7 +1611,9 @@ impl PreparedAccountState {
             rotation_key_private: rot_priv,
             rotation_key_public: rot_pub,
             signed_genesis,
+            signed_identity_update,
             did,
+            blob_key,
         })
     }
 }
@@ -1588,11 +1628,17 @@ pub struct PreparedAccount {
 #[uniffi::export]
 impl PreparedAccount {
     /// Generate identity + rotation keys and derive the DID locally.
-    /// Does **not** submit the PLC genesis op or contact the home server —
-    /// those happen in [`AppCore::finalize_account`].
+    ///
+    /// `prf_output` is the 32-byte WebAuthn PRF output from the just-completed
+    /// passkey ceremony. Pass an empty vec for the no-passkey path; the
+    /// rotation key is then random and the identity is unrecoverable on
+    /// device loss.
+    ///
+    /// Does **not** submit the PLC ops or contact the home server — those
+    /// happen in [`AppCore::finalize_account`].
     #[uniffi::constructor]
-    pub fn new(server_url: String) -> Result<Arc<Self>, AppErrorFfi> {
-        let state = PreparedAccountState::prepare(server_url, true)
+    pub fn new(server_url: String, prf_output: Vec<u8>) -> Result<Arc<Self>, AppErrorFfi> {
+        let state = PreparedAccountState::prepare(server_url, &prf_output, true)
             .map_err(AppErrorFfi::from)?;
         Ok(Arc::new(Self {
             state: Mutex::new(Some(state)),
@@ -1618,7 +1664,6 @@ impl AppCore {
         store: store::Store,
         display_name: Option<String>,
         is_bot: bool,
-        recovery_key: Option<&[u8; 32]>,
     ) -> Result<AppCoreInner, AppError> {
         let PreparedAccountState {
             server_url,
@@ -1626,7 +1671,9 @@ impl AppCore {
             rotation_key_private,
             rotation_key_public,
             signed_genesis,
+            signed_identity_update,
             did: client_did,
+            blob_key,
         } = prepared;
         let server_url = server_url.as_str();
 
@@ -1640,9 +1687,13 @@ impl AppCore {
             .map(|id| crypto::prekeys::generate_kyber_prekey(&identity, id))
             .collect::<Result<_, _>>()?;
 
-        // Submit the deferred PLC genesis op (if any) — we already have the DID.
+        // Submit the deferred PLC ops (if any). Genesis fixes the DID; the
+        // identity-key update immediately adds our device verification method.
         if let (Some(signed_op), Some(did)) = (signed_genesis.as_ref(), client_did.as_ref()) {
-            plc::submit_genesis(did, signed_op).await?;
+            plc::submit_op(did, signed_op).await?;
+            if let Some(update_op) = signed_identity_update.as_ref() {
+                plc::submit_op(did, update_op).await?;
+            }
         }
 
         // Generate profile key + encrypt the display name for human accounts.
@@ -1666,10 +1717,9 @@ impl AppCore {
                 (None, None, None)
             };
 
-        // Build and encrypt recovery blob if a recovery key is provided.
-        let recovery_blob = if let Some(key) = recovery_key {
+        // Build and encrypt recovery blob if we have a passkey-derived key.
+        let recovery_blob = if let Some(key) = blob_key.as_ref() {
             let plaintext = recovery::build_recovery_plaintext(
-                &rotation_key_private,
                 &identity.serialize(),
                 &[server_url.to_string()],
                 profile_key.as_ref().map(|k| k.as_slice()).unwrap_or(&[]),
@@ -1820,8 +1870,8 @@ impl AppCore {
         display_name: Option<String>,
         is_bot: bool,
     ) -> Result<Self, AppError> {
-        let prepared = PreparedAccountState::prepare(server_url.to_string(), false)?;
-        let inner = Self::create_inner(prepared, store, display_name, is_bot, None).await?;
+        let prepared = PreparedAccountState::prepare(server_url.to_string(), &[], false)?;
+        let inner = Self::create_inner(prepared, store, display_name, is_bot).await?;
         Ok(Self::build(inner))
     }
 

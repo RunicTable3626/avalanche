@@ -279,9 +279,10 @@ final class AppState: ObservableObject {
             .appendingPathComponent("actnet", isDirectory: true)
     }
 
-    /// Create a new account. `recoveryKey` is a 32-byte symmetric key from
-    /// passkey PRF or recovery phrase. Pass empty Data to skip recovery setup.
-    func createAccount(serverUrl: String, serverName: String, displayName: String, recoveryKey: Data = Data()) async throws {
+    /// Create a new account. `prfOutput` is the raw 32-byte WebAuthn PRF
+    /// output from the just-completed passkey ceremony (or the hash of a
+    /// recovery phrase). Pass empty Data to skip recovery setup.
+    func createAccount(serverUrl: String, serverName: String, displayName: String, prfOutput: Data = Data()) async throws {
         let dir = dbDir
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -290,64 +291,37 @@ final class AppState: ObservableObject {
         let dbKey = try SecureEnclaveKeyManager.dbPassphrase()
 
         let svc = _service
-        let rk = recoveryKey
+        let prf = prfOutput
         let dn = displayName
         let core = try await Task.detached {
-            try svc.createAccount(serverUrl: serverUrl, dbPath: dbPath, dbKey: dbKey, recoveryKey: rk, displayName: dn)
+            try svc.createAccount(serverUrl: serverUrl, dbPath: dbPath, dbKey: dbKey, prfOutput: prf, displayName: dn)
         }.value
 
         try await finishAccountRegistration(core: core, serverUrl: serverUrl, serverName: serverName, displayName: displayName, dbFilename: dbFilename)
     }
 
-    /// Prepare a fresh identity (Stage 1 of the passkey flow). The returned
-    /// `PreparedAccountProtocol` exposes the DID derived from the new keys,
-    /// which the caller writes into the passkey's user handle before
-    /// completing registration via `finalizePreparedAccount`.
-    func prepareAccount(serverUrl: String) async throws -> any PreparedAccountProtocol {
+    /// Prepare a fresh identity (Stage 1 of the passkey signup flow).
+    ///
+    /// Call this *after* the WebAuthn passkey ceremony, with the raw 32-byte
+    /// PRF output. Rust derives the rotation key from the PRF, builds the
+    /// genesis + identity-update PLC ops, and produces the final DID — which
+    /// is then exposed via `PreparedAccountProtocol.did()`.
+    func prepareAccount(serverUrl: String, prfOutput: Data) async throws -> any PreparedAccountProtocol {
         let svc = _service
+        let prf = prfOutput
         return try await Task.detached {
-            try svc.prepareAccount(serverUrl: serverUrl)
+            try svc.prepareAccount(serverUrl: serverUrl, prfOutput: prf)
         }.value
     }
 
     /// Finalize an account previously created by `prepareAccount` (Stage 2 of
-    /// the passkey flow). Submits the PLC genesis op and registers with the
-    /// server using the prepared keys.
+    /// the passkey flow). Submits the PLC ops, encrypts the recovery blob
+    /// using the same passkey-derived key carried inside `prepared`, and
+    /// registers with the server.
     func finalizePreparedAccount(
         prepared: any PreparedAccountProtocol,
         serverUrl: String,
         serverName: String,
-        displayName: String,
-        recoveryKey: Data
-    ) async throws {
-        let dir = dbDir
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        let dbFilename = "account-\(UUID().uuidString.prefix(8)).db"
-        let dbPath = dir.appendingPathComponent(dbFilename).path
-        let dbKey = try SecureEnclaveKeyManager.dbPassphrase()
-
-        let svc = _service
-        let rk = recoveryKey
-        let dn = displayName
-        let core = try await Task.detached {
-            try svc.finalizeAccount(prepared: prepared, dbPath: dbPath, dbKey: dbKey, recoveryKey: rk, displayName: dn)
-        }.value
-
-        try await finishAccountRegistration(core: core, serverUrl: serverUrl, serverName: serverName, displayName: displayName, dbFilename: dbFilename)
-    }
-
-    /// Recover an account from a passkey-protected recovery blob. Downloads
-    /// the blob from `serverUrl` keyed by `did`, decrypts with `recoveryKey`,
-    /// replaces the device on the home server, and signs the user in.
-    ///
-    /// `displayName` may be empty — the recovered account will appear in the
-    /// account list with a placeholder until the user updates it from Settings.
-    func recoverAccount(
-        serverUrl: String,
-        serverName: String,
-        did: String,
-        recoveryKey: Data,
         displayName: String
     ) async throws {
         let dir = dbDir
@@ -358,13 +332,43 @@ final class AppState: ObservableObject {
         let dbKey = try SecureEnclaveKeyManager.dbPassphrase()
 
         let svc = _service
-        let rk = recoveryKey
+        let dn = displayName
+        let core = try await Task.detached {
+            try svc.finalizeAccount(prepared: prepared, dbPath: dbPath, dbKey: dbKey, displayName: dn)
+        }.value
+
+        try await finishAccountRegistration(core: core, serverUrl: serverUrl, serverName: serverName, displayName: displayName, dbFilename: dbFilename)
+    }
+
+    /// Recover an account from a passkey-protected recovery blob. Downloads
+    /// the blob from `serverUrl` keyed by `did`, decrypts with the
+    /// PRF-derived blob key (Rust handles the derivation), replaces the
+    /// device on the home server, and signs the user in.
+    ///
+    /// `displayName` may be empty — the recovered account will appear in the
+    /// account list with a placeholder until the user updates it from Settings.
+    func recoverAccount(
+        serverUrl: String,
+        serverName: String,
+        did: String,
+        prfOutput: Data,
+        displayName: String
+    ) async throws {
+        let dir = dbDir
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let dbFilename = "account-\(UUID().uuidString.prefix(8)).db"
+        let dbPath = dir.appendingPathComponent(dbFilename).path
+        let dbKey = try SecureEnclaveKeyManager.dbPassphrase()
+
+        let svc = _service
+        let prf = prfOutput
         let recoveryDid = did
         let core = try await Task.detached {
             try svc.recoverFromBlob(
                 serverUrl: serverUrl,
                 did: recoveryDid,
-                recoveryKey: rk,
+                prfOutput: prf,
                 dbPath: dbPath,
                 dbKey: dbKey,
                 displayName: displayName

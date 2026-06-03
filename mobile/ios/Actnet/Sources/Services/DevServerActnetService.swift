@@ -4,27 +4,27 @@ import Foundation
 struct DevServerActnetService: ActnetService {
     static let defaultServerUrl = "http://localhost:3000"
 
-    func createAccount(serverUrl: String, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol {
-        try AppCore.createAccount(serverUrl: serverUrl, dbPath: dbPath, dbKey: dbKey, recoveryKey: recoveryKey, displayName: displayName)
+    func createAccount(serverUrl: String, dbPath: String, dbKey: String, prfOutput: Data, displayName: String) throws -> any AppCoreProtocol {
+        try AppCore.createAccount(serverUrl: serverUrl, dbPath: dbPath, dbKey: dbKey, prfOutput: prfOutput, displayName: displayName)
     }
 
     func login(dbPath: String, dbKey: String) throws -> any AppCoreProtocol {
         try AppCore.login(dbPath: dbPath, dbKey: dbKey)
     }
 
-    func prepareAccount(serverUrl: String) throws -> any PreparedAccountProtocol {
-        try PreparedAccount(serverUrl: serverUrl)
+    func prepareAccount(serverUrl: String, prfOutput: Data) throws -> any PreparedAccountProtocol {
+        try PreparedAccount(serverUrl: serverUrl, prfOutput: prfOutput)
     }
 
-    func finalizeAccount(prepared: any PreparedAccountProtocol, dbPath: String, dbKey: String, recoveryKey: Data, displayName: String) throws -> any AppCoreProtocol {
+    func finalizeAccount(prepared: any PreparedAccountProtocol, dbPath: String, dbKey: String, displayName: String) throws -> any AppCoreProtocol {
         guard let concrete = prepared as? PreparedAccount else {
             throw ActnetServiceError.preparedAccountTypeMismatch
         }
-        return try AppCore.finalizeAccount(prepared: concrete, dbPath: dbPath, dbKey: dbKey, recoveryKey: recoveryKey, displayName: displayName)
+        return try AppCore.finalizeAccount(prepared: concrete, dbPath: dbPath, dbKey: dbKey, displayName: displayName)
     }
 
-    func recoverFromBlob(serverUrl: String, did: String, recoveryKey: Data, dbPath: String, dbKey: String, displayName: String) throws -> any AppCoreProtocol {
-        try AppCore.recoverFromBlob(serverUrl: serverUrl, did: did, recoveryKey: recoveryKey, dbPath: dbPath, dbKey: dbKey, displayName: displayName)
+    func recoverFromBlob(serverUrl: String, did: String, prfOutput: Data, dbPath: String, dbKey: String, displayName: String) throws -> any AppCoreProtocol {
+        try AppCore.recoverFromBlob(serverUrl: serverUrl, did: did, prfOutput: prfOutput, dbPath: dbPath, dbKey: dbKey, displayName: displayName)
     }
 }
 

@@ -37,6 +37,7 @@
 
 pub mod account;
 pub mod contacts;
+pub mod conversations;
 pub mod db;
 pub mod error;
 pub mod groups;

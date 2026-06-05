@@ -416,6 +416,19 @@ impl AppCoreInner {
                                 }
                             }
                         }
+                        Some(Body::TimerChange(timer)) => {
+                            // Silent control message — update local expiry setting,
+                            // no visible chat event surfaced.
+                            let expiry = if timer.expiry_secs > 0 {
+                                Some(timer.expiry_secs)
+                            } else {
+                                None
+                            };
+                            let _ = self
+                                .store
+                                .save_conversation_expiry(&raw.sender_did, expiry)
+                                .await;
+                        }
                         None => {
                             // ContentMessage with no body — backward compat.
                             decrypted.push(raw);
@@ -671,6 +684,19 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
                     tracing::warn!("[groups] failed to decrypt GroupMessage: {e}");
                 }
             }
+        }
+        Some(Body::TimerChange(timer)) => {
+            // Silent control message — update local expiry setting, no chat event.
+            let expiry = if timer.expiry_secs > 0 {
+                Some(timer.expiry_secs)
+            } else {
+                None
+            };
+            let inner = core.inner.lock().await;
+            let _ = inner
+                .store
+                .save_conversation_expiry(&decrypted.sender_did, expiry)
+                .await;
         }
         None => {
             // ContentMessage with no body — emit as raw bytes (backward compat).

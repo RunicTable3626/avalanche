@@ -29,15 +29,19 @@ impl Store {
         let cid = conversation_id.to_string();
         self.conn
             .call(move |conn| {
-                let val: Option<i64> = conn
+                // get::<_, Option<i64>> handles SQL NULL correctly.
+                let row: Option<Option<i64>> = conn
                     .query_row(
                         "SELECT expiry_secs FROM conversation_settings \
                          WHERE conversation_id = ?1",
                         rusqlite::params![cid],
-                        |row| row.get(0),
+                        |row| row.get::<_, Option<i64>>(0),
                     )
                     .optional()?;
-                Ok(val.and_then(|v| if v > 0 { Some(v as u32) } else { None }))
+                // None     → no row     → no timer set
+                // Some(None) → NULL column → no timer set
+                // Some(Some(v)) → v > 0 is a timer; v = 0 means "disabled"
+                Ok(row.flatten().and_then(|v| if v > 0 { Some(v as u32) } else { None }))
             })
             .await
             .map_err(StoreError::Db)

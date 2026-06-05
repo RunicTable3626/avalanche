@@ -103,9 +103,9 @@ async fn load_conversations_one_row_per_convo_newest_first() {
     let convs = store.load_conversations().await.unwrap();
     assert_eq!(convs.len(), 2, "one row per distinct conversation_id");
     assert_eq!(convs[0].conversation_id, "convA");
-    assert_eq!(convs[0].last_message.body, "newest A");
+    assert_eq!(convs[0].last_message.as_ref().unwrap().body, "newest A");
     assert_eq!(convs[1].conversation_id, "convB");
-    assert_eq!(convs[1].last_message.body, "only B");
+    assert_eq!(convs[1].last_message.as_ref().unwrap().body, "only B");
 }
 
 #[tokio::test]
@@ -141,4 +141,57 @@ async fn contact_profile_cache() {
     let loaded = store.load_contact_profile(did).await.unwrap().unwrap();
     assert_eq!(loaded.display_name, "Bob (renamed)");
     assert_eq!(loaded.fetched_at, Timestamp(2000));
+}
+
+// ── conversation_settings ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn conversation_expiry_missing_returns_none() {
+    let store = Store::open_in_memory().await.unwrap();
+    let result = store.load_conversation_expiry("did:example:alice").await.unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn conversation_expiry_round_trip() {
+    let store = Store::open_in_memory().await.unwrap();
+    store.save_conversation_expiry("did:example:alice", Some(3600)).await.unwrap();
+    let loaded = store.load_conversation_expiry("did:example:alice").await.unwrap();
+    assert_eq!(loaded, Some(3600));
+}
+
+#[tokio::test]
+async fn conversation_expiry_zero_treated_as_none() {
+    let store = Store::open_in_memory().await.unwrap();
+    // Explicit zero means "no expiry"; load returns None.
+    store.save_conversation_expiry("did:example:alice", Some(0)).await.unwrap();
+    let loaded = store.load_conversation_expiry("did:example:alice").await.unwrap();
+    assert!(loaded.is_none());
+}
+
+#[tokio::test]
+async fn conversation_expiry_none_clears_value() {
+    let store = Store::open_in_memory().await.unwrap();
+    store.save_conversation_expiry("did:example:alice", Some(86400)).await.unwrap();
+    store.save_conversation_expiry("did:example:alice", None).await.unwrap();
+    let loaded = store.load_conversation_expiry("did:example:alice").await.unwrap();
+    assert!(loaded.is_none());
+}
+
+#[tokio::test]
+async fn conversation_expiry_overwrite() {
+    let store = Store::open_in_memory().await.unwrap();
+    store.save_conversation_expiry("did:example:alice", Some(3600)).await.unwrap();
+    store.save_conversation_expiry("did:example:alice", Some(604800)).await.unwrap();
+    let loaded = store.load_conversation_expiry("did:example:alice").await.unwrap();
+    assert_eq!(loaded, Some(604800));
+}
+
+#[tokio::test]
+async fn conversation_expiry_independent_per_conversation() {
+    let store = Store::open_in_memory().await.unwrap();
+    store.save_conversation_expiry("did:example:alice", Some(3600)).await.unwrap();
+    store.save_conversation_expiry("did:example:bob", Some(86400)).await.unwrap();
+    assert_eq!(store.load_conversation_expiry("did:example:alice").await.unwrap(), Some(3600));
+    assert_eq!(store.load_conversation_expiry("did:example:bob").await.unwrap(), Some(86400));
 }

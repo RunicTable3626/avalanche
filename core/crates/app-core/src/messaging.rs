@@ -704,3 +704,41 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prost::Message as _;
+
+    use crate::proto::{content_message::Body, ContentMessage, TimerChangeMessage};
+
+    #[test]
+    fn timer_change_proto_round_trip() {
+        let msg = ContentMessage {
+            body: Some(Body::TimerChange(TimerChangeMessage { expiry_secs: 3600 })),
+            timestamp_ms: 0,
+            profile_key: vec![],
+        };
+        let encoded = msg.encode_to_vec();
+        let decoded = ContentMessage::decode(encoded.as_slice()).unwrap();
+        match decoded.body {
+            Some(Body::TimerChange(t)) => assert_eq!(t.expiry_secs, 3600),
+            other => panic!("unexpected body: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timer_change_zero_encodes_correctly() {
+        // expiry_secs = 0 means "disable"; it must survive the proto round-trip
+        // so the receiver can distinguish "set to 0" from "field absent".
+        let msg = ContentMessage {
+            body: Some(Body::TimerChange(TimerChangeMessage { expiry_secs: 0 })),
+            timestamp_ms: 0,
+            profile_key: vec![],
+        };
+        let decoded = ContentMessage::decode(msg.encode_to_vec().as_slice()).unwrap();
+        match decoded.body {
+            Some(Body::TimerChange(t)) => assert_eq!(t.expiry_secs, 0),
+            other => panic!("unexpected body: {other:?}"),
+        }
+    }
+}

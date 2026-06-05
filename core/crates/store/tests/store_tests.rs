@@ -103,9 +103,9 @@ async fn load_conversations_one_row_per_convo_newest_first() {
     let convs = store.load_conversations().await.unwrap();
     assert_eq!(convs.len(), 2, "one row per distinct conversation_id");
     assert_eq!(convs[0].conversation_id, "convA");
-    assert_eq!(convs[0].last_message.body, "newest A");
+    assert_eq!(convs[0].last_message.unwrap().body, "newest A");
     assert_eq!(convs[1].conversation_id, "convB");
-    assert_eq!(convs[1].last_message.body, "only B");
+    assert_eq!(convs[1].last_message.unwrap().body, "only B");
 }
 
 #[tokio::test]

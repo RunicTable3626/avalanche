@@ -9,9 +9,10 @@ use axum::{
 };
 use base64::prelude::*;
 use crypto::groups::{
-    AuthCredentialWithPniZkcResponse, GroupKey, RedemptionTime, ServerSecretParams,
+    did_to_uuid, AuthCredentialWithPniZkcResponse, GroupKey, RedemptionTime, ServerSecretParams,
 };
 use crypto::sender_cert::SenderCertChain;
+use libsignal_core::{Aci, Pni};
 // `B64` is what every group endpoint speaks (URL-safe, no padding). `BASE64_STANDARD`
 // stays in scope for the registration body helpers below, which talk to the
 // non-group endpoints that still use standard base64.
@@ -232,7 +233,10 @@ async fn make_member(app: &axum::Router) -> Member {
         &B64.decode(server_public_b64).unwrap(),
     )
     .unwrap();
-    let credential = response.receive(&did, today(), &server_public).unwrap();
+    let uuid = did_to_uuid(&did);
+    let credential = response
+        .receive(Aci::from(uuid), Pni::from(uuid), today(), server_public.zkgroup())
+        .unwrap();
     Member {
         did,
         session_token,
@@ -249,7 +253,7 @@ fn presentation_header(
 ) -> String {
     let mut r = [0u8; zkcredential::RANDOMNESS_LEN];
     rand::rngs::OsRng.try_fill_bytes(&mut r).unwrap();
-    let presentation = cred.present(public_params, group, r);
+    let presentation = cred.present(public_params.zkgroup(), group.zkgroup_secret(), r);
     B64.encode(bincode::serialize(&presentation).unwrap())
 }
 
@@ -258,9 +262,18 @@ fn emi_for(group: &GroupKey, did: &str) -> String {
     let r = [0u8; zkcredential::RANDOMNESS_LEN];
     let server = ServerSecretParams::generate();
     let public = server.public_params();
-    let response = AuthCredentialWithPniZkcResponse::issue_credential(did, today(), &server, r);
-    let cred = response.receive(did, today(), &public).unwrap();
-    let presentation = cred.present(&public, group, r);
+    let uuid = did_to_uuid(did);
+    let response = AuthCredentialWithPniZkcResponse::issue_credential(
+        Aci::from(uuid),
+        Pni::from(uuid),
+        today(),
+        server.zkgroup(),
+        r,
+    );
+    let cred = response
+        .receive(Aci::from(uuid), Pni::from(uuid), today(), public.zkgroup())
+        .unwrap();
+    let presentation = cred.present(public.zkgroup(), group.zkgroup_secret(), r);
     B64.encode(presentation.encrypted_member_id().to_bytes())
 }
 

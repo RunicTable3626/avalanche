@@ -274,7 +274,7 @@ fn emi_for(group: &GroupKey, did: &str) -> String {
         .receive(Aci::from(uuid), Pni::from(uuid), today(), public.zkgroup())
         .unwrap();
     let presentation = cred.present(public.zkgroup(), group.zkgroup_secret(), r);
-    B64.encode(presentation.encrypted_member_id().to_bytes())
+    B64.encode(zkgroup::serialize(&presentation.aci_ciphertext()))
 }
 
 fn default_policy() -> Value {

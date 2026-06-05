@@ -22,6 +22,7 @@ use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
 use crypto::groups::ServerSecretParams;
+use crypto::sender_cert::SenderCertChain;
 use server::{config::Config, db, routes, state::AppState};
 
 static SETUP: OnceCell<()> = OnceCell::const_new();
@@ -59,6 +60,7 @@ async fn test_state() -> AppState {
         relay_url: None,
         server_name: "Test".into(),
         invite_domain: "go.example.test".into(),
+        adminbot_did: String::new(),
     };
     let mut conn = pool.acquire().await.expect("acquire");
     let bytes = db::zkgroup_params::load_or_init(
@@ -70,7 +72,8 @@ async fn test_state() -> AppState {
     .expect("load zkgroup params");
     drop(conn);
     let zkgroup_secret = ServerSecretParams::from_bytes(&bytes).expect("decode params");
-    AppState::new(pool, config, zkgroup_secret)
+    let sender_cert_chain = SenderCertChain::generate().expect("sender cert chain");
+    AppState::new(pool, config, zkgroup_secret, sender_cert_chain)
 }
 
 /// Register a dummy account and return the parsed response body.

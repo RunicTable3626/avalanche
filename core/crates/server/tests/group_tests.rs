@@ -9,8 +9,9 @@ use axum::{
 };
 use base64::prelude::*;
 use crypto::groups::{
-    AuthCredentialDidResponse, GroupKey, RedemptionTime, ServerSecretParams,
+    AuthCredentialWithPniZkcResponse, GroupKey, RedemptionTime, ServerSecretParams,
 };
+use crypto::sender_cert::SenderCertChain;
 // `B64` is what every group endpoint speaks (URL-safe, no padding). `BASE64_STANDARD`
 // stays in scope for the registration body helpers below, which talk to the
 // non-group endpoints that still use standard base64.
@@ -56,6 +57,7 @@ async fn test_state() -> AppState {
         relay_url: None,
         server_name: "Test".into(),
         invite_domain: "go.example.test".into(),
+        adminbot_did: String::new(),
     };
     let mut conn = pool.acquire().await.expect("acquire");
     let bytes = db::zkgroup_params::load_or_init(
@@ -67,7 +69,8 @@ async fn test_state() -> AppState {
     .expect("load zkgroup params");
     drop(conn);
     let zkgroup_secret = ServerSecretParams::from_bytes(&bytes).expect("decode params");
-    AppState::new(pool, config, zkgroup_secret)
+    let sender_cert_chain = SenderCertChain::generate().expect("sender cert chain");
+    AppState::new(pool, config, zkgroup_secret, sender_cert_chain)
 }
 
 /// Register a fresh bot account and return its DID + keypair.
@@ -158,12 +161,16 @@ async fn get_session_token(
 }
 
 /// Day-aligned redemption time the server will require.
-fn today() -> RedemptionTime {
+fn today_secs() -> u64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    RedemptionTime::from_unix_seconds(now - (now % 86_400))
+    now - (now % 86_400)
+}
+
+fn today() -> RedemptionTime {
+    RedemptionTime::from_epoch_seconds(today_secs())
 }
 
 /// One participant: their account on the server + a credential for the
@@ -171,7 +178,7 @@ fn today() -> RedemptionTime {
 struct Member {
     did: String,
     session_token: String,
-    credential: crypto::groups::AuthCredentialDid,
+    credential: crypto::groups::AuthCredentialWithPniZkc,
 }
 
 async fn make_member(app: &axum::Router) -> Member {
@@ -190,7 +197,7 @@ async fn make_member(app: &axum::Router) -> Member {
                 .body(Body::from(
                     serde_json::to_vec(&json!({
                         "did": did,
-                        "redemption_time": today().0,
+                        "redemption_time": today_secs(),
                     }))
                     .unwrap(),
                 ))
@@ -202,7 +209,7 @@ async fn make_member(app: &axum::Router) -> Member {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     let response_bytes = B64.decode(body["response"].as_str().unwrap()).unwrap();
-    let response: AuthCredentialDidResponse = bincode::deserialize(&response_bytes).unwrap();
+    let response: AuthCredentialWithPniZkcResponse = bincode::deserialize(&response_bytes).unwrap();
 
     // Client fetches public params (we do it via the server-params endpoint
     // because the test wants to exercise that path too).
@@ -238,7 +245,7 @@ async fn make_member(app: &axum::Router) -> Member {
 fn presentation_header(
     public_params: &crypto::groups::ServerPublicParams,
     group: &GroupKey,
-    cred: &crypto::groups::AuthCredentialDid,
+    cred: &crypto::groups::AuthCredentialWithPniZkc,
 ) -> String {
     let mut r = [0u8; zkcredential::RANDOMNESS_LEN];
     rand::rngs::OsRng.try_fill_bytes(&mut r).unwrap();
@@ -251,7 +258,7 @@ fn emi_for(group: &GroupKey, did: &str) -> String {
     let r = [0u8; zkcredential::RANDOMNESS_LEN];
     let server = ServerSecretParams::generate();
     let public = server.public_params();
-    let response = AuthCredentialDidResponse::issue_credential(did, today(), &server, r);
+    let response = AuthCredentialWithPniZkcResponse::issue_credential(did, today(), &server, r);
     let cred = response.receive(did, today(), &public).unwrap();
     let presentation = cred.present(&public, group, r);
     B64.encode(presentation.encrypted_member_id().to_bytes())
@@ -668,7 +675,7 @@ async fn issue_credential_for_other_did_returns_401() {
                 .body(Body::from(
                     serde_json::to_vec(&json!({
                         "did": bob.did,
-                        "redemption_time": today().0,
+                        "redemption_time": today_secs(),
                     }))
                     .unwrap(),
                 ))

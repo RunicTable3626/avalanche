@@ -19,6 +19,7 @@ mod devices;
 mod did;
 mod groups;
 mod health;
+mod info;
 mod invites;
 pub(crate) mod messages;
 mod prekeys;
@@ -45,6 +46,7 @@ pub fn router() -> Router<AppState> {
         .merge(invites::routes())
         .merge(profile::routes())
         .merge(groups::routes())
+        .merge(info::routes())
         .merge(health::routes())
         .merge(admin::routes())
 }

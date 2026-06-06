@@ -61,6 +61,7 @@ async fn test_state() -> AppState {
         server_name: "Test".into(),
         invite_domain: "go.example.test".into(),
         adminbot_did: String::new(),
+        privacy_policy_url: None,
     };
     let mut conn = pool.acquire().await.expect("acquire");
     let bytes = db::zkgroup_params::load_or_init(
@@ -462,4 +463,25 @@ async fn get_groups_server_params_returns_decodable_public_params() {
     let public = crypto::groups::ServerPublicParams::from_bytes(&decoded)
         .expect("decode ServerPublicParams");
     assert_eq!(public.to_bytes(), state.zkgroup_secret.public_params().to_bytes());
+}
+
+// ── Server info endpoint tests ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn info_returns_server_name() {
+    let app = routes::router().with_state(test_state().await);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body["server_name"].is_string());
+    assert_eq!(body["privacy_policy_url"], Value::Null);
 }

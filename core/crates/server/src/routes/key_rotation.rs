@@ -47,6 +47,14 @@ async fn rotate_key(
     State(state): State<AppState>,
     Json(req): Json<RotateKeyRequest>,
 ) -> Result<axum::http::StatusCode, ServerError> {
+    // Only did:plc: DIDs have PLC-backed rotation key lists. Check early so
+    // callers get a clear error without needing to supply a valid key/sig.
+    if !req.did.starts_with("did:plc:") {
+        return Err(ServerError::BadRequest(
+            "key rotation requires a did:plc: identifier".into(),
+        ));
+    }
+
     // Decode the rotation key and build the verifying key.
     let rotation_key_bytes = BASE64_STANDARD
         .decode(&req.rotation_key)
@@ -75,13 +83,6 @@ async fn rotate_key(
     verifying_key
         .verify(payload.as_bytes(), &signature)
         .map_err(|_| ServerError::Unauthorized)?;
-
-    // Only did:plc: DIDs have PLC-backed rotation key lists.
-    if !req.did.starts_with("did:plc:") {
-        return Err(ServerError::BadRequest(
-            "key rotation requires a did:plc: identifier".into(),
-        ));
-    }
 
     // Confirm the submitted rotation key is authorized in the PLC directory.
     let submitted_compressed = verifying_key.to_encoded_point(true).as_bytes().to_vec();

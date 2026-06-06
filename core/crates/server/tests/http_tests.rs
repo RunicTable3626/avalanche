@@ -22,6 +22,7 @@ use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
 use crypto::groups::ServerSecretParams;
+use crypto::sender_cert::SenderCertChain;
 use server::{config::Config, db, routes, state::AppState};
 
 static SETUP: OnceCell<()> = OnceCell::const_new();
@@ -59,6 +60,7 @@ async fn test_state() -> AppState {
         relay_url: None,
         server_name: "Test".into(),
         invite_domain: "go.example.test".into(),
+        adminbot_did: String::new(),
     };
     let mut conn = pool.acquire().await.expect("acquire");
     let bytes = db::zkgroup_params::load_or_init(
@@ -70,7 +72,8 @@ async fn test_state() -> AppState {
     .expect("load zkgroup params");
     drop(conn);
     let zkgroup_secret = ServerSecretParams::from_bytes(&bytes).expect("decode params");
-    AppState::new(pool, config, zkgroup_secret)
+    let sender_cert_chain = SenderCertChain::generate().expect("sender cert chain");
+    AppState::new(pool, config, zkgroup_secret, sender_cert_chain)
 }
 
 /// Register a dummy account and return the parsed response body.
@@ -459,4 +462,140 @@ async fn get_groups_server_params_returns_decodable_public_params() {
     let public = crypto::groups::ServerPublicParams::from_bytes(&decoded)
         .expect("decode ServerPublicParams");
     assert_eq!(public.to_bytes(), state.zkgroup_secret.public_params().to_bytes());
+}
+
+// ── Key rotation endpoint tests ───────────────────────────────────────────────
+//
+// Tests that can run without a real PLC directory (the happy path that calls
+// fetch_rotation_keys_p256 requires a genuine did:plc: DID and is covered by
+// manual / e2e testing instead).
+
+/// did:local: DID is rejected immediately, before any crypto or PLC call.
+#[tokio::test]
+async fn rotate_key_local_did_rejected() {
+    let app = routes::router().with_state(test_state().await);
+    let reg = register_dummy(&app).await;
+    let did = reg["did"].as_str().unwrap().to_string();
+    assert!(did.starts_with("did:local:"), "register_dummy should produce a did:local:");
+
+    let body = serde_json::json!({
+        "did":                   did,
+        "device_id":             1,
+        "new_identity_key":      BASE64_STANDARD.encode([0x05u8; 33]),
+        "rotation_key":          BASE64_STANDARD.encode([0x02u8; 33]),
+        "rotation_key_signature":BASE64_STANDARD.encode([0u8; 64]),
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/accounts/rotate-key")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("did:plc:"),
+        "error should mention did:plc:, got: {}",
+        body["error"]
+    );
+}
+
+/// Malformed base64 for the rotation key → 400.
+#[tokio::test]
+async fn rotate_key_invalid_base64_rejected() {
+    let app = routes::router().with_state(test_state().await);
+
+    let body = serde_json::json!({
+        "did":                   "did:plc:doesnotmatter000000000000",
+        "device_id":             1,
+        "new_identity_key":      BASE64_STANDARD.encode([0x05u8; 33]),
+        "rotation_key":          "!!!not-base64!!!",
+        "rotation_key_signature":BASE64_STANDARD.encode([0u8; 64]),
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/accounts/rotate-key")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Valid base64 but not a valid SEC1-encoded P-256 key → 400.
+#[tokio::test]
+async fn rotate_key_invalid_p256_key_rejected() {
+    let app = routes::router().with_state(test_state().await);
+
+    let body = serde_json::json!({
+        "did":                   "did:plc:doesnotmatter000000000000",
+        "device_id":             1,
+        "new_identity_key":      BASE64_STANDARD.encode([0x05u8; 33]),
+        "rotation_key":          BASE64_STANDARD.encode([0xFFu8; 33]), // valid b64, bad P-256
+        "rotation_key_signature":BASE64_STANDARD.encode([0u8; 64]),
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/accounts/rotate-key")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Valid P-256 key but wrong signature → 401 (before any PLC call).
+#[tokio::test]
+async fn rotate_key_wrong_signature_rejected() {
+    use p256::ecdsa::SigningKey;
+
+    let app = routes::router().with_state(test_state().await);
+
+    // Use a fixed scalar to avoid rand_core version mismatches between p256 0.13
+    // (rand_core 0.6) and the project's rand 0.9 (rand_core 0.9).
+    let signing_key = SigningKey::from_slice(&[0x01u8; 32]).expect("valid P-256 test key");
+    let verifying_key = signing_key.verifying_key();
+    let rotation_key_b64 = BASE64_STANDARD.encode(verifying_key.to_encoded_point(true).as_bytes());
+
+    let body = serde_json::json!({
+        "did":                   "did:plc:doesnotmatter000000000000",
+        "device_id":             1,
+        "new_identity_key":      BASE64_STANDARD.encode([0x05u8; 33]),
+        "rotation_key":          rotation_key_b64,
+        "rotation_key_signature":BASE64_STANDARD.encode([0u8; 64]), // wrong sig
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/accounts/rotate-key")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

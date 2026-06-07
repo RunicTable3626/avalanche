@@ -13,21 +13,21 @@
 use sqlx::{PgPool, Row};
 use tokio::sync::OnceCell;
 
-static POOL: OnceCell<PgPool> = OnceCell::const_new();
+static MIGRATED: OnceCell<()> = OnceCell::const_new();
 
 /// Connect to the test database and ensure migrations are applied. Panics if
-/// TEST_DATABASE_URL is not set. The pool is shared across tests so the
-/// migrator runs at most once.
+/// TEST_DATABASE_URL is not set. Each call returns a fresh pool owned by the
+/// caller's runtime; migrations are applied at most once across all tests.
 async fn test_pool() -> PgPool {
-    POOL.get_or_init(|| async {
-        let url = std::env::var("TEST_DATABASE_URL")
-            .expect("TEST_DATABASE_URL must be set to run server tests");
-        let pool = PgPool::connect(&url).await.expect("failed to connect to test database");
-        server::migrate::run(&pool).await.expect("failed to apply test migrations");
-        pool
-    })
-    .await
-    .clone()
+    let url = std::env::var("TEST_DATABASE_URL")
+        .expect("TEST_DATABASE_URL must be set to run server tests");
+    let pool = PgPool::connect(&url).await.expect("failed to connect to test database");
+    MIGRATED
+        .get_or_init(|| async {
+            server::migrate::run(&pool).await.expect("failed to apply test migrations");
+        })
+        .await;
+    pool
 }
 
 /// Begin a transaction that will be rolled back when dropped.

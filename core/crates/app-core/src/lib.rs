@@ -830,7 +830,7 @@ impl AppCore {
             }
 
             let local_address = DeviceAddress::new(
-                AccountId::new(&crypto::groups::did_to_service_id_string(&did)),
+                AccountId::new(crypto::groups::did_to_service_id_string(&did)),
                 DeviceId::new(new_device_id),
             );
 
@@ -1854,7 +1854,7 @@ impl AppCore {
             ),
         }).await?;
         let local_address = DeviceAddress::new(
-            AccountId::new(&crypto::groups::did_to_service_id_string(&reg_resp.did)),
+            AccountId::new(crypto::groups::did_to_service_id_string(&reg_resp.did)),
             DeviceId::new(device_id),
         );
 
@@ -1886,7 +1886,7 @@ impl AppCore {
         let device_id = reg.device_id;
 
         let local_address = DeviceAddress::new(
-            AccountId::new(&crypto::groups::did_to_service_id_string(&reg.account_id)),
+            AccountId::new(crypto::groups::did_to_service_id_string(&reg.account_id)),
             DeviceId::new(device_id),
         );
 

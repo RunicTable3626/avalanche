@@ -63,14 +63,14 @@ pub async fn encrypt_group_envelope<S: Store>(
     let dest_refs: Vec<&ProtocolAddress> = destinations.iter().collect();
     let session_refs: Vec<&signal::SessionRecord> = sessions.iter().collect();
 
-    let mut identity_store = store.clone();
+    let identity_store = store.clone();
     let mut rng = OsRng.unwrap_err();
     let bytes = signal::sealed_sender_multi_recipient_encrypt(
         &dest_refs,
         &session_refs,
         std::iter::empty::<signal::ServiceId>(),
         &usmc,
-        &mut identity_store,
+        &identity_store,
         &mut rng,
     )
     .await?;

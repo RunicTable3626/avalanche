@@ -206,4 +206,11 @@ pub const ALTER_MIGRATIONS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_contacts_recency \
         ON contacts (last_interaction_at DESC)",
+    // Per-conversation expiry timer settings (DM and group).
+    // expiry_secs = NULL or 0 means no expiry. conversation_id for DMs
+    // is the other participant's DID; for groups it is the group_id.
+    "CREATE TABLE IF NOT EXISTS conversation_settings (\
+        conversation_id  TEXT    PRIMARY KEY,\
+        expiry_secs      INTEGER\
+    )",
 ];

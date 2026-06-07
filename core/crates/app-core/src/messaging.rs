@@ -416,6 +416,19 @@ impl AppCoreInner {
                                 }
                             }
                         }
+                        Some(Body::TimerChange(timer)) => {
+                            // Silent control message — update local expiry setting,
+                            // no visible chat event surfaced.
+                            let expiry = if timer.expiry_secs > 0 {
+                                Some(timer.expiry_secs)
+                            } else {
+                                None
+                            };
+                            let _ = self
+                                .store
+                                .save_conversation_expiry(&raw.sender_did, expiry)
+                                .await;
+                        }
                         None => {
                             // ContentMessage with no body — backward compat.
                             decrypted.push(raw);
@@ -672,9 +685,60 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
                 }
             }
         }
+        Some(Body::TimerChange(timer)) => {
+            // Silent control message — update local expiry setting, no chat event.
+            let expiry = if timer.expiry_secs > 0 {
+                Some(timer.expiry_secs)
+            } else {
+                None
+            };
+            let inner = core.inner.lock().await;
+            let _ = inner
+                .store
+                .save_conversation_expiry(&decrypted.sender_did, expiry)
+                .await;
+        }
         None => {
             // ContentMessage with no body — emit as raw bytes (backward compat).
             let _ = core.event_tx.send(IncomingEvent::Message { msg: decrypted });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prost::Message as _;
+
+    use crate::proto::{content_message::Body, ContentMessage, TimerChangeMessage};
+
+    #[test]
+    fn timer_change_proto_round_trip() {
+        let msg = ContentMessage {
+            body: Some(Body::TimerChange(TimerChangeMessage { expiry_secs: 3600 })),
+            timestamp_ms: 0,
+            profile_key: vec![],
+        };
+        let encoded = msg.encode_to_vec();
+        let decoded = ContentMessage::decode(encoded.as_slice()).unwrap();
+        match decoded.body {
+            Some(Body::TimerChange(t)) => assert_eq!(t.expiry_secs, 3600),
+            other => panic!("unexpected body: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timer_change_zero_encodes_correctly() {
+        // expiry_secs = 0 means "disable"; it must survive the proto round-trip
+        // so the receiver can distinguish "set to 0" from "field absent".
+        let msg = ContentMessage {
+            body: Some(Body::TimerChange(TimerChangeMessage { expiry_secs: 0 })),
+            timestamp_ms: 0,
+            profile_key: vec![],
+        };
+        let decoded = ContentMessage::decode(msg.encode_to_vec().as_slice()).unwrap();
+        match decoded.body {
+            Some(Body::TimerChange(t)) => assert_eq!(t.expiry_secs, 0),
+            other => panic!("unexpected body: {other:?}"),
         }
     }
 }

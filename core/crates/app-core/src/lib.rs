@@ -969,6 +969,46 @@ impl AppCore {
         }).map_err(AppErrorFfi::from)
     }
 
+    /// Send a timer-change control message to a DM recipient and store the
+    /// new expiry locally. `expiry_secs = None` disables the timer.
+    /// Call from a background thread — this blocks until complete.
+    pub fn set_conversation_timer(
+        &self,
+        recipient_did: String,
+        expiry_secs: Option<u32>,
+    ) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let ws = self.ws.lock().expect("ws mutex poisoned").clone();
+            let mut inner = self.inner.lock().await;
+            // Persist locally first so the UI reflects the change immediately.
+            inner.store.save_conversation_expiry(&recipient_did, expiry_secs).await
+                .map_err(AppError::from)?;
+            // Send control message to the other participant.
+            let profile_key = inner.own_profile_key().await;
+            let msg = ContentMessage {
+                body: Some(Body::TimerChange(proto::TimerChangeMessage {
+                    expiry_secs: expiry_secs.unwrap_or(0),
+                })),
+                timestamp_ms: 0,
+                profile_key,
+            };
+            inner.send_dm(ws.as_ref(), &recipient_did, &msg.encode_to_vec(), None).await
+        }).map_err(AppErrorFfi::from)
+    }
+
+    /// Return the stored expiry timer for a conversation, or `None` if unset.
+    /// For DMs `conversation_id` is the other participant's DID.
+    pub fn get_conversation_timer(
+        &self,
+        conversation_id: String,
+    ) -> Result<Option<u32>, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.store.load_conversation_expiry(&conversation_id).await
+                .map_err(AppError::from)
+        }).map_err(AppErrorFfi::from)
+    }
+
     /// Cheap snapshot of current connection state. Non-blocking.
     pub fn connection_state(&self) -> ConnectionState {
         self.state_tx.borrow().clone()

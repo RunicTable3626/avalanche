@@ -69,7 +69,7 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         lock.unlock()
         return snapshot.compactMap { (convId, msgs) -> ConversationSummaryFfi? in
             guard let last = msgs.max(by: { $0.sentAtMs < $1.sentAtMs }) else { return nil }
-            return ConversationSummaryFfi(conversationId: convId, lastMessage: last)
+            return ConversationSummaryFfi(conversationId: convId, groupTitle: nil, lastMessage: last)
         }
         .sorted { ($0.lastMessage?.sentAtMs ?? 0) > ($1.lastMessage?.sentAtMs ?? 0) }
     }

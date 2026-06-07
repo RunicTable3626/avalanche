@@ -36,6 +36,7 @@ use net::groups::{
     CreateGroupRequest as NetCreateGroupRequest, GroupActionsWire, GroupPolicyWire,
     InviteMemberWire, JoinViaLinkWire, PromoteSelfWire, RoleAssignmentWire, SubmitChangeRequest,
 };
+use std::collections::HashMap;
 use store::groups::{GroupRow, PolicyRow};
 use types::Timestamp;
 
@@ -1284,6 +1285,37 @@ pub async fn other_member_dids(
             }
         })
         .collect())
+}
+
+/// Resolve every known group's title from locally-persisted state in a
+/// single query, with no network round trip. The chat list uses this at
+/// startup so group rows render with their real names immediately instead of
+/// falling back to a placeholder.
+///
+/// Returns a map keyed by url-safe-no-pad base64 group_id. Groups whose state
+/// hasn't been fetched yet (empty `encrypted_state_plaintext`, e.g. a freshly
+/// received invite) are omitted; the caller falls back to `fetch_group_state`
+/// for those. A group whose state fails to decode is skipped (logged) rather
+/// than failing the whole list.
+pub async fn local_group_titles(
+    store: &store::Store,
+) -> Result<HashMap<String, String>, AppError> {
+    let rows = store.list_groups().await?;
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in rows {
+        if row.encrypted_state_plaintext.is_empty() {
+            continue;
+        }
+        match gproto::GroupState::decode(row.encrypted_state_plaintext.as_slice()) {
+            Ok(state) => {
+                out.insert(row.group_id, state.title);
+            }
+            Err(e) => {
+                tracing::warn!("[groups] decode GroupState for {}: {e}", row.group_id);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Master-key bytes for a stored group. Convenience: most call sites need

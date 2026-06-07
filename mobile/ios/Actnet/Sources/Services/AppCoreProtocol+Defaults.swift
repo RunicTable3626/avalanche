@@ -44,6 +44,8 @@ extension AppCoreProtocol {
     func loadConversations() throws -> [ConversationSummaryFfi] { [] }
     func markMessagesRead(conversationId: String, upToSentAtMs: Int64) throws -> UInt64 { 0 }
     func unreadCount(conversationId: String) throws -> UInt64 { 0 }
+    func getConversationTimer(conversationId: String) throws -> UInt32? { nil }
+    func setConversationTimer(recipientDid: String, expirySecs: UInt32?) throws {}
 
     // MARK: - Projects / push
 

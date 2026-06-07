@@ -666,6 +666,7 @@ final class AppState: ObservableObject {
         }
 
         var newConvs: [Conversation] = []
+        var groupsNeedingRefresh: [(groupId: String, accountId: String)] = []
         for (accountId, summaries) in summariesPerAccount {
             let serverUrl = accounts.first(where: { $0.id == accountId })?.servers.first?.id ?? ""
             for s in summaries {
@@ -674,7 +675,18 @@ final class AppState: ObservableObject {
                 }
                 let preview = s.lastMessage?.body
                 if let groupId = Self.groupId(from: s.conversationId) {
+                    // `group_title` comes resolved from local state in
+                    // `loadConversations`; cache it so later rebuilds and
+                    // `findOrCreateGroupConversation` reuse it.
+                    if let t = s.groupTitle, !t.isEmpty {
+                        groupTitleCache[groupId] = t
+                    }
                     let title = groupTitleCache[groupId] ?? "Group"
+                    if groupTitleCache[groupId] == nil {
+                        // No local state yet (e.g. a freshly received invite) —
+                        // pull it from the server in the background.
+                        groupsNeedingRefresh.append((groupId, accountId))
+                    }
                     newConvs.append(Conversation(
                         id: s.conversationId,
                         title: title,
@@ -711,6 +723,12 @@ final class AppState: ObservableObject {
             if let did = conv.recipientDid, conv.title == did {
                 _ = displayName(for: did, accountId: conv.accountId)
             }
+        }
+
+        // For groups with no locally-cached title (e.g. just-received invites),
+        // fetch state from the server so "Group" gets replaced with the real name.
+        for g in groupsNeedingRefresh {
+            refreshGroupTitle(groupId: g.groupId, accountId: g.accountId)
         }
     }
 

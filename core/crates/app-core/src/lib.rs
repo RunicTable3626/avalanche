@@ -130,6 +130,11 @@ pub struct StoredMessageFfi {
 #[derive(uniffi::Record)]
 pub struct ConversationSummaryFfi {
     pub conversation_id: String,
+    /// For group conversations, the group's title resolved from
+    /// locally-persisted state. `None` for DMs, and for groups whose state
+    /// hasn't been fetched yet (e.g. a freshly received invite) — the chat
+    /// list falls back to a network fetch in that case.
+    pub group_title: Option<String>,
     pub last_message: Option<StoredMessageFfi>,
 }
 
@@ -1232,7 +1237,14 @@ impl AppCore {
             let inner = self.inner.lock().await;
             let rows = inner.store.load_conversations().await
                 .map_err(AppError::from)?;
+            // Resolve all group titles from locally-persisted state in a single
+            // query, so the chat list renders real names on launch without a
+            // per-group round trip.
+            let titles = groups::local_group_titles(&inner.store).await?;
             Ok::<_, AppError>(rows.into_iter().map(|c| ConversationSummaryFfi {
+                group_title: c.conversation_id
+                    .strip_prefix("group-")
+                    .and_then(|gid| titles.get(gid).cloned()),
                 conversation_id: c.conversation_id,
                 last_message: c.last_message.map(|m| StoredMessageFfi {
                     id: m.id,

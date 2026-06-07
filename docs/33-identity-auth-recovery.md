@@ -46,8 +46,13 @@ The recovery blob is a server-side cache that lets a recovering device skip re-r
 - Device identity keypair (so Signal sessions continue without a safety-number change).
 - Full list of homeservers the user is a member of.
 - Profile key and display name (so the user's profile is restored without prompting).
+- The group 'master key' for all groups you're a member of (so the user can continue reading messages in that group).
 
-It is encrypted under the `"actnet-blob-v1"` HKDF output and replicated to every homeserver the user is a member of. **It does not contain the rotation key.** Losing every copy of the blob means losing session continuity (safety-number change) and the server list (the user re-enters one server URL manually) — not DID control. The rotation key is always recoverable from the passkey, and the DID is always recoverable from `(rotation_key, signup_server_url)`.
+**Wire format.** The plaintext is a versioned protobuf (`actnet.recovery.RecoveryBlob`, currently v4). Homeserver URLs are interned in a top-level `servers` table and referenced by index from each group entry — N groups on the same homeserver pay the URL string once, not N times. The protobuf is encrypted with AES-256-GCM under the `"actnet-blob-v1"` HKDF output; the on-the-wire envelope is `version(1) || nonce(12) || ciphertext+tag`. The intent is to replicate the ciphertext to every homeserver the user belongs to so any of them can anchor recovery.
+
+**Auto-updates.** The PRF-derived blob key is cached in the local SQLCipher database at signup (and again after recovery). Every event that changes blob-relevant state — joining or creating a group, accepting an invite, adding a server — re-encrypts and uploads the blob silently using the cached key. The passkey is only required at account creation and at recovery; routine state changes never re-prompt.
+
+**It does not contain the rotation key.** Losing every copy of the blob costs session continuity (safety-number change), the server list (user re-enters one server URL manually), and per-group sender-key continuity (peers must re-DM their SKDMs to the recovered device) — but not DID control. The rotation key is always recoverable from the passkey, and the DID is always recoverable from `(rotation_key, signup_server_url)`.
 
 ### Privacy: DID document and server discovery
 
@@ -109,13 +114,13 @@ During recovery, the app resolves the DID via the PLC directory → finds the cu
 
 No new keys generated (except fresh prekeys for this server). The DID document already has this device's signing key; the server just verifies it.
 
-The app prompts a passkey authentication (Face ID via 1Password) to re-encrypt the recovery blob with the updated server list. This is the only user-visible step beyond tapping "Join as Sam."
+No passkey prompt either: the blob symmetric key is already cached locally from the original signup, so the app silently re-encrypts the blob with the updated server list and uploads. Tapping "Join as Sam" is the only user-visible step.
 
 **Technical details:**
 - Server resolves the DID via the PLC directory and checks that the presented identity key matches a verification method in the DID document.
 - `POST /v1/accounts` with the existing DID, identity key, registration_id, device_id, prekeys.
-- The recovery blob now needs to include server 2 in its server list. The app performs a WebAuthn authentication ceremony with PRF to derive the symmetric key, re-encrypts the blob, and uploads the updated blob to both server 1 and server 2. This ensures recovery from either server discovers all servers.
-- **Written-down recovery key case:** If the user chose a written-down recovery key instead of a passkey, we don't want to make them retype it every time they join a server. Instead, the recovery key's derived symmetric key is cached in the Secure Enclave after first entry. The app retrieves it with a biometric prompt (same UX as the passkey path) to re-encrypt the blob without the user needing to dig out their recovery phrase.
+- The recovery blob now needs to include server 2 in its server list. The app reads the cached blob symmetric key from SQLCipher (saved at signup), re-encrypts, and uploads the updated blob. Replicating to both servers ensures recovery from either one discovers all servers.
+- **Written-down recovery key case:** Same story — the derived symmetric key is cached locally after first entry, so subsequent server joins don't make the user dig out the recovery phrase.
 
 ---
 
@@ -155,10 +160,12 @@ Sam now has two identities. Both appear in the app. Chats from both identities a
 6. App **recomputes the genesis op deterministically** with `(derived_rotation_pub, signup_server_url)` and `verification_methods = {}`. Hashing this op yields the original DID. No PLC lookup required to know Sam's DID.
 7. App resolves the DID via PLC to find the *current* home server (it may have been migrated since signup), and attempts to download the recovery blob.
 
-8. **Blob path (common case):** App decrypts the blob with the derived blob symmetric key. The plaintext yields the original identity keypair and the full list of homeservers.
+8. **Blob path (common case):** App decrypts the blob with the derived blob symmetric key. The plaintext yields the original identity keypair, the full list of homeservers, and the master key for every group Sam was in.
    - App restores the identity keypair — same identity key as before, so contacts see no safety-number change.
    - App generates a new device_id and signs a device replacement request with the rotation key. On each homeserver in the list, the server verifies the signature against the rotation key listed in PLC, revokes the old device, and registers the new device_id with fresh prekeys.
-   - Sam is back. Existing Signal sessions continue seamlessly.
+   - App caches the blob symmetric key in SQLCipher so future state changes can refresh the blob silently.
+   - For each group master key in the blob: app persists a minimal group row, calls `fetch_group_state` on the host homeserver, rotates the per-device push pseudonym (the old one died with the lost device), re-seeds its own Sender Key, and DMs the new SKDM to every other member so they can decrypt Sam's future group messages. Sam can immediately send into every group. Old group messages that other members sent under Sender Keys this device previously held are undecryptable until those peers re-distribute their keys.
+   - Sam is back. Existing 1:1 Signal sessions continue seamlessly.
 
 9. **No-blob path (every blob copy is gone):** App generates a fresh identity keypair on-device. Signs a PLC update with the rotation key replacing the old identity verification method with the new one. Submits to PLC.
    - App proceeds with the original signup server URL (from `userHandle`) and tries to register there. If that server no longer accepts the user, prompts Sam to enter a server URL manually.
@@ -207,7 +214,8 @@ Passkeys are never touched during normal use. They exist solely for recovery.
 | DID rotation key (P-256) | Re-derived from passkey on demand; cached in device SQLCipher during a session | Signing DID operations (genesis, identity-key updates, device replacement). **Never stored on any server.** |
 | Device identity key (Ed25519) | Device (SQLCipher) + encrypted in recovery blob | Signal protocol: session establishment, message encryption, server auth. Generated randomly per device. |
 | Prekeys (signed, one-time, Kyber) | Public halves on server; private halves on device (SQLCipher) | Signal protocol: X3DH session initiation |
-| Recovery blob | Homeserver(s), encrypted | Contains identity key + server list + profile data. Convenience-only: losing every copy costs session continuity and the server list, not DID control. |
+| Recovery blob | Homeserver(s), encrypted | Contains identity key + server list + profile data + group master keys. Convenience-only: losing every copy costs session continuity, the server list, and silent group re-join — not DID control. |
+| Blob symmetric key (cached) | Device (SQLCipher) | PRF-derived AES key for the recovery blob. Cached at signup/recovery so routine state changes (group join, etc.) can re-encrypt and upload silently without a passkey prompt. |
 | Session token | Device (memory/keychain) | Authenticating API requests to homeserver |
 
 

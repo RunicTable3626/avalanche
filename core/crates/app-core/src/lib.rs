@@ -35,6 +35,12 @@ pub mod proto {
     pub mod groups {
         include!(concat!(env!("OUT_DIR"), "/actnet.groups.rs"));
     }
+
+    /// Recovery-blob v4 plaintext schema. Encrypted with the user's
+    /// PRF-derived `blob_key` and stored on the homeserver, opaque to it.
+    pub mod recovery {
+        include!(concat!(env!("OUT_DIR"), "/actnet.recovery.rs"));
+    }
 }
 
 use std::path::Path;
@@ -336,6 +342,100 @@ pub(crate) fn build_authed_client(
     net::Client::new(server_url).with_signer(did, device_id, signer, initial_token)
 }
 
+/// Restore a single group from the recovery blob: persist the master key,
+/// pull current state, rotate the push pseudonym (the old one died with the
+/// lost device), re-seed our Sender Key, and DM the new SKDM to every
+/// existing member. Skips `accept_invite` — recovery means we were already
+/// a member, so the server knows our `encrypted_member_id`.
+async fn restore_group(
+    core: &Arc<AppCore>,
+    master_key_bytes: &[u8],
+    hosting_server_url: &str,
+) -> Result<(), AppError> {
+    let mk: [u8; 32] = master_key_bytes
+        .try_into()
+        .map_err(|_| AppError::Protocol("group master_key length != 32".into()))?;
+    let group_id_b64 = groups::b64(&crypto::groups::GroupKey::from_bytes(mk).group_id().0);
+
+    let ws = core.ws.lock().expect("ws mutex poisoned").clone();
+    let mut inner = core.inner.lock().await;
+
+    // 1. Persist minimal row so master_key_for / load_group succeed. Empty
+    //    encrypted_state_plaintext is fine — fetch_group_state below fills
+    //    it in.
+    inner
+        .store
+        .save_group(&store::groups::GroupRow {
+            group_id: group_id_b64.clone(),
+            master_key: mk.to_vec(),
+            hosting_server_url: hosting_server_url.to_string(),
+            revision: 0,
+            encrypted_state_plaintext: Vec::new(),
+            policy: store::groups::PolicyRow::default_admin_only(),
+            group_push_pseudonym: None,
+            created_at: Timestamp::now(),
+        })
+        .await?;
+
+    // 2. Pull live state so revision/members/policy are accurate.
+    groups::fetch_group_state(
+        &inner.store,
+        &inner.client,
+        hosting_server_url,
+        &inner.did.clone(),
+        &group_id_b64,
+    )
+    .await?;
+
+    // 3. Register a fresh push pseudonym. The old pseudonym only existed
+    //    in the previous device's local store, and the server still
+    //    fans-out to it — we want fan-outs to land here instead.
+    let new_pseudonym = groups::rotate_group_pseudonym(
+        &inner.store,
+        &inner.client,
+        &inner.did.clone(),
+        &group_id_b64,
+    )
+    .await?;
+
+    // 4. Subscribe immediately so live group sends reach us without
+    //    waiting for the next WS reconnect.
+    if let Some(ws) = ws.as_ref() {
+        if let Err(e) = ws.subscribe_group_pseudonyms(vec![new_pseudonym]) {
+            tracing::warn!("[recovery] subscribe to restored pseudonym failed: {e}");
+        }
+    }
+
+    // 5. Re-seed Sender Key + redistribute to every existing member. The
+    //    lost device's sender-key state is gone, so peers can't decrypt
+    //    anything we send until they install a fresh SKDM from us.
+    let did = inner.did.clone();
+    let device_id = inner.device_id;
+    let skdm = groups::seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
+    let group_id_bytes = groups::b64d(&group_id_b64)?;
+    let recipients = groups::other_member_dids(&inner.store, &group_id_b64, &did).await?;
+    for rdid in recipients {
+        let skdm_msg = crate::proto::ContentMessage {
+            body: Some(crate::proto::content_message::Body::SenderKeyDistribution(
+                crate::proto::SenderKeyDistribution {
+                    group_id: group_id_bytes.clone(),
+                    distribution_id: groups::distribution_id_for(&mk).as_bytes().to_vec(),
+                    skdm: skdm.clone(),
+                },
+            )),
+            timestamp_ms: Timestamp::now().as_millis() as u64,
+            profile_key: Vec::new(),
+        };
+        if let Err(e) = inner
+            .send_dm(ws.as_ref(), &rdid, &prost::Message::encode_to_vec(&skdm_msg), None)
+            .await
+        {
+            tracing::warn!("[recovery] SKDM to {rdid} for restored group failed: {e}");
+        }
+    }
+    Ok(())
+}
+
 /// The main client handle. Holds local state and a server connection.
 ///
 /// Thread-safe: all mutable state is behind an async Mutex, and the object
@@ -633,10 +733,7 @@ impl AppCore {
             let plaintext = recovery::decrypt_recovery_blob(&bundle.blob, &blob_key)?;
 
             // Restore identity keypair.
-            let identity_bytes = BASE64_STANDARD
-                .decode(&plaintext.identity_keypair)
-                .map_err(|_| AppError::Protocol("invalid base64 identity in blob".into()))?;
-            let identity = crypto::IdentityKeyPair::deserialize(&identity_bytes)?;
+            let identity = crypto::IdentityKeyPair::deserialize(&plaintext.identity_keypair)?;
 
             // Pick the server we'll talk to (and that AppCore will be bound to).
             // Prefer the blob's server list; if empty, reuse the bootstrap
@@ -644,7 +741,7 @@ impl AppCore {
             let primary_server = plaintext
                 .servers
                 .first()
-                .cloned()
+                .map(|s| s.url.clone())
                 .unwrap_or_else(|| bootstrap_server.clone());
 
             // Pick the existing device_id from the bundle and reuse it for
@@ -719,6 +816,10 @@ impl AppCore {
             store
                 .save_rotation_key(&rotation_key_private, &rotation_key_public)
                 .await?;
+            // Same as signup: cache the PRF-derived blob_key so subsequent
+            // group joins can refresh the server-side blob without
+            // re-prompting the passkey.
+            store.save_recovery_blob_key(&blob_key).await?;
             store
                 .save_registration(&RegistrationInfo {
                     account_id: did.clone(),
@@ -756,24 +857,15 @@ impl AppCore {
             //
             // `profile_to_restore` holds the (32-byte key, display name) pair
             // we will persist locally and re-upload to the server.
-            let blob_profile_key: Option<Vec<u8>> = if plaintext.profile_key.is_empty() {
-                None
-            } else {
-                Some(BASE64_STANDARD
-                    .decode(&plaintext.profile_key)
-                    .map_err(|_| AppError::Protocol("invalid base64 profile_key in blob".into()))?)
-            };
-
-            let profile_to_restore: Option<(Vec<u8>, String)> = match blob_profile_key {
-                Some(key) if key.len() == profile::PROFILE_KEY_LEN => {
-                    Some((key, plaintext.display_name.clone()))
-                }
-                _ if !display_name.is_empty() => {
+            let profile_to_restore: Option<(Vec<u8>, String)> =
+                if plaintext.profile_key.len() == profile::PROFILE_KEY_LEN {
+                    Some((plaintext.profile_key.clone(), plaintext.display_name.clone()))
+                } else if !display_name.is_empty() {
                     let key = profile::generate_profile_key();
                     Some((key.to_vec(), display_name.clone()))
-                }
-                _ => None,
-            };
+                } else {
+                    None
+                };
 
             if let Some((key, name)) = &profile_to_restore {
                 store
@@ -842,6 +934,40 @@ impl AppCore {
                 device_id: new_device_id,
             }));
             core.start_reconnect_task();
+
+            // Restore group memberships carried in the blob (v3+).
+            // For each group:
+            //   1. Persist a minimal `GroupRow` keyed on its master_key so
+            //      `master_key_for(...)` works.
+            //   2. `fetch_group_state` to populate the cached state.
+            //   3. `rotate_group_push_binding` to register a fresh pseudonym
+            //      (the old one is unrecoverable — it lived in the lost
+            //      device's store).
+            //   4. Re-seed our Sender Key and DM the SKDM to every existing
+            //      member so they can decrypt our future group messages.
+            //      Without this, peers would silently drop everything we
+            //      send into the group.
+            //
+            // Errors are logged but not fatal — partial recovery is better
+            // than total failure if one group's server is down.
+            for g in &plaintext.groups {
+                let host = match plaintext.servers.get(g.server_index as usize) {
+                    Some(s) => s.url.clone(),
+                    None => {
+                        // `decrypt_recovery_blob` checks indices, so this
+                        // would only fire if our own writer was buggy.
+                        tracing::warn!(
+                            "[recovery] group server_index {} dangling, skipping",
+                            g.server_index
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = restore_group(&core, &g.master_key, &host).await {
+                    tracing::warn!("[recovery] failed to restore group hosted at {host}: {e}");
+                }
+            }
+
             Ok::<_, AppError>(core)
         })
         .map_err(AppErrorFfi::from)
@@ -1277,12 +1403,14 @@ impl AppCore {
             let identity = inner.store.load_identity().await?
                 .ok_or(AppError::NoAccount)?;
             let own_profile = inner.store.load_own_profile().await?;
+            let groups = recovery::collect_group_blob_entries(&inner.store).await?;
 
-            let plaintext = recovery::build_recovery_plaintext(
+            let plaintext = recovery::build_recovery_blob(
                 &identity.serialize(),
                 &servers,
                 own_profile.as_ref().map(|p| p.profile_key.as_slice()).unwrap_or(&[]),
                 own_profile.as_ref().map(|p| p.display_name.as_str()).unwrap_or(""),
+                &groups,
             );
             let blob = recovery::encrypt_recovery_blob(&plaintext, &key)?;
             inner.client.update_recovery_blob(&blob).await?;
@@ -1481,7 +1609,7 @@ pub fn download_recovery_blob(
         let client = net::Client::new(&server_url);
         let bundle = client.get_recovery_blob(&did).await?;
         let plaintext = recovery::decrypt_recovery_blob(&bundle.blob, &key)?;
-        Ok(plaintext.servers)
+        Ok(plaintext.servers.into_iter().map(|s| s.url).collect())
     }).map_err(AppErrorFfi::from)
 }
 
@@ -1797,12 +1925,16 @@ impl AppCore {
             };
 
         // Build and encrypt recovery blob if we have a passkey-derived key.
+        // At signup the user is in no groups yet, so the groups list is
+        // empty — subsequent joins must call `update_recovery_blob` to
+        // keep the server-side blob in sync.
         let recovery_blob = if let Some(key) = blob_key.as_ref() {
-            let plaintext = recovery::build_recovery_plaintext(
+            let plaintext = recovery::build_recovery_blob(
                 &identity.serialize(),
                 &[server_url.to_string()],
                 profile_key.as_ref().map(|k| k.as_slice()).unwrap_or(&[]),
                 profile_display_name.as_deref().unwrap_or(""),
+                &[],
             );
             Some(recovery::encrypt_recovery_blob(&plaintext, key)?)
         } else {
@@ -1848,6 +1980,14 @@ impl AppCore {
 
         store.save_identity(&identity, registration_id).await?;
         store.save_rotation_key(&rotation_key_private, &rotation_key_public).await?;
+
+        // Cache the blob_key locally so the client can re-encrypt + upload
+        // an updated recovery blob (on group join, server-list change, etc.)
+        // without re-prompting the passkey. Absent for opt-out flows that
+        // never produced a blob_key at all.
+        if let Some(key) = blob_key.as_ref() {
+            store.save_recovery_blob_key(key).await?;
+        }
 
         // Persist own profile state locally so the UI can render our display
         // name without re-decrypting the blob.
@@ -2062,6 +2202,9 @@ impl AppCore {
             .try_into()
             .map_err(|_| AppError::Protocol("master_key length != 32".into()))?;
         let _ = groups::seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
+        // Refresh the server-side recovery blob with this new group so a
+        // recovered device can rejoin without help from another member.
+        inner.refresh_recovery_blob_best_effort().await;
         // Subscribe to the founder's group_push_pseudonym so replies from
         // invitees push live. Mirrors the FFI `create_group` wiring.
         if let (Some(ws), Some(pseudonym)) = (
@@ -2189,6 +2332,7 @@ impl AppCore {
                 .send_dm(None, &rdid, &skdm_msg.encode_to_vec(), None)
                 .await?;
         }
+        inner.refresh_recovery_blob_best_effort().await;
         Ok(())
     }
 

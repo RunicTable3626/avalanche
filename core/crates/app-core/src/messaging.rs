@@ -73,6 +73,51 @@ impl AppCoreInner {
             .unwrap_or_default()
     }
 
+    /// Re-build and upload the user's recovery blob from current local
+    /// state, using the cached PRF-derived blob key. Idempotent and
+    /// best-effort: silently no-ops if no blob_key is cached (opt-out
+    /// account) or if there's no registered server yet.
+    ///
+    /// Called by every site that changes blob-relevant state — primarily
+    /// group joins (founder + invitee) so a fresh recovery preserves
+    /// membership in groups the user joined post-signup.
+    pub(crate) async fn refresh_recovery_blob_best_effort(&self) {
+        if let Err(e) = self.refresh_recovery_blob_inner().await {
+            tracing::warn!("[recovery] auto-upload failed: {e}");
+        }
+    }
+
+    async fn refresh_recovery_blob_inner(&self) -> Result<(), AppError> {
+        let key = match self.store.load_recovery_blob_key().await? {
+            Some(k) => k,
+            None => return Ok(()),
+        };
+        let identity = self
+            .store
+            .load_identity()
+            .await?
+            .ok_or(AppError::NoAccount)?;
+        let own_profile = self.store.load_own_profile().await?;
+        let groups = crate::recovery::collect_group_blob_entries(&self.store).await?;
+        let server_url = self.client.server_url().to_string();
+        let plaintext = crate::recovery::build_recovery_blob(
+            &identity.serialize(),
+            &[server_url],
+            own_profile
+                .as_ref()
+                .map(|p| p.profile_key.as_slice())
+                .unwrap_or(&[]),
+            own_profile
+                .as_ref()
+                .map(|p| p.display_name.as_str())
+                .unwrap_or(""),
+            &groups,
+        );
+        let blob = crate::recovery::encrypt_recovery_blob(&plaintext, &key)?;
+        self.client.update_recovery_blob(&blob).await?;
+        Ok(())
+    }
+
     /// Decrypt a `GroupDeliverRequest` arriving over the WebSocket, surface
     /// it as `IncomingEvent::Message` with `group_id` populated, and ack.
     /// Mirrors the per-message handling in `fetch_group_messages` so the
@@ -194,6 +239,11 @@ impl AppCoreInner {
                 tracing::warn!("[groups] SKDM DM to {rdid} failed: {e}");
             }
         }
+
+        // Sync the server-side recovery blob so a future recovery sees
+        // this new group. Best-effort.
+        self.refresh_recovery_blob_best_effort().await;
+
         Ok(())
     }
 

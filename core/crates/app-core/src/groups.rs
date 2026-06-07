@@ -1405,6 +1405,8 @@ impl AppCore {
                 .try_into()
                 .map_err(|_| AppError::Protocol("master_key length != 32".into()))?;
             let _ = seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
+            // Sync server-side blob so a future recovery can rejoin this group.
+            inner.refresh_recovery_blob_best_effort().await;
             Ok::<_, AppError>(CreatedGroupFfi {
                 group_id: created.group_id,
                 master_key: created.master_key,

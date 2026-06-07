@@ -45,6 +45,7 @@ pub mod messages;
 pub mod prekeys;
 pub mod profiles;
 pub mod push;
+pub mod recovery;
 pub mod schema;
 pub mod session;
 

@@ -213,4 +213,13 @@ pub const ALTER_MIGRATIONS: &[&str] = &[
         conversation_id  TEXT    PRIMARY KEY,\
         expiry_secs      INTEGER\
     )",
+    // PRF-derived recovery-blob symmetric key, cached after signup or
+    // recovery. Lets the client re-encrypt + upload an updated blob
+    // (e.g. on group join) without re-prompting the passkey, since the
+    // user only authenticates with a passkey at account-creation /
+    // recovery time. Constrained to one row.
+    "CREATE TABLE IF NOT EXISTS recovery_blob_key (\
+        id            INTEGER PRIMARY KEY CHECK (id = 1),\
+        key           BLOB    NOT NULL\
+    )",
 ];

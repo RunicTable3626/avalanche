@@ -22,6 +22,7 @@ use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
 use crypto::groups::ServerSecretParams;
+use crypto::sender_cert::SenderCertChain;
 use server::{config::Config, db, routes, state::AppState};
 
 static SETUP: OnceCell<()> = OnceCell::const_new();
@@ -59,6 +60,7 @@ async fn test_state() -> AppState {
         relay_url: None,
         server_name: "Test".into(),
         invite_domain: "go.example.test".into(),
+        adminbot_did: String::new(),
     };
     let mut conn = pool.acquire().await.expect("acquire");
     let bytes = db::zkgroup_params::load_or_init(
@@ -70,7 +72,8 @@ async fn test_state() -> AppState {
     .expect("load zkgroup params");
     drop(conn);
     let zkgroup_secret = ServerSecretParams::from_bytes(&bytes).expect("decode params");
-    AppState::new(pool, config, zkgroup_secret)
+    let sender_cert_chain = SenderCertChain::generate().expect("sender cert chain");
+    AppState::new(pool, config, zkgroup_secret, sender_cert_chain)
 }
 
 /// Register a dummy account and return the parsed response body.
@@ -430,6 +433,81 @@ async fn auth_token_without_nonce_returns_422() {
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+// ── Account deletion tests ────────────────────────────────────────────────────
+
+/// Helper: register a keypair account and get a session token. Returns (did, token).
+async fn register_and_get_token(app: &axum::Router) -> (String, String) {
+    let (did, keypair) = register_with_keypair(app).await;
+    let token_body = get_challenge_and_sign(app, &did, &keypair).await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/token")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&token_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "token issuance must succeed");
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let token = body["session_token"].as_str().unwrap().to_string();
+    (did, token)
+}
+
+#[tokio::test]
+async fn delete_account_removes_all_data() {
+    let app = routes::router().with_state(test_state().await);
+    let (did, token) = register_and_get_token(&app).await;
+
+    // 1. DELETE /v1/accounts → 204 No Content.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/v1/accounts")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "deletion must return 204");
+
+    // 2. DID document should now return 404.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/.well-known/did/{did}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "DID must be gone after deletion");
+
+    // 3. A subsequent authenticated request with the same token must return 401
+    //    because the session token was deleted along with the account.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/accounts/{did}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "deleted session token must return 401");
+}
+
 #[tokio::test]
 async fn get_groups_server_params_returns_decodable_public_params() {
     let state = test_state().await;
@@ -451,7 +529,7 @@ async fn get_groups_server_params_returns_decodable_public_params() {
 
     assert_eq!(body["version"], db::zkgroup_params::CURRENT_VERSION);
     let encoded = body["params"].as_str().expect("params field");
-    let decoded = BASE64_STANDARD.decode(encoded).expect("base64 decode");
+    let decoded = BASE64_URL_SAFE_NO_PAD.decode(encoded).expect("base64 decode");
 
     // Bytes must decode as ServerPublicParams and match what the loaded
     // ServerSecretParams derives — i.e. the endpoint isn't returning stale

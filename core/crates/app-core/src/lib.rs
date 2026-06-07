@@ -830,7 +830,7 @@ impl AppCore {
             }
 
             let local_address = DeviceAddress::new(
-                AccountId::new(&crypto::groups::did_to_service_id_string(&did)),
+                AccountId::new(crypto::groups::did_to_service_id_string(&did)),
                 DeviceId::new(new_device_id),
             );
 
@@ -966,6 +966,46 @@ impl AppCore {
                 profile_key,
             };
             inner.send_dm(ws.as_ref(), &recipient_did, &msg.encode_to_vec(), None).await
+        }).map_err(AppErrorFfi::from)
+    }
+
+    /// Send a timer-change control message to a DM recipient and store the
+    /// new expiry locally. `expiry_secs = None` disables the timer.
+    /// Call from a background thread — this blocks until complete.
+    pub fn set_conversation_timer(
+        &self,
+        recipient_did: String,
+        expiry_secs: Option<u32>,
+    ) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let ws = self.ws.lock().expect("ws mutex poisoned").clone();
+            let mut inner = self.inner.lock().await;
+            // Persist locally first so the UI reflects the change immediately.
+            inner.store.save_conversation_expiry(&recipient_did, expiry_secs).await
+                .map_err(AppError::from)?;
+            // Send control message to the other participant.
+            let profile_key = inner.own_profile_key().await;
+            let msg = ContentMessage {
+                body: Some(Body::TimerChange(proto::TimerChangeMessage {
+                    expiry_secs: expiry_secs.unwrap_or(0),
+                })),
+                timestamp_ms: 0,
+                profile_key,
+            };
+            inner.send_dm(ws.as_ref(), &recipient_did, &msg.encode_to_vec(), None).await
+        }).map_err(AppErrorFfi::from)
+    }
+
+    /// Return the stored expiry timer for a conversation, or `None` if unset.
+    /// For DMs `conversation_id` is the other participant's DID.
+    pub fn get_conversation_timer(
+        &self,
+        conversation_id: String,
+    ) -> Result<Option<u32>, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.store.load_conversation_expiry(&conversation_id).await
+                .map_err(AppError::from)
         }).map_err(AppErrorFfi::from)
     }
 
@@ -1854,7 +1894,7 @@ impl AppCore {
             ),
         }).await?;
         let local_address = DeviceAddress::new(
-            AccountId::new(&crypto::groups::did_to_service_id_string(&reg_resp.did)),
+            AccountId::new(crypto::groups::did_to_service_id_string(&reg_resp.did)),
             DeviceId::new(device_id),
         );
 
@@ -1886,7 +1926,7 @@ impl AppCore {
         let device_id = reg.device_id;
 
         let local_address = DeviceAddress::new(
-            AccountId::new(&crypto::groups::did_to_service_id_string(&reg.account_id)),
+            AccountId::new(crypto::groups::did_to_service_id_string(&reg.account_id)),
             DeviceId::new(device_id),
         );
 

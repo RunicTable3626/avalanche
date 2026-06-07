@@ -1,6 +1,10 @@
 syntax = "proto3";
 package actnet;
 
+message TimerChangeMessage {
+  uint32 expiry_secs = 1; // seconds; 0 = disable expiry
+}
+
 message ContentMessage {
   oneof body {
     TextMessage             text                      = 1;
@@ -8,13 +12,14 @@ message ContentMessage {
     GroupContext            group_context             = 3;
     SenderKeyDistribution   sender_key_distribution   = 4;
     GroupMessage            group_message             = 5;
+    TimerChangeMessage      timer_change              = 6;
   }
-  // Reserved for upcoming body variants (typing, timer-change, group
-  // control, call signaling, etc.). Field numbers inside a `oneof` share
-  // the parent message's number space, so reservations live here at the
-  // message level. Pick a number from this block when adding a new
-  // variant; never reuse 1-5 even if removed.
-  reserved 6 to 14;
+  // Reserved for upcoming body variants (typing, group control, call
+  // signaling, etc.). Field numbers inside a `oneof` share the parent
+  // message's number space, so reservations live here at the message
+  // level. Pick a number from this block when adding a new variant;
+  // never reuse 1-6 even if removed.
+  reserved 7 to 14;
   uint64 timestamp_ms = 15;
   // Sender's profile key (32 bytes, AES-256-GCM). When present, recipients
   // can fetch and decrypt the sender's encrypted profile blob. Attached to

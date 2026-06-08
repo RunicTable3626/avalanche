@@ -119,12 +119,20 @@ struct ComposeMessageView: View {
             }
         }
         .task { await loadContacts() }
+        // Recognize a contact link pasted into the recipient field (the link
+        // another user's app generates) and turn it into a chip.
+        .onChange(of: query) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            _ = handleContactLink(trimmed)
+        }
         .sheet(isPresented: $showingContactPicker) {
             ContactPickerSheet(
                 contacts: allContacts,
                 excludedDids: Set(chips.map(\.did)),
                 nameFor: contactName,
-                onSelect: { c in addChip(did: c.did, displayName: contactName(c)) }
+                onSelect: { c in addChip(did: c.did, displayName: contactName(c)) },
+                onScanLink: handleContactLink
             )
         }
     }
@@ -164,7 +172,7 @@ struct ComposeMessageView: View {
                         .font(.title2)
                         .foregroundStyle(Color.avBrand)
                 }
-                .accessibilityLabel("Add recipient from contacts")
+                .accessibilityLabel("Add recipient")
             }
 
             if chips.count >= 2 {
@@ -290,6 +298,41 @@ struct ComposeMessageView: View {
         fieldHandle.addChip(Chip(id: did, did: did, displayName: displayName))
     }
 
+    /// If `raw` is an Avalanche contact link (QR payload or pasted URL), add the
+    /// recipient it points at as a chip and report success. Both link shapes
+    /// another user's app can produce carry a DID:
+    ///   `https://go.theavalanche.net/conversation/<did>`
+    ///   `https://go.theavalanche.net/invite/<base64url {"inviter_did":…}>`
+    @discardableResult
+    private func handleContactLink(_ raw: String) -> Bool {
+        guard let did = Self.recipientDid(fromContactLink: raw) else { return false }
+        guard !chips.contains(where: { $0.did == did }) else { return true }
+        addChip(did: did, displayName: "")
+        return true
+    }
+
+    /// Extract a recipient DID from a contact link, or `nil` if it isn't one.
+    /// Decodes the invite token locally — we only need the DID to make a chip,
+    /// not full server validation.
+    static func recipientDid(fromContactLink raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), AppState.isDeepLink(url) else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard parts.count >= 2 else { return nil }
+        switch parts[0] {
+        case "conversation":
+            return parts[1].hasPrefix("did:") ? parts[1] : nil
+        case "invite":
+            guard let data = Data(base64URLEncoded: parts[1]),
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let did = payload["inviter_did"] as? String,
+                  did.hasPrefix("did:") else { return nil }
+            return did
+        default:
+            return nil
+        }
+    }
+
     private func commitQueryAsChip() {
         if queryLooksLikeDid {
             addChip(did: trimmedQuery, displayName: "")
@@ -368,9 +411,14 @@ private struct ContactPickerSheet: View {
     let excludedDids: Set<String>
     let nameFor: (ContactRowFfi) -> String
     let onSelect: (ContactRowFfi) -> Void
+    /// Adds the recipient encoded in a scanned/pasted contact link; returns
+    /// false if the payload isn't a recognizable Avalanche contact link.
+    let onScanLink: (String) -> Bool
 
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
+    @State private var showingScanner = false
+    @State private var scanError: String?
 
     private var filtered: [ContactRowFfi] {
         let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -387,6 +435,19 @@ private struct ContactPickerSheet: View {
     var body: some View {
         NavigationStack {
             List {
+                Button {
+                    scanError = nil
+                    showingScanner = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.title3)
+                            .frame(width: 32, height: 32)
+                            .foregroundStyle(Color.avBrand)
+                        Text("Scan QR Code")
+                            .foregroundStyle(Color.avBrand)
+                    }
+                }
                 if !people.isEmpty {
                     Section("People") {
                         ForEach(people, id: \.did, content: row)
@@ -411,8 +472,35 @@ private struct ContactPickerSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .accessibilityLabel("Close")
                 }
+            }
+            .sheet(isPresented: $showingScanner) {
+                NavigationStack {
+                    QRScannerView { value in
+                        showingScanner = false
+                        if onScanLink(value) {
+                            dismiss()
+                        } else {
+                            scanError = "That QR code isn't an Avalanche contact link."
+                        }
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { showingScanner = false }
+                        }
+                    }
+                }
+            }
+            .alert("Couldn't add contact", isPresented: .constant(scanError != nil)) {
+                Button("OK") { scanError = nil }
+            } message: {
+                Text(scanError ?? "")
             }
         }
     }

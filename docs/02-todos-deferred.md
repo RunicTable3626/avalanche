@@ -12,6 +12,7 @@
 - Scroll position: remove invisible "bottom" anchor hack in ConversationView (Color.clear spacer) when scroll position saving is implemented
 - Account switcher UI for multi-account support
 - My QR Code screen uses `accounts.first` — should use the active/selected account once multi-account is implemented
+- Consider whether we should hit `validateInvite` endpoint during 'compose recipient' scan/paste for a server invite token.
 
 ## Privacy / identity
 - Consider allowing `did:local:` DIDs for human (non-bot) accounts, not just bots. Allowing `did:local:` for humans would let small orgs run a homeserver without publishing identities globally.

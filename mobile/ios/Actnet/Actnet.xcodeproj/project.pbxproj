@@ -30,6 +30,7 @@
 		638610176DD56586489BAF89 /* ActnetApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65A7BC7A36A4F6D36947106A /* ActnetApp.swift */; };
 		6C9898720C9563E270D15E23 /* RecoveryExplainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27783892A8D4D88BE570F79C /* RecoveryExplainerView.swift */; };
 		766032ADCE0724DBF99B68F5 /* ProjectWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6264C3F09805D88EB5983A6 /* ProjectWebView.swift */; };
+		784454627F0BB442850E2F3A /* ContactAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = D93902C84CDE9256ABD4CC50 /* ContactAvatar.swift */; };
 		806102B5C1375970718F64DA /* NetworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDB23D99F22D6A488DD61F19 /* NetworkView.swift */; };
 		835054B2BD1DA05A5F04B452 /* Base64URL.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E8624C86E5A8D3876B5189E /* Base64URL.swift */; };
 		8507FF41B757A3F39D78BA55 /* PasskeyExplainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD3B02F10A6C2E1DFFB655B9 /* PasskeyExplainerView.swift */; };
@@ -109,6 +110,7 @@
 		D0B344D75428AFD0B731E724 /* AccountAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountAvatar.swift; sourceTree = "<group>"; };
 		D3E414B6BFBC7FD68C41B63E /* SecureEnclaveKeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureEnclaveKeyManager.swift; sourceTree = "<group>"; };
 		D8CA6139805AD099FD6E40C8 /* SplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashView.swift; sourceTree = "<group>"; };
+		D93902C84CDE9256ABD4CC50 /* ContactAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactAvatar.swift; sourceTree = "<group>"; };
 		DADF188CB0F720072C71A2DF /* app_core.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = app_core.swift; path = ../Generated/app_core.swift; sourceTree = "<group>"; };
 		DD3B02F10A6C2E1DFFB655B9 /* PasskeyExplainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyExplainerView.swift; sourceTree = "<group>"; };
 		E5E1613DCC5CA3E0E49D097E /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
@@ -297,6 +299,7 @@
 			isa = PBXGroup;
 			children = (
 				D0B344D75428AFD0B731E724 /* AccountAvatar.swift */,
+				D93902C84CDE9256ABD4CC50 /* ContactAvatar.swift */,
 				9C977CCCEBCC89682DA83AC6 /* LogViewerView.swift */,
 				14AE2F220E680D0CE0A5810E /* MainTabView.swift */,
 				CA3B34B7A3FF40359D732B62 /* OfflineBanner.swift */,
@@ -391,6 +394,7 @@
 				4CB5F41795DCD29D8786B22B /* CallsView.swift in Sources */,
 				DCB3ED6719400E9479A29C98 /* ChatsView.swift in Sources */,
 				E74703FA755ACEF9C2B0DAA5 /* ComposeMessageView.swift in Sources */,
+				784454627F0BB442850E2F3A /* ContactAvatar.swift in Sources */,
 				947A00551C7A5A62A0638A14 /* Conversation.swift in Sources */,
 				C8BE5993A5A4E8838F9D0C29 /* ConversationRow.swift in Sources */,
 				FE24D043CB770E44A2F5F3EE /* ConversationView.swift in Sources */,

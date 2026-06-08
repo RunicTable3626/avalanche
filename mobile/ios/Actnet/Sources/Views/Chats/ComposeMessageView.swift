@@ -201,17 +201,28 @@ struct ComposeMessageView: View {
 
     private func contactRow(_ c: ContactRowFfi) -> some View {
         Button {
-            let name = c.displayName.isEmpty ? shortDid(c.did) : c.displayName
-            addChip(did: c.did, displayName: name)
+            addChip(did: c.did, displayName: contactName(c))
         } label: {
-            VStack(alignment: .leading) {
-                Text(c.displayName.isEmpty ? shortDid(c.did) : c.displayName)
+            HStack(spacing: 10) {
+                ContactAvatar(name: contactName(c), size: 32)
+                Text(contactName(c))
                     .foregroundStyle(.primary)
-                if !c.displayName.isEmpty {
-                    Text(c.did).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
+                    .lineLimit(1)
             }
         }
+    }
+
+    /// The name to show for a contact. Resolves through the shared
+    /// `AppState.resolvedName` path so humans (cached profile) and bots
+    /// (server record) render identically; the contact-list rows' own
+    /// `displayName` is seeded into that cache in `loadContacts`. Never a DID.
+    /// (User-set overrides — nickname/photo, docs/35 — slot in here once
+    /// stored.)
+    private func contactName(_ c: ContactRowFfi) -> String {
+        guard let id = activeAccountId else {
+            return c.displayName.isEmpty ? "Unknown" : c.displayName
+        }
+        return appState.resolvedName(for: c.did, accountId: id)
     }
 
     private var composerBar: some View {
@@ -245,6 +256,12 @@ struct ComposeMessageView: View {
         let rows = await appState.listContacts(accountId: id)
         await MainActor.run {
             self.allContacts = rows
+            // Feed the names we already have into the shared resolver so it
+            // doesn't re-fetch them; bots (no cached profile name) fall through
+            // to the server lookup via `resolvedName`.
+            for c in rows {
+                appState.cacheDisplayName(c.displayName, for: c.did)
+            }
         }
     }
 
@@ -261,8 +278,7 @@ struct ComposeMessageView: View {
         if queryLooksLikeDid {
             addChip(did: trimmedQuery, displayName: "")
         } else if let first = peopleResults.first ?? otherResults.first {
-            let name = first.displayName.isEmpty ? shortDid(first.did) : first.displayName
-            addChip(did: first.did, displayName: name)
+            addChip(did: first.did, displayName: contactName(first))
         }
     }
 

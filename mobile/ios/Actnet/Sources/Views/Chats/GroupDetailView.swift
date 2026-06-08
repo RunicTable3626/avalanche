@@ -29,11 +29,10 @@ struct GroupDetailView: View {
                     }
                     Section("Members (\(s.members.count))") {
                         ForEach(s.members, id: \.encryptedMemberId) { member in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(displayName(for: member.did))
-                                    Text(member.did).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                }
+                            HStack(spacing: 10) {
+                                ContactAvatar(name: appState.resolvedName(for: member.did, accountId: accountId), size: 32)
+                                Text(appState.resolvedName(for: member.did, accountId: accountId))
+                                    .lineLimit(1)
                                 Spacer()
                                 if member.role == 1 {
                                     Text("Admin").font(.caption2)
@@ -75,17 +74,6 @@ struct GroupDetailView: View {
         .navigationTitle("Group info")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
-    }
-
-    private func displayName(for did: String) -> String {
-        let cached = appState.displayName(for: did, accountId: accountId)
-        if !cached.isEmpty, cached != did { return cached }
-        return shortDid(did)
-    }
-
-    private func shortDid(_ did: String) -> String {
-        if did.count > 18 { return String(did.prefix(12)) + "…" + String(did.suffix(4)) }
-        return did
     }
 
     private func load() async {

@@ -459,10 +459,35 @@ final class AppState: ObservableObject {
 
     /// Returns the cached display name for a DID, or the DID itself if unknown.
     /// Kicks off a background fetch if not cached yet.
+    ///
+    /// This is the single client-side name resolver: it unifies the two
+    /// server/client name sources (encrypted profile for humans, server record
+    /// for bots — see `resolveDisplayName`) behind one cache. The DID return is
+    /// an *unresolved* sentinel used by the conversation-title flow; anything
+    /// rendering a name to the user should call `resolvedName(for:)`, which
+    /// never yields a DID.
     func displayName(for did: String, accountId: String) -> String {
         if let name = displayNameCache[did] { return name }
         resolveDisplayName(did: did, accountId: accountId)
         return did
+    }
+
+    /// UI-facing display name for a DID: the resolved name, or `"Unknown"`
+    /// while it resolves (or if it never does). Never returns a DID — DIDs are
+    /// not a user-visible concept. This is the only accessor UI should use to
+    /// show someone's name, so human and bot names always flow through the
+    /// same path.
+    func resolvedName(for did: String, accountId: String) -> String {
+        let name = displayName(for: did, accountId: accountId)
+        return name == did ? "Unknown" : name
+    }
+
+    /// Seed the name cache with a name a caller already holds (e.g. the
+    /// contact-list FFI rows carry the cached profile name), so the async
+    /// resolver doesn't re-fetch it. No-op if empty or already cached.
+    func cacheDisplayName(_ name: String, for did: String) {
+        guard !name.isEmpty, displayNameCache[did] == nil else { return }
+        applyResolvedDisplayName(did: did, name: name)
     }
 
     /// Resolve a display name for a DID. Two sources, in order:

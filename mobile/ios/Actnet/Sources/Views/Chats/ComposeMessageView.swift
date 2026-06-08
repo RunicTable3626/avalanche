@@ -17,6 +17,7 @@ struct ComposeMessageView: View {
     @State private var allContacts: [ContactRowFfi] = []
     @State private var sending: Bool = false
     @State private var errorMessage: String?
+    @State private var showingContactPicker = false
     /// Lets the autocomplete / DID-submit paths push a chip into the
     /// `UITextView`-backed recipient field, which owns the chip content.
     @StateObject private var fieldHandle = RecipientFieldHandle()
@@ -118,6 +119,14 @@ struct ComposeMessageView: View {
             }
         }
         .task { await loadContacts() }
+        .sheet(isPresented: $showingContactPicker) {
+            ContactPickerSheet(
+                contacts: allContacts,
+                excludedDids: Set(chips.map(\.did)),
+                nameFor: contactName,
+                onSelect: { c in addChip(did: c.did, displayName: contactName(c)) }
+            )
+        }
     }
 
     private var accountPicker: some View {
@@ -137,15 +146,26 @@ struct ComposeMessageView: View {
 
     private var recipientField: some View {
         VStack(alignment: .leading, spacing: 6) {
-            RecipientTokenField(
-                chips: $chips,
-                query: $query,
-                prefix: "To:",
-                placeholder: "Type a name",
-                handle: fieldHandle,
-                onSubmit: commitQueryAsChip
-            )
-            .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(alignment: .top, spacing: 8) {
+                RecipientTokenField(
+                    chips: $chips,
+                    query: $query,
+                    prefix: "To:",
+                    placeholder: "Type a name",
+                    handle: fieldHandle,
+                    onSubmit: commitQueryAsChip
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button {
+                    showingContactPicker = true
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .font(.title2)
+                        .foregroundStyle(Color.avBrand)
+                }
+                .accessibilityLabel("Add recipient from contacts")
+            }
 
             if chips.count >= 2 {
                 HStack {
@@ -337,6 +357,79 @@ struct ComposeMessageView: View {
         }
     }
 
+}
+
+/// Full-list contact picker presented from the recipient field's "+" button.
+/// Mirrors the inline autocomplete's People / Other split, but always shows the
+/// whole curated/known set (filterable) rather than reacting to the typed query.
+/// Selecting a contact adds it as a chip and dismisses.
+private struct ContactPickerSheet: View {
+    let contacts: [ContactRowFfi]
+    let excludedDids: Set<String>
+    let nameFor: (ContactRowFfi) -> String
+    let onSelect: (ContactRowFfi) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var search = ""
+
+    private var filtered: [ContactRowFfi] {
+        let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return contacts.filter { c in
+            guard !excludedDids.contains(c.did) else { return false }
+            guard !q.isEmpty else { return true }
+            return nameFor(c).lowercased().contains(q) || c.did.lowercased().contains(q)
+        }
+    }
+
+    private var people: [ContactRowFfi] { filtered.filter(\.isCurated) }
+    private var other: [ContactRowFfi] { filtered.filter { !$0.isCurated } }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !people.isEmpty {
+                    Section("People") {
+                        ForEach(people, id: \.did, content: row)
+                    }
+                }
+                if !other.isEmpty {
+                    Section("Other") {
+                        ForEach(other, id: \.did, content: row)
+                    }
+                }
+                if filtered.isEmpty {
+                    Text("No contacts to add.")
+                        .foregroundStyle(.secondary)
+                        .font(.footnote)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Color.avPaper)
+            .searchable(text: $search, prompt: "Search contacts")
+            .navigationTitle("Add Recipient")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func row(_ c: ContactRowFfi) -> some View {
+        Button {
+            onSelect(c)
+            dismiss()
+        } label: {
+            HStack(spacing: 10) {
+                ContactAvatar(name: nameFor(c), size: 32)
+                Text(nameFor(c))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+        }
+    }
 }
 
 #if DEBUG

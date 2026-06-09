@@ -55,6 +55,16 @@ pub struct AccountInfoResponse {
     pub is_bot: bool,
 }
 
+/// One of a recipient account's active devices, with the registration id the
+/// server currently holds for it. Senders compare this against the
+/// registration id baked into their local session to detect a peer that
+/// re-registered the device (and thus a stale session to re-establish).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceRegistration {
+    pub device_id: i32,
+    pub registration_id: i32,
+}
+
 // ── Authentication ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

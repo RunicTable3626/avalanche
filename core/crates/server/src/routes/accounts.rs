@@ -54,9 +54,22 @@ async fn get_account_info(
 #[derive(Serialize)]
 struct DevicesResponse {
     device_ids: Vec<i32>,
+    /// Same devices as `device_ids`, each paired with its current
+    /// `registration_id`. Senders use the registration id to detect a session
+    /// that has gone stale because the peer re-registered the device (the
+    /// sealed-sender group-send path can't surface a stale-device error, so
+    /// the sender reconciles client-side). Kept alongside `device_ids` so
+    /// existing consumers that only need the id list are unaffected.
+    devices: Vec<DeviceEntry>,
 }
 
-/// List the active device_ids for an account. Used by senders to fan-out
+#[derive(Serialize)]
+struct DeviceEntry {
+    device_id: i32,
+    registration_id: i32,
+}
+
+/// List the active devices for an account. Used by senders to fan-out
 /// encrypted message envelopes across all of the recipient's devices.
 async fn list_devices(
     State(state): State<AppState>,
@@ -69,7 +82,14 @@ async fn list_devices(
         return Err(ServerError::NotFound);
     }
     Ok(Json(DevicesResponse {
-        device_ids: devices.into_iter().map(|d| d.device_id).collect(),
+        device_ids: devices.iter().map(|d| d.device_id).collect(),
+        devices: devices
+            .into_iter()
+            .map(|d| DeviceEntry {
+                device_id: d.device_id,
+                registration_id: d.registration_id,
+            })
+            .collect(),
     }))
 }
 

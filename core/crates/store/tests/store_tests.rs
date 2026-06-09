@@ -22,6 +22,54 @@ async fn store_satisfies_crypto_store_trait() {
 }
 
 #[tokio::test]
+async fn is_trusted_identity_is_direction_aware() {
+    use libsignal_protocol::{Direction, DeviceId, IdentityKey, IdentityKeyStore, ProtocolAddress};
+
+    // Build libsignal IdentityKeys via the crypto newtype's public bytes.
+    fn fresh_key() -> IdentityKey {
+        IdentityKey::decode(&crypto::IdentityKeyPair::generate().public_key().serialize()).unwrap()
+    }
+
+    let mut store = Store::open_in_memory().await.unwrap();
+    let addr = ProtocolAddress::new("peer-uuid".to_string(), DeviceId::try_from(1u32).unwrap());
+
+    let original = fresh_key();
+    let rotated = fresh_key();
+
+    // First contact (trust-on-first-use): trusted, then recorded.
+    assert!(store
+        .is_trusted_identity(&addr, &original, Direction::Receiving)
+        .await
+        .unwrap());
+    IdentityKeyStore::save_identity(&mut store, &addr, &original)
+        .await
+        .unwrap();
+
+    // Same key: trusted.
+    assert!(store
+        .is_trusted_identity(&addr, &original, Direction::Receiving)
+        .await
+        .unwrap());
+
+    // Changed key (peer re-registered): trusted for Sending so a send can
+    // re-establish, but rejected for Receiving so inbound attribution stays strict.
+    assert!(
+        store
+            .is_trusted_identity(&addr, &rotated, Direction::Sending)
+            .await
+            .unwrap(),
+        "a send must auto-accept a re-registered peer's new key"
+    );
+    assert!(
+        !store
+            .is_trusted_identity(&addr, &rotated, Direction::Receiving)
+            .await
+            .unwrap(),
+        "an inbound message with a changed key must not be silently trusted"
+    );
+}
+
+#[tokio::test]
 async fn message_queue_ordering() {
     use store::messages::QueuedMessage;
     use types::{MessageId, Timestamp};

@@ -1128,14 +1128,20 @@ pub async fn send_group_message(
         let sid_name = sid.service_id_string();
         let sid_fixed = sid.service_id_fixed_width_binary().to_vec();
         let emi_bytes = zkgroup::serialize(&group_key.encrypt_member_id(did));
-        let device_ids = client.fetch_devices(did).await?;
-        if device_ids.is_empty() {
-            return Err(AppError::Protocol(format!(
-                "no active devices for recipient {did}"
-            )));
-        }
+        // Establish/refresh a session with every device of this member before
+        // we encrypt. Without this, `encrypt_group_envelope` fails with
+        // `NoSession` for any member we never DM'd (e.g. someone an admin added
+        // after us) or whose device set has since changed.
+        let device_ids = crate::messaging::ensure_group_recipient_sessions(
+            store,
+            client,
+            sender_did,
+            sender_device_id,
+            did,
+        )
+        .await?;
         for dev_id in device_ids {
-            let dev = DeviceId::try_from(dev_id as u32)
+            let dev = DeviceId::try_from(dev_id)
                 .map_err(|_| AppError::Protocol("device_id 0 is reserved".into()))?;
             destinations.push(ProtocolAddress::new(sid_name.clone(), dev));
         }

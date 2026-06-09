@@ -17,6 +17,111 @@ use crate::{
     AppCore, AppCoreInner, AppError, DecryptedMessage, DeliveryStatusUpdate, IncomingEvent,
 };
 
+/// Ensure a usable Double Ratchet session exists for `(recipient_did, device_id)`.
+///
+/// If there is no session (or `force_refresh` is set), fetch that device's
+/// prekey bundle and run X3DH. `force_refresh` discards any existing session
+/// first — used after a stale-device signal (DM path) or when the peer's
+/// registration id has changed (group path).
+pub(crate) async fn ensure_session(
+    store: &mut store::Store,
+    client: &net::Client,
+    local: &DeviceAddress,
+    recipient_did: &str,
+    device_id: u32,
+    force_refresh: bool,
+) -> Result<(), AppError> {
+    let recipient_sid = crypto::groups::did_to_service_id_string(recipient_did);
+    let recipient_addr =
+        DeviceAddress::new(AccountId::new(&recipient_sid), DeviceId::new(device_id));
+
+    if !force_refresh {
+        use libsignal_protocol::SessionStore;
+        let protocol_addr = libsignal_protocol::ProtocolAddress::new(
+            recipient_sid.clone(),
+            libsignal_protocol::DeviceId::try_from(device_id).unwrap(),
+        );
+        if store
+            .load_session(&protocol_addr)
+            .await
+            .map_err(|e| AppError::Crypto(crypto::CryptoError::Signal(e)))?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
+
+    let bundle = client
+        .fetch_prekey_bundle(recipient_did, device_id as i32)
+        .await?;
+    let recipient_bundle = crypto::RecipientKeyBundle {
+        identity_key: bundle.identity_key.clone(),
+        registration_id: bundle.registration_id as u32,
+        device_id,
+        signed_prekey: crypto::SignedPreKey {
+            id: bundle.signed_prekey_id as u32,
+            public_key: bundle.signed_prekey_public,
+            signature: bundle.signed_prekey_signature,
+        },
+        one_time_prekey: bundle.one_time_prekey.map(|(id, pk)| crypto::OneTimePreKey {
+            id: id as u32,
+            public_key: pk,
+        }),
+        kyber_prekey: crypto::prekeys::KyberPreKey {
+            id: bundle.kyber_prekey_id as u32,
+            public_key: bundle.kyber_prekey_public,
+            signature: bundle.kyber_prekey_signature,
+        },
+    };
+    session::initiate_session(store, local, &recipient_addr, &recipient_bundle).await?;
+    Ok(())
+}
+
+/// Reconcile the sender's sessions with every active device of `recipient_did`
+/// ahead of a group sealed-sender fan-out, returning the device-id list to
+/// address.
+///
+/// For each device the server currently reports we:
+/// - establish a session if we don't have one (a member we never DM'd, or one
+///   added after us whose join-time SKDM never landed), and
+/// - re-run X3DH if our session's registration id is stale relative to the
+///   server's (the peer re-registered the device) — the case the sealed-sender
+///   send endpoint can't signal back, so we detect it here.
+///
+/// This is what lets `encrypt_group_envelope` find a session for every
+/// destination instead of failing with `NoSession`.
+pub(crate) async fn ensure_group_recipient_sessions(
+    store: &mut store::Store,
+    client: &net::Client,
+    sender_did: &str,
+    sender_device_id: u32,
+    recipient_did: &str,
+) -> Result<Vec<u32>, AppError> {
+    let local = DeviceAddress::new(
+        AccountId::new(crypto::groups::did_to_service_id_string(sender_did)),
+        DeviceId::new(sender_device_id),
+    );
+    let devices = client.fetch_device_registrations(recipient_did).await?;
+    if devices.is_empty() {
+        return Err(AppError::Protocol(format!(
+            "no active devices for recipient {recipient_did}"
+        )));
+    }
+
+    let recipient_sid = crypto::groups::did_to_service_id_string(recipient_did);
+    let mut device_ids = Vec::with_capacity(devices.len());
+    for d in devices {
+        let device_id = d.device_id as u32;
+        let recipient_addr =
+            DeviceAddress::new(AccountId::new(&recipient_sid), DeviceId::new(device_id));
+        let current_reg = session::remote_registration_id(store, &recipient_addr).await?;
+        let force = matches!(current_reg, Some(reg) if reg != d.registration_id as u32);
+        ensure_session(store, client, &local, recipient_did, device_id, force).await?;
+        device_ids.push(device_id);
+    }
+    Ok(device_ids)
+}
+
 impl AppCoreInner {
     /// Process an inbound `profile_key` from a ContentMessage. If non-empty
     /// and different from any cached key, fetch the sender's encrypted blob,
@@ -348,55 +453,15 @@ impl AppCoreInner {
             DeviceId::new(recipient_device_id),
         );
 
-        let has_session = if force_refresh {
-            false
-        } else {
-            use libsignal_protocol::SessionStore;
-            let protocol_addr = libsignal_protocol::ProtocolAddress::new(
-                recipient_sid.clone(),
-                libsignal_protocol::DeviceId::try_from(recipient_device_id).unwrap(),
-            );
-            self.store
-                .load_session(&protocol_addr)
-                .await
-                .map_err(|e| AppError::Crypto(crypto::CryptoError::Signal(e)))?
-                .is_some()
-        };
-
-        if !has_session {
-            let bundle = self
-                .client
-                .fetch_prekey_bundle(recipient_did, recipient_device_id as i32)
-                .await?;
-
-            let recipient_bundle = crypto::RecipientKeyBundle {
-                identity_key: bundle.identity_key.clone(),
-                registration_id: bundle.registration_id as u32,
-                device_id: recipient_device_id,
-                signed_prekey: crypto::SignedPreKey {
-                    id: bundle.signed_prekey_id as u32,
-                    public_key: bundle.signed_prekey_public,
-                    signature: bundle.signed_prekey_signature,
-                },
-                one_time_prekey: bundle.one_time_prekey.map(|(id, pk)| crypto::OneTimePreKey {
-                    id: id as u32,
-                    public_key: pk,
-                }),
-                kyber_prekey: crypto::prekeys::KyberPreKey {
-                    id: bundle.kyber_prekey_id as u32,
-                    public_key: bundle.kyber_prekey_public,
-                    signature: bundle.kyber_prekey_signature,
-                },
-            };
-
-            session::initiate_session(
-                &mut self.store,
-                &self.local_address,
-                &recipient_addr,
-                &recipient_bundle,
-            )
-            .await?;
-        }
+        ensure_session(
+            &mut self.store,
+            &self.client,
+            &self.local_address,
+            recipient_did,
+            recipient_device_id,
+            force_refresh,
+        )
+        .await?;
 
         let encrypted = session::encrypt(
             &mut self.store,

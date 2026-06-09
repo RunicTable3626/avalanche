@@ -175,8 +175,21 @@ impl signal::IdentityKeyStore for Store {
         &self,
         address: &signal::ProtocolAddress,
         identity: &signal::IdentityKey,
-        _direction: signal::Direction,
+        direction: signal::Direction,
     ) -> Result<bool, signal::SignalProtocolError> {
+        // Direction-aware, matching Signal's default policy:
+        //
+        // - Sending: trust even when the key changed. We initiated, so we
+        //   auto-accept a re-registered peer's new identity rather than block
+        //   the send — this is what lets a session be (re-)established after a
+        //   peer reinstalls. (A "safety number changed" surface in the UI is
+        //   the intended complement, so the change is still noticeable.)
+        // - Receiving: strict. An *inbound* message claiming a known address
+        //   with a different key is not silently attributed to that peer.
+        if direction == signal::Direction::Sending {
+            return Ok(true);
+        }
+
         let key = addr_key(address);
         let incoming_bytes = identity.serialize().to_vec();
 

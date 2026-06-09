@@ -616,6 +616,32 @@ impl Client {
         Ok(body.device_ids)
     }
 
+    /// Like [`fetch_devices`], but returns each device paired with its current
+    /// `registration_id`. The group sealed-sender send path uses this to
+    /// reconcile stale sessions before fanning out (the send endpoint can't
+    /// report a stale device, since sealed sender hides the sender).
+    pub async fn fetch_device_registrations(
+        &self,
+        did: &str,
+    ) -> Result<Vec<crate::types::DeviceRegistration>, NetError> {
+        let path = format!("/v1/accounts/{}/devices", did);
+        let resp = self
+            .send_authed(reqwest::Method::GET, &path, |b| b)
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            devices: Vec<crate::types::DeviceRegistration>,
+        }
+        let body: Resp = resp.json().await?;
+        Ok(body.devices)
+    }
+
     // ── DID ──────────────────────────────────────────────────────────────
 
     /// Resolve a DID document (public, no auth needed).

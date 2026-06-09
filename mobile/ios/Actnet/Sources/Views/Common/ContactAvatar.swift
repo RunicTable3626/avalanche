@@ -5,7 +5,7 @@ import SwiftUI
 /// circle, matching `AccountAvatar`.
 ///
 /// `imageData` is reserved for the per-contact `photo_override` field
-/// (docs/35-contacts-and-profiles.md) and is `nil` until that feature lands —
+/// (docs/52-contacts-and-profiles.md) and is `nil` until that feature lands —
 /// callers can wire it through with no further change here.
 struct ContactAvatar: View {
     let name: String

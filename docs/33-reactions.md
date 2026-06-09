@@ -11,7 +11,7 @@ Most of this design is uncontroversial and mirrors Signal. The one real decision
 ## Core model
 
 - A reaction is an `(emoji, reactor, target message)` tuple — a small encrypted message in the same conversation as its target, not a content message in the feed.
-- Reactions are **visible to every member of the conversation**, same as the message they're on. No private reactions, consistent with `38-threading.md` (no subset visibility).
+- Reactions are **visible to every member of the conversation**, same as the message they're on. No private reactions, consistent with `32-threading.md` (no subset visibility).
 - Reactions render as a **cluster on the target bubble** — each distinct emoji with a count, your own reaction highlighted. Tapping the cluster shows who reacted with what.
 - **Reactions never enter the feed and never create a conversation row.** They decorate a message; they are not messages you scroll past.
 
@@ -37,11 +37,11 @@ Why this fits:
 
 - **A reaction to your own message may notify you** (a low-priority notification, e.g. "Dana reacted 👍 to your message"), respecting the conversation's mute state. Reactions to *other people's* messages never notify you.
 - **Quiet by default in noisy contexts.** In large/announcement-shaped channels a flood of reactions on an announcement should not generate a notification per reaction — coalesce, or suppress, rather than push each one. (Exact threshold is an implementation detail.)
-- Reactions **do not touch the app-icon badge** and do not mark a conversation unread — receiving a reaction is not unread "discussion you'd otherwise miss." This mirrors the `38-threading.md` badge discipline: the badge is for messages, and a reaction is not a message in the feed.
+- Reactions **do not touch the app-icon badge** and do not mark a conversation unread — receiving a reaction is not unread "discussion you'd otherwise miss." This mirrors the `32-threading.md` badge discipline: the badge is for messages, and a reaction is not a message in the feed.
 
 ## What we are explicitly NOT doing
 
-- **No reactions feed / activity tab.** There is no aggregated "who reacted to my stuff" surface. (Contrast the cross-channel Threads browser in `38-threading.md` — reactions don't earn a shelf slot.)
+- **No reactions feed / activity tab.** There is no aggregated "who reacted to my stuff" surface. (Contrast the cross-channel Threads browser in `32-threading.md` — reactions don't earn a shelf slot.)
 - **No badges or unread counts from reactions.** They never contribute to any count.
 - **No private or subset-visibility reactions.**
 - **No custom/uploaded emoji** in the first cut — system emoji only. (Custom emoji is a possible later addition; out of scope here.)

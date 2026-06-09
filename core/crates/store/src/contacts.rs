@@ -1,6 +1,6 @@
 //! Minimal contact table backing the People list and compose autocomplete.
 //!
-//! See `docs/35-contacts-and-profiles.md` for the full design. This module
+//! See `docs/52-contacts-and-profiles.md` for the full design. This module
 //! implements the smallest useful slice: per-DID `is_curated` flag (true after
 //! any deliberate gesture — sending a DM, inviting to a group) and
 //! `last_interaction_at` for recency sort. Display-name resolution still flows

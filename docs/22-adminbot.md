@@ -287,7 +287,7 @@ message OfficialBotAttestation {
 }
 ```
 
-Profile is re-uploaded after each refresh; per `docs/35-contacts-and-profiles.md`, profile_version is bumped and contacts pick up the new copy on their next fetch.
+Profile is re-uploaded after each refresh; per `docs/52-contacts-and-profiles.md`, profile_version is bumped and contacts pick up the new copy on their next fetch.
 
 Adminbot self-officializes at bootstrap (same code path — adds itself to its own `official_bots` table, runs one issuance cycle). No special-cased "implicitly official" logic.
 
@@ -305,7 +305,7 @@ Adminbot self-officializes at bootstrap (same code path — adds itself to its o
 
 If the inviter's profile carries a valid `OfficialAttestationBundle` whose delegation cert is signed by the hosting server's trust root and whose attestation is not expired, the client auto-accepts the invite. There is no preference toggle and no per-inviter override.
 
-1. Resolve the sender's profile (`docs/35-contacts-and-profiles.md`).
+1. Resolve the sender's profile (`docs/52-contacts-and-profiles.md`).
 2. If `official_attestation` is present and the chain verifies: call `accept_invite_async` immediately and surface the new group in the Chats tab.
 3. Otherwise: regular accept-or-decline UX.
 

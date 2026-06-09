@@ -194,7 +194,7 @@ pub const ALTER_MIGRATIONS: &[&str] = &[
         record           BLOB NOT NULL,\
         PRIMARY KEY (address, distribution_id)\
     )",
-    // Minimal contact table from docs/35-contacts-and-profiles.md.
+    // Minimal contact table from docs/52-contacts-and-profiles.md.
     // `is_curated` flips true on any deliberate gesture (sending a DM,
     // inviting to a group, etc.) and is the single source of truth for
     // the People list. `last_interaction_at` drives recency sort.

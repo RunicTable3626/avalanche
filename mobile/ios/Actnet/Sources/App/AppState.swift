@@ -986,7 +986,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    // MARK: - Contacts (docs/35-contacts-and-profiles.md)
+    // MARK: - Contacts (docs/52-contacts-and-profiles.md)
 
     /// Snapshot of the contact list for the given account, joined with
     /// cached display names. The compose autocomplete is built directly

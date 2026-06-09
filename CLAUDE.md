@@ -44,7 +44,7 @@ Read these first — they cover the overall design, technical approach, and back
 - `docs/01-technical-implementation.md` — tech stack, crypto approach, repo structure, staged build plan
 - `docs/02-todos-deferred.md` — deferred TODOs / backlog
 
-Additional docs exist in `docs/` covering specific subsystems (server, projects, mobile, etc.) — numbering scheme: first digit = category (1=server, 2=projects, 3=mobile apps, 4=deploy/infra).
+Additional docs exist in `docs/` covering specific subsystems (server, projects, mobile, etc.) — numbering scheme: first digit = category (0=core design, 1=server & protocol, 2=projects, 3=messaging & conversation UX, 4=deploy/infra, 5=identity/accounts/contacts). See the documentation map at the top of `docs/00-design.md` for the full index.
 
 ## Architecture
 

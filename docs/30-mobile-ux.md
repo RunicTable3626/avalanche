@@ -51,7 +51,7 @@ Creating a separate account is the right choice when you want to keep identities
 
 ## Account recovery (passkey)
 
-During initial signup, after entering a display name, the app prompts the user to create a passkey. This is a single biometric prompt (Face ID / fingerprint) — the passkey is stored in the user's password manager or iCloud Keychain and syncs across their devices automatically. The passkey protects an encrypted recovery blob (containing the user's DID rotation key and identity keypair) stored on each homeserver the user is registered on. See `docs/33-identity-auth-recovery.md` for the full design.
+During initial signup, after entering a display name, the app prompts the user to create a passkey. This is a single biometric prompt (Face ID / fingerprint) — the passkey is stored in the user's password manager or iCloud Keychain and syncs across their devices automatically. The passkey protects an encrypted recovery blob (containing the user's DID rotation key and identity keypair) stored on each homeserver the user is registered on. See `docs/50-identity-auth-recovery.md` for the full design.
 
 ## Display name
 
@@ -106,11 +106,11 @@ A single compose flow creates both DMs and groups. Like iMessage, the *number of
 A Messages-style chip field, not Signal's stacked contact-list-with-checkmarks UI.
 
 - Confirmed recipients render as **chips** showing display name (and small avatar). You can tap to highlight a chip; backspace while highlighted, or backspace at an empty caret after a chip, deletes.
-- **Autocomplete** is backed by the local contacts table per `docs/35-contacts-and-profiles.md`. Results mirror that doc's search shape:
+- **Autocomplete** is backed by the local contacts table per `docs/52-contacts-and-profiles.md`. Results mirror that doc's search shape:
   - **People** section first (rows where `is_curated`) — matched against nickname, profile `display_name`, notes, and DID prefix.
   - **Other** section below (every non-removed, non-blocked row) — matched against `display_name` and DID prefix only. These are folks the user has encountered (group co-members, message-request senders) but hasn't curated yet.
 - **Direct DID entry.** If what's typed looks like a DID (`did:[anything]`), Enter accepts it as-is. This is the path for adding someone whose DID you have but haven't met through the contact graph yet; the chip is shown grayed out because the client isn't yet sure if that DID can be reached on the chosen server.
-- **Empty state.** A brand-new user has no contact rows at all. The autocomplete dropdown shows a single hint: "Type a DID, or wait — anyone you message will appear here." No system-contact import; per `docs/35-contacts-and-profiles.md` we don't pull from OS contacts.
+- **Empty state.** A brand-new user has no contact rows at all. The autocomplete dropdown shows a single hint: "Type a DID, or wait — anyone you message will appear here." No system-contact import; per `docs/52-contacts-and-profiles.md` we don't pull from OS contacts.
 - **Dedupe silently.** Adding the same recipient twice, or yourself, is a no-op.
 - A **`+` button** on the right edge of the recipients box opens a contact browser modal: search bar at top, **People** and **Other** sections (same shape as the inline autocomplete), multi-select with a "Add N" confirm bar.
 - **Cross-server suggestions** stay visible in autocomplete but render **greyed out** below the same-server matches when a server has already been pinned by an existing chip — they're discoverable but de-prioritised, since adding one would conflict with the current server choice.

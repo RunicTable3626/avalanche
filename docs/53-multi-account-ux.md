@@ -44,7 +44,7 @@ Each row shows:
 
 A single entry point at the bottom of the list. Tapping it offers two paths:
 
-- **Recover an identity** — restore an identity that isn't in the list from a saved passkey / recovery key. Creates a new identity group. See `33-identity-auth-recovery.md`.
+- **Recover an identity** — restore an identity that isn't in the list from a saved passkey / recovery key. Creates a new identity group. See `50-identity-auth-recovery.md`.
 - **Add a server to an existing identity** — paste or scan an invite link, then pick which existing identity to join the server as. Adds a new row to that identity's group. The standard server trust-delta screen (`13-federation.md` §Server-join trust-delta screen) gates the join.
 
 The branch between these is presented as two buttons inside the sheet; the user is not asked to disambiguate before tapping the entry point.

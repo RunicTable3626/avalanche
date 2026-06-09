@@ -162,7 +162,7 @@ pub fn derive_rotation_key_from_seed(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
 /// passkey creation — without a passkey there is no PRF output to derive
 /// from, so the rotation key has no recoverable user-held source. The
 /// identity is effectively unrecoverable on device loss; surfaces in the
-/// "skip recovery" path documented in `33-identity-auth-recovery.md`.
+/// "skip recovery" path documented in `50-identity-auth-recovery.md`.
 pub fn generate_rotation_key() -> (Vec<u8>, Vec<u8>) {
     use p256::ecdsa::SigningKey;
     let signing_key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);

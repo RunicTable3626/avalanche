@@ -385,6 +385,25 @@ async fn bot_message_loop(
                 }
             }
 
+            // React 👍 to the user's message before composing a reply — a quick
+            // acknowledgement (and a live exercise of the reaction path,
+            // docs/33). The 1000ms pause above already elapsed, so the reaction
+            // lands shortly after receipt and before the Haiku response.
+            if let Some(sender_ts) = msg.sent_at_ms {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64;
+                let runner = bot.lock().await;
+                if let Err(e) = runner
+                    .app_core
+                    .send_dm_reaction_async(&msg.sender_did, &msg.sender_did, sender_ts, "👍", false, now_ms)
+                    .await
+                {
+                    tracing::warn!("[bot {}] failed to react: {}", bot_did, e);
+                }
+            }
+
             // Generate reply after the read receipt.
             let mut runner = bot.lock().await;
 

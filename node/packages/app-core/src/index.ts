@@ -483,7 +483,12 @@ const deliveryStatusUpdateFromNative = (u: native.DeliveryStatusUpdateJs): Deliv
   deliveryStatus: deliveryFromNum(u.deliveryStatus),
 });
 
-const incomingEventFromNative = (e: native.IncomingEventJs): IncomingEvent => {
+// Returns `null` for event kinds this SDK version doesn't surface (today:
+// reactionUpdated / messageEdited / messageDeleted — docs/33, docs/36 — whose
+// store side-effects are already applied in the core), and for any future kind
+// added in Rust. Skipping rather than throwing keeps node consumers (adminbot,
+// testbot) resilient: a new event variant must not crash a bot that ignores it.
+const incomingEventFromNative = (e: native.IncomingEventJs): IncomingEvent | null => {
   if (e.kind === "message" && e.message) {
     return { kind: "message", message: decryptedMessageFromNative(e.message) };
   }
@@ -500,7 +505,7 @@ const incomingEventFromNative = (e: native.IncomingEventJs): IncomingEvent => {
       },
     };
   }
-  throw new Error(`malformed incoming event: ${JSON.stringify(e)}`);
+  return null;
 };
 
 const adminEventFromNative = (e: native.AdminEventJs): AdminEvent => {
@@ -836,7 +841,10 @@ export class AppCore {
       } catch {
         return;
       }
-      for (const e of batch) yield incomingEventFromNative(e);
+      for (const e of batch) {
+        const ev = incomingEventFromNative(e);
+        if (ev) yield ev;
+      }
     }
   }
 
@@ -852,7 +860,9 @@ export class AppCore {
    */
   async nextEvents(): Promise<IncomingEvent[]> {
     const events = await this._native.nextEvents();
-    return events.map(incomingEventFromNative);
+    return events
+      .map(incomingEventFromNative)
+      .filter((e): e is IncomingEvent => e !== null);
   }
 
   /**

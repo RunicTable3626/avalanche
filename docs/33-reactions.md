@@ -50,5 +50,5 @@ Why this fits:
 ## Behavior to pin down (not blockers)
 
 - **Read/expiry interaction.** A reaction is a tiny message; it should inherit its conversation's expiry timer and not independently resurrect or outlive its target. When the target expires, its reactions go with it.
-- **Reaction to an edited/deleted message.** If the target is deleted, its reactions are dropped. (Editing leaves reactions in place.)
+- **Reaction to an edited/deleted message.** If the target is deleted, its reactions are dropped. (Editing leaves reactions in place — see `36-message-editing-deletion.md`.)
 - **Ordering & races.** Two people reacting with the same emoji at once must converge to a count of 2, not two separate entries — reactions key on `(emoji, reactor)`, so re-applying the same emoji is idempotent per person.

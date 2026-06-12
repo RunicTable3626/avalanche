@@ -16,6 +16,7 @@ use crate::proto::{
 };
 use crate::{
     AppCore, AppCoreInner, AppError, DecryptedMessage, DeliveryStatusUpdate, IncomingEvent,
+    MessageTarget,
 };
 
 /// Ensure a usable Double Ratchet session exists for `(recipient_did, device_id)`.
@@ -630,6 +631,34 @@ impl AppCoreInner {
         groups::send_group_message(store, client, &server_url, &did, device_id, group_id, &bytes)
             .await?;
         Ok(())
+    }
+
+    /// Send a `ContentMessage` body to a conversation target — the single place
+    /// the DM and group transports fork. DMs wrap the body in an envelope and
+    /// fan out per-device (Double Ratchet); groups reuse `send_group_content`
+    /// (sealed-sender + sender keys). Used by the unified `send_reaction` /
+    /// `send_edit` / `send_delete` FFI methods.
+    pub(crate) async fn send_to_target(
+        &mut self,
+        ws: Option<&net::ws::WsConnection>,
+        target: &MessageTarget,
+        body: Body,
+        sent_at_ms: u64,
+    ) -> Result<(), AppError> {
+        match target {
+            MessageTarget::Dm { recipient_did } => {
+                let profile_key = self.own_profile_key().await;
+                let msg = ContentMessage {
+                    body: Some(body),
+                    timestamp_ms: sent_at_ms,
+                    profile_key,
+                };
+                self.send_dm(ws, recipient_did, &msg.encode_to_vec(), None).await
+            }
+            MessageTarget::Group { group_id } => {
+                self.send_group_content(group_id, body, sent_at_ms).await
+            }
+        }
     }
 
     pub(crate) async fn receive_messages(

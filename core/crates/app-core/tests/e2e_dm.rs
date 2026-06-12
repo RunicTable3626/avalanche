@@ -7,7 +7,7 @@
 //!
 //! Each test creates fresh accounts so they don't interfere with each other.
 
-use app_core::AppCore;
+use app_core::{AppCore, MessageTarget};
 use std::path::Path;
 
 fn server_url() -> String {
@@ -177,7 +177,7 @@ async fn alice_reacts_to_a_message_bob_sees_it() {
 
     // Alice reacts 👍 to one of Bob's messages (identified by author+sent_at).
     let target_sent_at = 1_700_000_000_000i64;
-    alice.send_dm_reaction_async(&bob_did, &bob_did, target_sent_at, "👍", false, now_ms()).await.unwrap();
+    alice.send_reaction_async(MessageTarget::Dm { recipient_did: bob_did.clone() }, &bob_did, target_sent_at, "👍", false, now_ms()).await.unwrap();
 
     // Reactor's own store reflects it immediately.
     let alice_conv = format!("dm-{alice_did}-{bob_did}");
@@ -196,14 +196,14 @@ async fn alice_reacts_to_a_message_bob_sees_it() {
     assert_eq!(br[0].target_author, bob_did);
 
     // Re-reacting replaces (one per person per message).
-    alice.send_dm_reaction_async(&bob_did, &bob_did, target_sent_at, "❤️", false, now_ms()).await.unwrap();
+    alice.send_reaction_async(MessageTarget::Dm { recipient_did: bob_did.clone() }, &bob_did, target_sent_at, "❤️", false, now_ms()).await.unwrap();
     bob.receive_messages_async().await.unwrap();
     let br = bob.load_reactions_async(&bob_conv).await.unwrap();
     assert_eq!(br.len(), 1);
     assert_eq!(br[0].emoji, "❤️");
 
     // Removing clears it.
-    alice.send_dm_reaction_async(&bob_did, &bob_did, target_sent_at, "❤️", true, now_ms()).await.unwrap();
+    alice.send_reaction_async(MessageTarget::Dm { recipient_did: bob_did.clone() }, &bob_did, target_sent_at, "❤️", true, now_ms()).await.unwrap();
     bob.receive_messages_async().await.unwrap();
     assert!(bob.load_reactions_async(&bob_conv).await.unwrap().is_empty());
 }

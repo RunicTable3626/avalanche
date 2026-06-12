@@ -9,7 +9,7 @@
 //! Requires a homeserver at `SERVER_URL` (default `http://localhost:3000`).
 //! Run via `make test-e2e`.
 
-use app_core::{AppCore, IncomingEvent};
+use app_core::{AppCore, IncomingEvent, MessageTarget};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -197,7 +197,7 @@ async fn group_reaction_arrives_via_ws_push() {
 
     // Bob reacts 👍 to one of Alice's messages, identified by (author, sent_at).
     let target_sent_at = 1_700_000_000_000i64;
-    bob.send_group_reaction_async(&created.group_id, &alice_did, target_sent_at, "👍", false, 1_700_000_100_000)
+    bob.send_reaction_async(MessageTarget::Group { group_id: created.group_id.clone() }, &alice_did, target_sent_at, "👍", false, 1_700_000_100_000)
         .await
         .unwrap();
 

@@ -37,23 +37,29 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
 
     // MARK: - Reactions / editing / deletion (mock; docs/33, docs/36)
 
-    /// Reactions keyed by the DM conversation id `dm-<mockDid>-<recipientDid>`.
+    /// Reactions keyed by conversation id (`dm-<mockDid>-<peer>` or `group-<id>`).
     private var reactionsByConv: [String: [ReactionFfi]] = [:]
     /// Prior bodies keyed by "<convId>|<author>|<sentAt>".
     private var revisionsByTarget: [String: [MessageRevisionFfi]] = [:]
 
-    private func dmConvId(_ recipientDid: String) -> String { "dm-\(mockDid)-\(recipientDid)" }
+    /// Local conversation id for a target — mirrors the core's `conv_id_for`.
+    private func convId(for target: MessageTarget) -> String {
+        switch target {
+        case .dm(let recipientDid): return "dm-\(mockDid)-\(recipientDid)"
+        case .group(let groupId): return "group-\(groupId)"
+        }
+    }
 
-    func sendDmReaction(recipientDid: String, targetAuthor: String, targetSentAtMs: Int64, emoji: String, remove: Bool, sentAtMs: Int64) throws {
-        let convId = dmConvId(recipientDid)
+    func sendReaction(target: MessageTarget, targetAuthor: String, targetSentAtMs: Int64, emoji: String, remove: Bool, sentAtMs: Int64) throws {
+        let cid = convId(for: target)
         lock.lock(); defer { lock.unlock() }
-        var list = reactionsByConv[convId] ?? []
+        var list = reactionsByConv[cid] ?? []
         // One reaction per (target, reactor=self): drop any prior, then re-add.
         list.removeAll { $0.targetAuthor == targetAuthor && $0.targetSentAtMs == targetSentAtMs && $0.reactorDid == mockDid }
         if !remove {
-            list.append(ReactionFfi(conversationId: convId, targetAuthor: targetAuthor, targetSentAtMs: targetSentAtMs, reactorDid: mockDid, emoji: emoji, reactedAtMs: sentAtMs))
+            list.append(ReactionFfi(conversationId: cid, targetAuthor: targetAuthor, targetSentAtMs: targetSentAtMs, reactorDid: mockDid, emoji: emoji, reactedAtMs: sentAtMs))
         }
-        reactionsByConv[convId] = list
+        reactionsByConv[cid] = list
     }
 
     func loadReactions(conversationId: String) throws -> [ReactionFfi] {
@@ -61,18 +67,17 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         return reactionsByConv[conversationId] ?? []
     }
 
-    func sendDmEdit(recipientDid: String, targetSentAtMs: Int64, newBody: String, sentAtMs: Int64) throws {
-        let convId = dmConvId(recipientDid)
+    func sendEdit(target: MessageTarget, targetSentAtMs: Int64, newBody: String, sentAtMs: Int64) throws {
+        let cid = convId(for: target)
         lock.lock(); defer { lock.unlock() }
-        guard var msgs = storedMessages[convId] else { return }
+        guard var msgs = storedMessages[cid] else { return }
         for i in msgs.indices where msgs[i].senderDid == mockDid && msgs[i].sentAtMs == targetSentAtMs && !msgs[i].deleted {
-            let key = "\(convId)|\(mockDid)|\(targetSentAtMs)"
-            revisionsByTarget[key, default: []].append(MessageRevisionFfi(body: msgs[i].body, replacedAtMs: sentAtMs))
+            revisionsByTarget["\(cid)|\(mockDid)|\(targetSentAtMs)", default: []].append(MessageRevisionFfi(body: msgs[i].body, replacedAtMs: sentAtMs))
             msgs[i].body = newBody
             msgs[i].editedAtMs = sentAtMs
             msgs[i].editCount += 1
         }
-        storedMessages[convId] = msgs
+        storedMessages[cid] = msgs
     }
 
     func loadMessageRevisions(conversationId: String, author: String, sentAtMs: Int64) throws -> [MessageRevisionFfi] {
@@ -80,10 +85,10 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         return revisionsByTarget["\(conversationId)|\(author)|\(sentAtMs)"] ?? []
     }
 
-    func sendDmDelete(recipientDid: String, targetAuthor: String, targetSentAtMs: Int64, forEveryone: Bool, sentAtMs: Int64) throws {
-        let convId = dmConvId(recipientDid)
+    func sendDelete(target: MessageTarget, targetAuthor: String, targetSentAtMs: Int64, forEveryone: Bool, sentAtMs: Int64) throws {
+        let cid = convId(for: target)
         lock.lock(); defer { lock.unlock() }
-        guard var msgs = storedMessages[convId] else { return }
+        guard var msgs = storedMessages[cid] else { return }
         if forEveryone {
             for i in msgs.indices where msgs[i].senderDid == targetAuthor && msgs[i].sentAtMs == targetSentAtMs {
                 msgs[i].body = ""
@@ -93,50 +98,8 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         } else {
             msgs.removeAll { $0.senderDid == targetAuthor && $0.sentAtMs == targetSentAtMs }
         }
-        storedMessages[convId] = msgs
-        reactionsByConv[convId]?.removeAll { $0.targetAuthor == targetAuthor && $0.targetSentAtMs == targetSentAtMs }
-    }
-
-    // Group variants: identical bookkeeping keyed by the `group-<id>` conv id.
-    func sendGroupReaction(groupId: String, targetAuthor: String, targetSentAtMs: Int64, emoji: String, remove: Bool, sentAtMs: Int64) throws {
-        let convId = "group-\(groupId)"
-        lock.lock(); defer { lock.unlock() }
-        var list = reactionsByConv[convId] ?? []
-        list.removeAll { $0.targetAuthor == targetAuthor && $0.targetSentAtMs == targetSentAtMs && $0.reactorDid == mockDid }
-        if !remove {
-            list.append(ReactionFfi(conversationId: convId, targetAuthor: targetAuthor, targetSentAtMs: targetSentAtMs, reactorDid: mockDid, emoji: emoji, reactedAtMs: sentAtMs))
-        }
-        reactionsByConv[convId] = list
-    }
-
-    func sendGroupEdit(groupId: String, targetSentAtMs: Int64, newBody: String, sentAtMs: Int64) throws {
-        let convId = "group-\(groupId)"
-        lock.lock(); defer { lock.unlock() }
-        guard var msgs = storedMessages[convId] else { return }
-        for i in msgs.indices where msgs[i].senderDid == mockDid && msgs[i].sentAtMs == targetSentAtMs && !msgs[i].deleted {
-            revisionsByTarget["\(convId)|\(mockDid)|\(targetSentAtMs)", default: []].append(MessageRevisionFfi(body: msgs[i].body, replacedAtMs: sentAtMs))
-            msgs[i].body = newBody
-            msgs[i].editedAtMs = sentAtMs
-            msgs[i].editCount += 1
-        }
-        storedMessages[convId] = msgs
-    }
-
-    func sendGroupDelete(groupId: String, targetAuthor: String, targetSentAtMs: Int64, forEveryone: Bool, sentAtMs: Int64) throws {
-        let convId = "group-\(groupId)"
-        lock.lock(); defer { lock.unlock() }
-        guard var msgs = storedMessages[convId] else { return }
-        if forEveryone {
-            for i in msgs.indices where msgs[i].senderDid == targetAuthor && msgs[i].sentAtMs == targetSentAtMs {
-                msgs[i].body = ""
-                msgs[i].editedAtMs = nil
-                msgs[i].deleted = true
-            }
-        } else {
-            msgs.removeAll { $0.senderDid == targetAuthor && $0.sentAtMs == targetSentAtMs }
-        }
-        storedMessages[convId] = msgs
-        reactionsByConv[convId]?.removeAll { $0.targetAuthor == targetAuthor && $0.targetSentAtMs == targetSentAtMs }
+        storedMessages[cid] = msgs
+        reactionsByConv[cid]?.removeAll { $0.targetAuthor == targetAuthor && $0.targetSentAtMs == targetSentAtMs }
     }
 
     func fetchProjects() throws -> [ProjectInfoFfi] {

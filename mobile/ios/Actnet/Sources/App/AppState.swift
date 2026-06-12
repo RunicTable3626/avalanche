@@ -1222,11 +1222,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Where a content op for `conversation` is directed — the unified
+    /// `MessageTarget` the core uses for DMs and groups alike.
+    private func messageTarget(for conversation: Conversation) -> MessageTarget? {
+        if let groupId = conversation.groupId { return .group(groupId: groupId) }
+        if let recipientDid = conversation.recipientDid { return .dm(recipientDid: recipientDid) }
+        return nil
+    }
+
     /// Toggle this account's reaction on a message: tapping the emoji we already
     /// have removes it; otherwise it replaces any prior one (one per person per
-    /// message, docs/33). DM only.
+    /// message, docs/33).
     func toggleReaction(message: Message, emoji: String, conversation: Conversation) {
-        guard let core = cores[conversation.accountId] else { return }
+        guard let core = cores[conversation.accountId],
+              let target = messageTarget(for: conversation) else { return }
         let myDid = conversation.accountId
         let convId = conversation.id
         let targetAuthor = message.senderAccountId
@@ -1243,16 +1252,15 @@ final class AppState: ObservableObject {
             list.append(ReactionFfi(conversationId: convId, targetAuthor: targetAuthor, targetSentAtMs: targetSentAt, reactorDid: myDid, emoji: emoji, reactedAtMs: nowMs))
         }
         reactionsByConversation[convId] = list
-        if let groupId = conversation.groupId {
-            Task.detached { try? core.sendGroupReaction(groupId: groupId, targetAuthor: targetAuthor, targetSentAtMs: targetSentAt, emoji: emoji, remove: remove, sentAtMs: nowMs) }
-        } else if let recipientDid = conversation.recipientDid {
-            Task.detached { try? core.sendDmReaction(recipientDid: recipientDid, targetAuthor: targetAuthor, targetSentAtMs: targetSentAt, emoji: emoji, remove: remove, sentAtMs: nowMs) }
+        Task.detached {
+            try? core.sendReaction(target: target, targetAuthor: targetAuthor, targetSentAtMs: targetSentAt, emoji: emoji, remove: remove, sentAtMs: nowMs)
         }
     }
 
     /// Edit one of my own messages in place (docs/36). DM only.
     func editMessage(message: Message, newBody: String, conversation: Conversation) {
-        guard let core = cores[conversation.accountId] else { return }
+        guard let core = cores[conversation.accountId],
+              let target = messageTarget(for: conversation) else { return }
         let trimmed = newBody.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != message.body else { return }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
@@ -1264,17 +1272,16 @@ final class AppState: ObservableObject {
             messagesByConversation[convId] = msgs
         }
         let targetSentAt = message.sentAtMs
-        if let groupId = conversation.groupId {
-            Task.detached { try? core.sendGroupEdit(groupId: groupId, targetSentAtMs: targetSentAt, newBody: trimmed, sentAtMs: nowMs) }
-        } else if let recipientDid = conversation.recipientDid {
-            Task.detached { try? core.sendDmEdit(recipientDid: recipientDid, targetSentAtMs: targetSentAt, newBody: trimmed, sentAtMs: nowMs) }
+        Task.detached {
+            try? core.sendEdit(target: target, targetSentAtMs: targetSentAt, newBody: trimmed, sentAtMs: nowMs)
         }
     }
 
     /// Delete a message (docs/36). `forEveryone` tombstones for both sides (own
     /// messages only); otherwise removes it from this device. DM only.
     func deleteMessage(message: Message, forEveryone: Bool, conversation: Conversation) {
-        guard let core = cores[conversation.accountId] else { return }
+        guard let core = cores[conversation.accountId],
+              let target = messageTarget(for: conversation) else { return }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let convId = conversation.id
         if var msgs = messagesByConversation[convId] {
@@ -1292,10 +1299,8 @@ final class AppState: ObservableObject {
         reactionsByConversation[convId]?.removeAll { $0.targetAuthor == message.senderAccountId && $0.targetSentAtMs == message.sentAtMs }
         let targetAuthor = message.senderAccountId
         let targetSentAt = message.sentAtMs
-        if let groupId = conversation.groupId {
-            Task.detached { try? core.sendGroupDelete(groupId: groupId, targetAuthor: targetAuthor, targetSentAtMs: targetSentAt, forEveryone: forEveryone, sentAtMs: nowMs) }
-        } else if let recipientDid = conversation.recipientDid {
-            Task.detached { try? core.sendDmDelete(recipientDid: recipientDid, targetAuthor: targetAuthor, targetSentAtMs: targetSentAt, forEveryone: forEveryone, sentAtMs: nowMs) }
+        Task.detached {
+            try? core.sendDelete(target: target, targetAuthor: targetAuthor, targetSentAtMs: targetSentAt, forEveryone: forEveryone, sentAtMs: nowMs)
         }
     }
 

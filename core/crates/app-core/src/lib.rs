@@ -149,6 +149,26 @@ pub struct MessageRevisionFfi {
     pub replaced_at_ms: i64,
 }
 
+/// Where a content operation (reaction / edit / delete) is directed: a DM with
+/// a peer, or a group. Reaction/edit/delete share one API surface across both;
+/// only the conversation key and the transport differ, and that fork lives in
+/// `AppCoreInner::send_to_target`. (Plain-text sends keep their own
+/// `send_dm` / `send_group_message` entry points.)
+#[derive(uniffi::Enum, Clone, Debug)]
+pub enum MessageTarget {
+    Dm { recipient_did: String },
+    Group { group_id: String },
+}
+
+/// The local conversation id for a target, matching what the store and the
+/// receive path use: `dm-<own>-<peer>` for DMs, `group-<id>` for groups.
+fn conv_id_for(own_did: &str, target: &MessageTarget) -> String {
+    match target {
+        MessageTarget::Dm { recipient_did } => format!("dm-{own_did}-{recipient_did}"),
+        MessageTarget::Group { group_id } => format!("group-{group_id}"),
+    }
+}
+
 /// Convert a stored `HistoryMessage` into its FFI shape.
 fn stored_to_ffi(m: store::messages::HistoryMessage) -> StoredMessageFfi {
     StoredMessageFfi {
@@ -1203,9 +1223,9 @@ impl AppCore {
     /// sends a `ReactionMessage` to the peer. `target_author` is the DID of the
     /// reacted-to message's author (self or the peer); `sent_at_ms` is this
     /// reaction op's timestamp.
-    pub fn send_dm_reaction(
+    pub fn send_reaction(
         &self,
-        recipient_did: String,
+        target: MessageTarget,
         target_author: String,
         target_sent_at_ms: i64,
         emoji: String,
@@ -1215,7 +1235,7 @@ impl AppCore {
         ffi_runtime().block_on(async {
             let ws = self.ws.lock().expect("ws mutex poisoned").clone();
             let mut inner = self.inner.lock().await;
-            let conv_id = format!("dm-{}-{}", inner.did, recipient_did);
+            let conv_id = conv_id_for(&inner.did, &target);
             let reactor = inner.did.clone();
             if remove {
                 inner.store
@@ -1233,29 +1253,24 @@ impl AppCore {
                     })
                     .await.map_err(AppError::from)?;
             }
-            let profile_key = inner.own_profile_key().await;
-            let msg = ContentMessage {
-                body: Some(Body::Reaction(ReactionMessage {
-                    target_sent_at: target_sent_at_ms as u64,
-                    target_author,
-                    emoji,
-                    remove,
-                })),
-                timestamp_ms: sent_at_ms as u64,
-                profile_key,
-            };
-            inner.send_dm(ws.as_ref(), &recipient_did, &msg.encode_to_vec(), None).await
+            let body = Body::Reaction(ReactionMessage {
+                target_sent_at: target_sent_at_ms as u64,
+                target_author,
+                emoji,
+                remove,
+            });
+            inner.send_to_target(ws.as_ref(), &target, body, sent_at_ms as u64).await
         }).map_err(AppErrorFfi::from)
     }
 
-    /// Edit one of your own DM messages in place (docs/36). Applies locally
-    /// (recording the prior body for the history sheet) and sends an
-    /// `EditMessage` to the peer. The human edit window/cap are enforced by the
-    /// UI; this is the mechanism. `sent_at_ms` is the edit op's timestamp (the
-    /// LWW clock); `target_sent_at_ms` identifies the message being edited.
-    pub fn send_dm_edit(
+    /// Edit one of your own messages in place (docs/36), DM or group. Applies
+    /// locally (recording the prior body for the history sheet) and sends an
+    /// `EditMessage` to the conversation. The human edit window/cap are enforced
+    /// by the UI; this is the mechanism. `sent_at_ms` is the edit op's timestamp
+    /// (the LWW clock); `target_sent_at_ms` identifies the message being edited.
+    pub fn send_edit(
         &self,
-        recipient_did: String,
+        target: MessageTarget,
         target_sent_at_ms: i64,
         new_body: String,
         sent_at_ms: i64,
@@ -1263,32 +1278,27 @@ impl AppCore {
         ffi_runtime().block_on(async {
             let ws = self.ws.lock().expect("ws mutex poisoned").clone();
             let mut inner = self.inner.lock().await;
-            let conv_id = format!("dm-{}-{}", inner.did, recipient_did);
+            let conv_id = conv_id_for(&inner.did, &target);
             let author = inner.did.clone();
             inner.store
                 .apply_edit(&conv_id, &author, Timestamp(target_sent_at_ms), &new_body, Timestamp(sent_at_ms), true)
                 .await.map_err(AppError::from)?;
-            let profile_key = inner.own_profile_key().await;
-            let msg = ContentMessage {
-                body: Some(Body::Edit(EditMessage {
-                    target_sent_at: target_sent_at_ms as u64,
-                    replacement: Some(TextMessage { body: new_body }),
-                })),
-                timestamp_ms: sent_at_ms as u64,
-                profile_key,
-            };
-            inner.send_dm(ws.as_ref(), &recipient_did, &msg.encode_to_vec(), None).await
+            let body = Body::Edit(EditMessage {
+                target_sent_at: target_sent_at_ms as u64,
+                replacement: Some(TextMessage { body: new_body }),
+            });
+            inner.send_to_target(ws.as_ref(), &target, body, sent_at_ms as u64).await
         }).map_err(AppErrorFfi::from)
     }
 
-    /// Delete a DM message (docs/36). `for_everyone = true` tombstones the
-    /// message for both sides (only your own messages — `target_author` must be
-    /// this account) and sends a FOR_EVERYONE `DeleteMessage`. `for_everyone =
-    /// false` removes the message from this device only (any message) and sends
-    /// nothing — FOR_ME is local until multi-device sync exists.
-    pub fn send_dm_delete(
+    /// Delete a message (docs/36), DM or group. `for_everyone = true` tombstones
+    /// it for the whole conversation (only your own messages — `target_author`
+    /// must be this account) and sends a FOR_EVERYONE `DeleteMessage`.
+    /// `for_everyone = false` removes it from this device only (any message) and
+    /// sends nothing — FOR_ME is local until multi-device sync exists.
+    pub fn send_delete(
         &self,
-        recipient_did: String,
+        target: MessageTarget,
         target_author: String,
         target_sent_at_ms: i64,
         for_everyone: bool,
@@ -1297,7 +1307,7 @@ impl AppCore {
         ffi_runtime().block_on(async {
             let ws = self.ws.lock().expect("ws mutex poisoned").clone();
             let mut inner = self.inner.lock().await;
-            let conv_id = format!("dm-{}-{}", inner.did, recipient_did);
+            let conv_id = conv_id_for(&inner.did, &target);
             if for_everyone {
                 // Authorship rule: you may only retract your own message.
                 if target_author != inner.did {
@@ -1308,17 +1318,12 @@ impl AppCore {
                 inner.store
                     .tombstone_message(&conv_id, &target_author, Timestamp(target_sent_at_ms), Timestamp(sent_at_ms))
                     .await.map_err(AppError::from)?;
-                let profile_key = inner.own_profile_key().await;
-                let msg = ContentMessage {
-                    body: Some(Body::Delete(DeleteMessage {
-                        target_sent_at: target_sent_at_ms as u64,
-                        target_author,
-                        scope: delete_message::Scope::ForEveryone as i32,
-                    })),
-                    timestamp_ms: sent_at_ms as u64,
-                    profile_key,
-                };
-                inner.send_dm(ws.as_ref(), &recipient_did, &msg.encode_to_vec(), None).await
+                let body = Body::Delete(DeleteMessage {
+                    target_sent_at: target_sent_at_ms as u64,
+                    target_author,
+                    scope: delete_message::Scope::ForEveryone as i32,
+                });
+                inner.send_to_target(ws.as_ref(), &target, body, sent_at_ms as u64).await
             } else {
                 inner.store
                     .delete_message_for_me(&conv_id, &target_author, Timestamp(target_sent_at_ms))
@@ -1363,106 +1368,6 @@ impl AppCore {
                 body: r.body,
                 replaced_at_ms: r.replaced_at.as_millis(),
             }).collect())
-        }).map_err(AppErrorFfi::from)
-    }
-
-    /// React to a group message (docs/33). Applies locally (conversation
-    /// `group-<id>`) and fans a `ReactionMessage` out to the group.
-    pub fn send_group_reaction(
-        &self,
-        group_id: String,
-        target_author: String,
-        target_sent_at_ms: i64,
-        emoji: String,
-        remove: bool,
-        sent_at_ms: i64,
-    ) -> Result<(), AppErrorFfi> {
-        ffi_runtime().block_on(async {
-            let mut inner = self.inner.lock().await;
-            let conv_id = format!("group-{group_id}");
-            let reactor = inner.did.clone();
-            if remove {
-                inner.store
-                    .remove_reaction(&conv_id, &target_author, Timestamp(target_sent_at_ms), &reactor)
-                    .await.map_err(AppError::from)?;
-            } else {
-                inner.store
-                    .upsert_reaction(&store::messages::ReactionRow {
-                        conversation_id: conv_id,
-                        target_author: target_author.clone(),
-                        target_sent_at: Timestamp(target_sent_at_ms),
-                        reactor_did: reactor,
-                        emoji: emoji.clone(),
-                        reacted_at: Timestamp(sent_at_ms),
-                    })
-                    .await.map_err(AppError::from)?;
-            }
-            inner.send_group_content(&group_id, Body::Reaction(ReactionMessage {
-                target_sent_at: target_sent_at_ms as u64,
-                target_author,
-                emoji,
-                remove,
-            }), sent_at_ms as u64).await
-        }).map_err(AppErrorFfi::from)
-    }
-
-    /// Edit one of your own group messages in place (docs/36). Applies locally
-    /// and fans an `EditMessage` out to the group.
-    pub fn send_group_edit(
-        &self,
-        group_id: String,
-        target_sent_at_ms: i64,
-        new_body: String,
-        sent_at_ms: i64,
-    ) -> Result<(), AppErrorFfi> {
-        ffi_runtime().block_on(async {
-            let mut inner = self.inner.lock().await;
-            let conv_id = format!("group-{group_id}");
-            let author = inner.did.clone();
-            inner.store
-                .apply_edit(&conv_id, &author, Timestamp(target_sent_at_ms), &new_body, Timestamp(sent_at_ms), true)
-                .await.map_err(AppError::from)?;
-            inner.send_group_content(&group_id, Body::Edit(EditMessage {
-                target_sent_at: target_sent_at_ms as u64,
-                replacement: Some(TextMessage { body: new_body }),
-            }), sent_at_ms as u64).await
-        }).map_err(AppErrorFfi::from)
-    }
-
-    /// Delete a group message (docs/36). `for_everyone = true` tombstones it for
-    /// the whole group (your own messages only) and fans out a FOR_EVERYONE
-    /// `DeleteMessage`; `false` removes it from this device only.
-    pub fn send_group_delete(
-        &self,
-        group_id: String,
-        target_author: String,
-        target_sent_at_ms: i64,
-        for_everyone: bool,
-        sent_at_ms: i64,
-    ) -> Result<(), AppErrorFfi> {
-        ffi_runtime().block_on(async {
-            let mut inner = self.inner.lock().await;
-            let conv_id = format!("group-{group_id}");
-            if for_everyone {
-                if target_author != inner.did {
-                    return Err(AppError::Protocol(
-                        "delete-for-everyone is only allowed for your own messages".into(),
-                    ));
-                }
-                inner.store
-                    .tombstone_message(&conv_id, &target_author, Timestamp(target_sent_at_ms), Timestamp(sent_at_ms))
-                    .await.map_err(AppError::from)?;
-                inner.send_group_content(&group_id, Body::Delete(DeleteMessage {
-                    target_sent_at: target_sent_at_ms as u64,
-                    target_author,
-                    scope: delete_message::Scope::ForEveryone as i32,
-                }), sent_at_ms as u64).await
-            } else {
-                inner.store
-                    .delete_message_for_me(&conv_id, &target_author, Timestamp(target_sent_at_ms))
-                    .await.map_err(AppError::from)?;
-                Ok(())
-            }
         }).map_err(AppErrorFfi::from)
     }
 
@@ -2474,11 +2379,12 @@ impl AppCore {
         inner.send_dm(ws.as_ref(), recipient_did, &msg.encode_to_vec(), None).await
     }
 
-    /// Async `send_dm_reaction` for tests running inside a tokio runtime.
-    /// Applies locally and sends a `ReactionMessage` to the peer (docs/33).
-    pub async fn send_dm_reaction_async(
+    /// Async `send_reaction` for tests/bots running inside a tokio runtime.
+    /// Applies locally and sends a `ReactionMessage` to the target (DM or
+    /// group, docs/33).
+    pub async fn send_reaction_async(
         &self,
-        recipient_did: &str,
+        target: MessageTarget,
         target_author: &str,
         target_sent_at_ms: i64,
         emoji: &str,
@@ -2487,7 +2393,7 @@ impl AppCore {
     ) -> Result<(), AppError> {
         let ws = self.ws.lock().expect("ws mutex poisoned").clone();
         let mut inner = self.inner.lock().await;
-        let conv_id = format!("dm-{}-{}", inner.did, recipient_did);
+        let conv_id = conv_id_for(&inner.did, &target);
         let reactor = inner.did.clone();
         if remove {
             inner.store
@@ -2505,18 +2411,13 @@ impl AppCore {
                 })
                 .await?;
         }
-        let profile_key = inner.own_profile_key().await;
-        let msg = ContentMessage {
-            body: Some(Body::Reaction(ReactionMessage {
-                target_sent_at: target_sent_at_ms as u64,
-                target_author: target_author.to_string(),
-                emoji: emoji.to_string(),
-                remove,
-            })),
-            timestamp_ms: sent_at_ms as u64,
-            profile_key,
-        };
-        inner.send_dm(ws.as_ref(), recipient_did, &msg.encode_to_vec(), None).await
+        let body = Body::Reaction(ReactionMessage {
+            target_sent_at: target_sent_at_ms as u64,
+            target_author: target_author.to_string(),
+            emoji: emoji.to_string(),
+            remove,
+        });
+        inner.send_to_target(ws.as_ref(), &target, body, sent_at_ms as u64).await
     }
 
     /// Async `load_reactions` for tests.
@@ -2534,50 +2435,6 @@ impl AppCore {
             emoji: r.emoji,
             reacted_at_ms: r.reacted_at.as_millis(),
         }).collect())
-    }
-
-    /// Async `send_group_reaction` for tests running inside a tokio runtime.
-    /// Wraps a `ReactionMessage` in the group `ContentMessage` envelope and
-    /// fans it out; applies locally too (docs/33).
-    pub async fn send_group_reaction_async(
-        &self,
-        group_id: &str,
-        target_author: &str,
-        target_sent_at_ms: i64,
-        emoji: &str,
-        remove: bool,
-        sent_at_ms: i64,
-    ) -> Result<(), AppError> {
-        let mut inner = self.inner.lock().await;
-        let conv_id = format!("group-{group_id}");
-        let reactor = inner.did.clone();
-        if remove {
-            inner.store
-                .remove_reaction(&conv_id, target_author, Timestamp(target_sent_at_ms), &reactor)
-                .await?;
-        } else {
-            inner.store
-                .upsert_reaction(&store::messages::ReactionRow {
-                    conversation_id: conv_id,
-                    target_author: target_author.to_string(),
-                    target_sent_at: Timestamp(target_sent_at_ms),
-                    reactor_did: reactor,
-                    emoji: emoji.to_string(),
-                    reacted_at: Timestamp(sent_at_ms),
-                })
-                .await?;
-        }
-        inner.send_group_content(
-            group_id,
-            Body::Reaction(ReactionMessage {
-                target_sent_at: target_sent_at_ms as u64,
-                target_author: target_author.to_string(),
-                emoji: emoji.to_string(),
-                remove,
-            }),
-            sent_at_ms as u64,
-        )
-        .await
     }
 
     /// Async receive_messages for use in tests running inside a tokio runtime.

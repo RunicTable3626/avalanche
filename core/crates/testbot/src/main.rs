@@ -397,7 +397,10 @@ async fn bot_message_loop(
                 let runner = bot.lock().await;
                 if let Err(e) = runner
                     .app_core
-                    .send_dm_reaction_async(&msg.sender_did, &msg.sender_did, sender_ts, "👍", false, now_ms)
+                    .send_reaction_async(
+                        app_core::MessageTarget::Dm { recipient_did: msg.sender_did.clone() },
+                        &msg.sender_did, sender_ts, "👍", false, now_ms,
+                    )
                     .await
                 {
                     tracing::warn!("[bot {}] failed to react: {}", bot_did, e);

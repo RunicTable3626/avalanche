@@ -326,4 +326,16 @@ pub const ALTER_MIGRATIONS: &[&str] = &[
         INSERT INTO storage_sync(type, logical_key, dirty, deleted) VALUES (1, OLD.group_id, 1, 1) \
         ON CONFLICT(type, logical_key) DO UPDATE SET dirty = 1, deleted = 1; \
      END",
+    // ── Prekey ID allocator (one row per pool) ────────────────────────────────
+    // Monotonic next-id cursor for replenishing one-time prekey pools. A plain
+    // MAX(id) over the pool tables is unsafe because consumed keys are deleted,
+    // so the surviving max underestimates the highest id ever issued; reusing an
+    // id could let a stale PreKey/Kyber message match a fresh key. `kind` is
+    // 'one_time' (EC, → prekeys) or 'kyber' (→ kyber_prekeys, shared by the
+    // one-time pool and the last-resort key). Seeded at registration; absent
+    // rows default to 21 in app-core (pre-feature stores only ever issued 1..20).
+    "CREATE TABLE IF NOT EXISTS prekey_counters (\
+        kind     TEXT    PRIMARY KEY,\
+        next_id  INTEGER NOT NULL\
+    )",
 ];

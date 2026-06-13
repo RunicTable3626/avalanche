@@ -62,17 +62,34 @@ async fn test_state() -> AppState {
         invite_domain: "go.example.test".into(),
         adminbot_did: String::new(),
     };
+    // Load (or seed) the group crypto bundle exactly as `main.rs` does — a
+    // bincoded `GroupCryptoBundle` under the current version. Seeding the raw
+    // `ServerSecretParams` here instead would collide with a real server's row
+    // on a shared DB (same `version` key, incompatible bytes), so this must
+    // mirror production to work against any database, not just a pristine one.
     let mut conn = pool.acquire().await.expect("acquire");
     let bytes = db::zkgroup_params::load_or_init(
         &mut conn,
         db::zkgroup_params::CURRENT_VERSION,
-        || ServerSecretParams::generate().to_bytes(),
+        || {
+            db::zkgroup_params::GroupCryptoBundle {
+                zkgroup_secret: ServerSecretParams::generate().to_bytes(),
+                sender_cert_chain: SenderCertChain::generate()
+                    .expect("generate sender cert chain")
+                    .to_bytes(),
+            }
+            .to_bytes()
+        },
     )
     .await
     .expect("load zkgroup params");
     drop(conn);
-    let zkgroup_secret = ServerSecretParams::from_bytes(&bytes).expect("decode params");
-    let sender_cert_chain = SenderCertChain::generate().expect("sender cert chain");
+    let bundle = db::zkgroup_params::GroupCryptoBundle::from_bytes(&bytes)
+        .expect("stored group crypto bundle is corrupt");
+    let zkgroup_secret =
+        ServerSecretParams::from_bytes(&bundle.zkgroup_secret).expect("decode params");
+    let sender_cert_chain =
+        SenderCertChain::from_bytes(&bundle.sender_cert_chain).expect("decode sender cert chain");
     AppState::new(pool, config, zkgroup_secret, sender_cert_chain)
 }
 
@@ -537,4 +554,141 @@ async fn get_groups_server_params_returns_decodable_public_params() {
     let public = crypto::groups::ServerPublicParams::from_bytes(&decoded)
         .expect("decode ServerPublicParams");
     assert_eq!(public.to_bytes(), state.zkgroup_secret.public_params().to_bytes());
+}
+
+// ── Storage service HTTP tests (docs/05) ─────────────────────────────────────
+
+async fn storage_put(app: &axum::Router, token: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/storage/items")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    // Error responses are plain text, not JSON; fall back to Null so callers
+    // that only check status don't panic.
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, json)
+}
+
+async fn storage_get(app: &axum::Router, token: Option<&str>, since: i64) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/storage/items?since={since}"));
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, json)
+}
+
+#[tokio::test]
+async fn storage_put_then_pull_roundtrip() {
+    let app = routes::router().with_state(test_state().await);
+    let reg = register_dummy(&app).await;
+    let token = reg["session_token"].as_str().unwrap().to_string();
+
+    let rid = BASE64_STANDARD.encode([7u8; 16]);
+    let ct = BASE64_STANDARD.encode(b"hello-storage");
+
+    let (status, body) = storage_put(
+        &app,
+        &token,
+        serde_json::json!({
+            "writes": [
+                { "record_id": rid, "expected_version": 0, "deleted": false, "ciphertext": ct }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["applied"].as_array().unwrap().len(), 1);
+    assert_eq!(body["conflicts"].as_array().unwrap().len(), 0);
+    assert_eq!(body["applied"][0]["record_id"], rid);
+    assert_eq!(body["applied"][0]["version"], 1);
+
+    // The freshly registered account has exactly this one record.
+    let (status, body) = storage_get(&app, Some(&token), 0).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["record_id"], rid);
+    assert_eq!(items[0]["ciphertext"], ct);
+    assert_eq!(items[0]["deleted"], false);
+    assert_eq!(body["has_more"], false);
+    assert_eq!(body["next_cursor"], 1);
+}
+
+#[tokio::test]
+async fn storage_pull_requires_auth() {
+    let app = routes::router().with_state(test_state().await);
+    let (status, _) = storage_get(&app, None, 0).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn storage_cas_conflict_surfaced_in_response() {
+    let app = routes::router().with_state(test_state().await);
+    let reg = register_dummy(&app).await;
+    let token = reg["session_token"].as_str().unwrap().to_string();
+
+    let rid = BASE64_STANDARD.encode([8u8; 16]);
+    let ct = BASE64_STANDARD.encode(b"v1");
+    let write = serde_json::json!({
+        "writes": [
+            { "record_id": rid, "expected_version": 0, "deleted": false, "ciphertext": ct }
+        ]
+    });
+
+    // First create succeeds.
+    let (status, body) = storage_put(&app, &token, write.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["applied"].as_array().unwrap().len(), 1);
+
+    // Replaying expected_version=0 now conflicts (the row is at version 1).
+    let (status, body) = storage_put(&app, &token, write).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["applied"].as_array().unwrap().len(), 0);
+    let conflicts = body["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["record_id"], rid);
+    assert_eq!(conflicts[0]["current_version"], 1);
+}
+
+#[tokio::test]
+async fn storage_record_over_size_limit_rejected() {
+    let app = routes::router().with_state(test_state().await);
+    let reg = register_dummy(&app).await;
+    let token = reg["session_token"].as_str().unwrap().to_string();
+
+    // 9 KB ciphertext exceeds the 8 KB per-record cap.
+    let rid = BASE64_STANDARD.encode([9u8; 16]);
+    let big = BASE64_STANDARD.encode(vec![0u8; 9 * 1024]);
+    let (status, _) = storage_put(
+        &app,
+        &token,
+        serde_json::json!({
+            "writes": [
+                { "record_id": rid, "expected_version": 0, "deleted": false, "ciphertext": big }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

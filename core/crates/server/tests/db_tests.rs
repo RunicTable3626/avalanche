@@ -827,3 +827,178 @@ async fn profile_get_missing_returns_none() {
     let got = server::db::profiles::get_by_account_id(&mut *tx, account_id).await.unwrap();
     assert!(got.is_none());
 }
+
+// ── Storage service tests (docs/05) ──────────────────────────────────────────
+
+use server::db::storage::{self, PutOutcome};
+
+#[tokio::test]
+async fn storage_seq_is_monotonic_per_account() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let a = server::db::accounts::create(&mut *tx, "did:plc:storageseq000000001", None, false).await.unwrap();
+    let b = server::db::accounts::create(&mut *tx, "did:plc:storageseq000000002", None, false).await.unwrap();
+
+    // First allocation for an account is 1 (0 stays reserved).
+    assert_eq!(storage::alloc_seq(&mut *tx, a).await.unwrap(), 1);
+    assert_eq!(storage::alloc_seq(&mut *tx, a).await.unwrap(), 2);
+    assert_eq!(storage::alloc_seq(&mut *tx, a).await.unwrap(), 3);
+    // Counters are independent per account.
+    assert_eq!(storage::alloc_seq(&mut *tx, b).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn storage_put_create_then_pull() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let acc = server::db::accounts::create(&mut *tx, "did:plc:storageput0000001", None, false).await.unwrap();
+    let rid = [1u8; 16];
+
+    match storage::put_item(&mut *tx, acc, &rid, 0, false, b"cipher").await.unwrap() {
+        PutOutcome::Applied { version, seq } => {
+            assert_eq!(version, 1);
+            assert_eq!(seq, 1);
+        }
+        PutOutcome::Conflict { .. } => panic!("create should not conflict"),
+    }
+
+    let items = storage::pull(&mut *tx, acc, 0, 500).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].record_id, rid);
+    assert_eq!(items[0].ciphertext, b"cipher");
+    assert!(!items[0].deleted);
+    assert_eq!(items[0].version, 1);
+    assert_eq!(items[0].seq, 1);
+}
+
+#[tokio::test]
+async fn storage_cas_conflict_leaves_row_unchanged() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let acc = server::db::accounts::create(&mut *tx, "did:plc:storagecas0000001", None, false).await.unwrap();
+    let rid = [2u8; 16];
+
+    storage::put_item(&mut *tx, acc, &rid, 0, false, b"v1").await.unwrap();
+
+    // A stale expected_version (0, but the row is now version 1) must conflict.
+    match storage::put_item(&mut *tx, acc, &rid, 0, false, b"v2").await.unwrap() {
+        PutOutcome::Conflict { current_version } => assert_eq!(current_version, 1),
+        PutOutcome::Applied { .. } => panic!("stale write should conflict"),
+    }
+
+    // The row is untouched: still v1 at version 1.
+    let items = storage::pull(&mut *tx, acc, 0, 500).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].ciphertext, b"v1");
+    assert_eq!(items[0].version, 1);
+}
+
+#[tokio::test]
+async fn storage_correct_version_update_bumps_version_and_seq() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let acc = server::db::accounts::create(&mut *tx, "did:plc:storageupd0000001", None, false).await.unwrap();
+    let rid = [3u8; 16];
+
+    storage::put_item(&mut *tx, acc, &rid, 0, false, b"v1").await.unwrap();
+
+    // Updating with the matching expected_version applies and allocates a new seq.
+    match storage::put_item(&mut *tx, acc, &rid, 1, false, b"v2").await.unwrap() {
+        PutOutcome::Applied { version, seq } => {
+            assert_eq!(version, 2);
+            assert_eq!(seq, 2);
+        }
+        PutOutcome::Conflict { .. } => panic!("matching version should apply"),
+    }
+
+    let items = storage::pull(&mut *tx, acc, 0, 500).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].ciphertext, b"v2");
+    assert_eq!(items[0].version, 2);
+}
+
+#[tokio::test]
+async fn storage_tombstone_is_recorded() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let acc = server::db::accounts::create(&mut *tx, "did:plc:storagetomb000001", None, false).await.unwrap();
+    let rid = [4u8; 16];
+
+    storage::put_item(&mut *tx, acc, &rid, 0, false, b"live").await.unwrap();
+    // Delete with the matching version; tombstones carry an empty ciphertext.
+    storage::put_item(&mut *tx, acc, &rid, 1, true, b"").await.unwrap();
+
+    let items = storage::pull(&mut *tx, acc, 0, 500).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert!(items[0].deleted);
+    assert!(items[0].ciphertext.is_empty());
+    assert_eq!(items[0].version, 2);
+}
+
+#[tokio::test]
+async fn storage_pull_respects_since_and_limit_ordering() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let acc = server::db::accounts::create(&mut *tx, "did:plc:storagepull000001", None, false).await.unwrap();
+    // Three independent records → seq 1, 2, 3.
+    storage::put_item(&mut *tx, acc, &[10u8; 16], 0, false, b"a").await.unwrap();
+    storage::put_item(&mut *tx, acc, &[11u8; 16], 0, false, b"b").await.unwrap();
+    storage::put_item(&mut *tx, acc, &[12u8; 16], 0, false, b"c").await.unwrap();
+
+    // limit caps the page and results are ordered by seq ascending.
+    let page = storage::pull(&mut *tx, acc, 0, 2).await.unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].seq, 1);
+    assert_eq!(page[1].seq, 2);
+
+    // since filters to strictly newer rows.
+    let rest = storage::pull(&mut *tx, acc, 1, 500).await.unwrap();
+    assert_eq!(rest.len(), 2);
+    assert_eq!(rest[0].seq, 2);
+    assert_eq!(rest[1].seq, 3);
+}
+
+#[tokio::test]
+async fn storage_is_scoped_to_account() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let a = server::db::accounts::create(&mut *tx, "did:plc:storageiso0000001", None, false).await.unwrap();
+    let b = server::db::accounts::create(&mut *tx, "did:plc:storageiso0000002", None, false).await.unwrap();
+
+    storage::put_item(&mut *tx, a, &[20u8; 16], 0, false, b"a-only").await.unwrap();
+
+    // Account b's store never sees account a's records.
+    let b_items = storage::pull(&mut *tx, b, 0, 500).await.unwrap();
+    assert!(b_items.is_empty());
+
+    let (b_bytes, b_count) = storage::account_usage(&mut *tx, b).await.unwrap();
+    assert_eq!(b_bytes, 0);
+    assert_eq!(b_count, 0);
+}
+
+#[tokio::test]
+async fn storage_account_usage_excludes_tombstones() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let acc = server::db::accounts::create(&mut *tx, "did:plc:storageusage00001", None, false).await.unwrap();
+    storage::put_item(&mut *tx, acc, &[30u8; 16], 0, false, b"12345").await.unwrap();
+    storage::put_item(&mut *tx, acc, &[31u8; 16], 0, false, b"678").await.unwrap();
+
+    let (bytes, count) = storage::account_usage(&mut *tx, acc).await.unwrap();
+    assert_eq!(bytes, 8);
+    assert_eq!(count, 2);
+
+    // Tombstoning a record removes it from the live byte/count totals.
+    storage::put_item(&mut *tx, acc, &[30u8; 16], 1, true, b"").await.unwrap();
+    let (bytes, count) = storage::account_usage(&mut *tx, acc).await.unwrap();
+    assert_eq!(bytes, 3);
+    assert_eq!(count, 1);
+}

@@ -27,6 +27,7 @@ mod projects;
 mod push;
 mod recovery;
 mod registration;
+mod storage;
 mod websocket;
 
 pub fn router() -> Router<AppState> {
@@ -41,6 +42,7 @@ pub fn router() -> Router<AppState> {
         .merge(push::routes())
         .merge(accounts::routes())
         .merge(recovery::routes())
+        .merge(storage::routes())
         .merge(devices::routes())
         .merge(invites::routes())
         .merge(profile::routes())

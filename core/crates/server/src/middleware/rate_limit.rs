@@ -6,6 +6,8 @@ pub const ACTION_UPLOAD_PREKEYS: &str = "upload_prekeys";
 pub const ACTION_FETCH_BUNDLE: &str = "fetch_bundle";
 pub const ACTION_UPDATE_RECOVERY: &str = "update_recovery";
 pub const ACTION_UPDATE_PROFILE: &str = "update_profile";
+pub const ACTION_STORAGE_PULL: &str = "storage_pull";
+pub const ACTION_STORAGE_PUSH: &str = "storage_push";
 
 // Maximum requests per window.
 pub const LIMIT_SEND_MESSAGE: i32 = 100;
@@ -13,6 +15,11 @@ pub const LIMIT_UPLOAD_PREKEYS: i32 = 10;
 pub const LIMIT_FETCH_BUNDLE: i32 = 100;
 pub const LIMIT_UPDATE_RECOVERY: i32 = 10;
 pub const LIMIT_UPDATE_PROFILE: i32 = 20;
+// Storage sync (docs/05 §8): pulls run on every fast-sync nudge, foreground, and
+// reconnect; pushes run on every dirty flush. Generous starting values — these
+// are steady-state sync traffic, not abuse vectors (records are quota-capped).
+pub const LIMIT_STORAGE_PULL: i32 = 600;
+pub const LIMIT_STORAGE_PUSH: i32 = 300;
 
 // Window sizes in seconds.
 pub const WINDOW_SEND_MESSAGE: i64 = 60;
@@ -20,6 +27,8 @@ pub const WINDOW_UPLOAD_PREKEYS: i64 = 3600;
 pub const WINDOW_FETCH_BUNDLE: i64 = 3600;
 pub const WINDOW_UPDATE_RECOVERY: i64 = 3600;
 pub const WINDOW_UPDATE_PROFILE: i64 = 3600;
+pub const WINDOW_STORAGE_PULL: i64 = 60;
+pub const WINDOW_STORAGE_PUSH: i64 = 60;
 
 // ── Per-IP rate limits (unauthenticated endpoints) ──────────────────────────
 

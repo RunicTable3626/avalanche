@@ -88,8 +88,10 @@ pub async fn update_recovery_blob(
 ///  10. rate_limit_counters    (→ accounts)
 ///  11. did_documents          (→ accounts)
 ///  12. profiles               (→ accounts)
-///  13. devices                (→ accounts)
-///  14. accounts               (root)
+///  13. storage_items          (→ accounts)
+///  14. storage_seq            (→ accounts)
+///  15. devices                (→ accounts)
+///  16. accounts               (root)
 pub async fn delete_account(conn: &mut PgConnection, account_id: i64) -> Result<(), sqlx::Error> {
     let mut tx = conn.begin().await?;
 
@@ -190,13 +192,25 @@ pub async fn delete_account(conn: &mut PgConnection, account_id: i64) -> Result<
         .execute(&mut *tx)
         .await?;
 
-    // 13. devices references accounts
+    // 13. storage_items references accounts (docs/05 storage service)
+    sqlx::query("DELETE FROM storage_items WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 14. storage_seq references accounts
+    sqlx::query("DELETE FROM storage_seq WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 15. devices references accounts
     sqlx::query("DELETE FROM devices WHERE account_id = $1")
         .bind(account_id)
         .execute(&mut *tx)
         .await?;
 
-    // 14. accounts (root row)
+    // 16. accounts (root row)
     sqlx::query("DELETE FROM accounts WHERE id = $1")
         .bind(account_id)
         .execute(&mut *tx)

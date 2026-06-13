@@ -178,28 +178,44 @@ async function handleAdminEvent(
   groupId: string,
   event: AdminEvent,
 ): Promise<void> {
-  if (event.kind === "accountJoined") {
-    const { did } = event.accountJoined;
-    if (did === ADMINBOT_DID) return;
-    console.log(`adminbot: new account ${did} — inviting to #admins`);
-    try {
-      await core.inviteMember(groupId, did, "member");
-    } catch (e) {
-      console.error(`adminbot: invite of ${did} failed: ${(e as Error).message}`);
-      return;
-    }
-    // Send a 1:1 welcome DM. Goes over the same sealed-sender channel the
-    // GroupContext invite already opened, so it works regardless of whether
-    // the recipient has accepted the group invite yet.
-    try {
-      await core.sendDm(
-        did,
-        "Welcome! You've been added to #admins. Type /help to see what I can do.",
-      );
-      console.log(`adminbot: sent welcome DM to ${did}`);
-    } catch (e) {
-      console.error(`adminbot: welcome DM to ${did} failed: ${(e as Error).message}`);
-    }
+  if (event.kind !== "accountJoined") return;
+  const { did } = event.accountJoined;
+  if (did === ADMINBOT_DID) return;
+
+  // Only humans belong in #admins. Every account registration fires this
+  // event — including bots (e.g. testbot spins up a fresh bot account on each
+  // "Text Me"). Inviting them would fill #admins with bots and fan a Sender
+  // Key out to every member on each invite, so skip any bot account.
+  let isBot: boolean;
+  try {
+    isBot = (await core.getAccountInfo(did)).isBot;
+  } catch (e) {
+    console.error(`adminbot: getAccountInfo(${did}) failed: ${(e as Error).message}; skipping`);
+    return;
+  }
+  if (isBot) {
+    console.log(`adminbot: new account ${did} is a bot — not inviting to #admins`);
+    return;
+  }
+
+  console.log(`adminbot: new account ${did} — inviting to #admins`);
+  try {
+    await core.inviteMember(groupId, did, "member");
+  } catch (e) {
+    console.error(`adminbot: invite of ${did} failed: ${(e as Error).message}`);
+    return;
+  }
+  // Send a 1:1 welcome DM. Goes over the same sealed-sender channel the
+  // GroupContext invite already opened, so it works regardless of whether
+  // the recipient has accepted the group invite yet.
+  try {
+    await core.sendDm(
+      did,
+      "Welcome! You've been added to #admins. Type /help to see what I can do.",
+    );
+    console.log(`adminbot: sent welcome DM to ${did}`);
+  } catch (e) {
+    console.error(`adminbot: welcome DM to ${did} failed: ${(e as Error).message}`);
   }
 }
 

@@ -1249,3 +1249,32 @@ async fn delete_account_unlinks_from_project() {
     assert!(projects::project_for_account(&mut *tx, bot).await.unwrap().is_none());
     assert!(projects::find_by_slug(&mut *tx, "proj-del").await.unwrap().is_some());
 }
+
+// ── Abuse reports (docs/12 §3) ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn abuse_report_insert_and_count() {
+    use server::db::{abuse, accounts};
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let reporter = accounts::create(&mut *tx, "did:plc:abusereporter01", None, false)
+        .await
+        .unwrap();
+
+    assert_eq!(abuse::count_by_reporter(&mut *tx, reporter).await.unwrap(), 0);
+
+    let id = abuse::insert(&mut *tx, "did:plc:spammer1", "spam", reporter).await.unwrap();
+    assert!(id > 0);
+    abuse::insert(&mut *tx, "did:plc:spammer1", "harassment", reporter).await.unwrap();
+
+    // Per-reporter count drives the rate limit / operator audit.
+    assert_eq!(abuse::count_by_reporter(&mut *tx, reporter).await.unwrap(), 2);
+
+    // Operator-review listing returns both, newest first, no message content.
+    let reports = abuse::list_for_did(&mut *tx, "did:plc:spammer1").await.unwrap();
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0].reason, "harassment");
+    assert_eq!(reports[1].reason, "spam");
+    assert!(reports.iter().all(|r| r.reporter_account == reporter));
+}

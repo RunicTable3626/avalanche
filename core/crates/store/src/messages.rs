@@ -567,6 +567,32 @@ impl IdentityStore {
             .map_err(StoreError::Db)
     }
 
+    /// Delete an entire conversation's local history — every message plus its
+    /// reactions and edit revisions. Local-only (this device's view); used by
+    /// "Delete" on a message request (docs/12 §1). The contact row is left
+    /// intact so a later inbound message starts a fresh request.
+    pub async fn delete_conversation(&self, conversation_id: &str) -> Result<(), StoreError> {
+        let conv = conversation_id.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "DELETE FROM message_history WHERE conversation_id = ?1",
+                    rusqlite::params![conv],
+                )?;
+                conn.execute(
+                    "DELETE FROM reactions WHERE conversation_id = ?1",
+                    rusqlite::params![conv],
+                )?;
+                conn.execute(
+                    "DELETE FROM message_revisions WHERE conversation_id = ?1",
+                    rusqlite::params![conv],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(StoreError::Db)
+    }
+
     /// Load the prior bodies of an edited message, oldest first, for the
     /// edit-history sheet.
     pub async fn load_revisions(

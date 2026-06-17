@@ -29,6 +29,15 @@ extension AppCoreProtocol {
     func listContacts() throws -> [ContactRowFfi] { [] }
     func touchContact(did: String, curated: Bool) throws {}
 
+    // MARK: - Abuse handling (docs/12-abuse-handling.md)
+
+    func blockContact(did: String) throws {}
+    func unblockContact(did: String) throws {}
+    func listBlocked() throws -> [ContactRowFfi] { [] }
+    func acceptRequest(did: String) throws {}
+    func deleteRequest(did: String) throws {}
+    func reportAndBlock(did: String, reason: String) throws {}
+
     func hasRecovery() -> Bool { false }
     func updateRecoveryBlob(prfOutput: Data, servers: [String]) throws {}
 

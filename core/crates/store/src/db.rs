@@ -106,6 +106,26 @@ async fn apply_key(conn: &Connection, key: &DatabaseKey) -> Result<(), StoreErro
     .map_err(StoreError::Db)
 }
 
+/// Add `column` to `table` with `decl` (type + constraints) if it isn't already
+/// present. SQLite lacks `ADD COLUMN IF NOT EXISTS`, so we probe `table_info`
+/// first. Synchronous: runs inside the `migrate` connection closure.
+fn add_column_if_missing(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == column);
+    if !exists {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    }
+    Ok(())
+}
+
 /// True if a table with `name` exists in the database behind `conn`.
 async fn table_exists(conn: &Connection, name: &'static str) -> Result<bool, StoreError> {
     conn.call(move |conn| {
@@ -144,6 +164,23 @@ impl IdentityStore {
         self.conn
             .call(|conn| {
                 conn.execute_batch(crate::schema::IDENTITY_MIGRATIONS)?;
+                // Column additions to existing tables: the schema batch above
+                // only `CREATE TABLE IF NOT EXISTS`, so a database created
+                // before a column was added needs an explicit `ADD COLUMN`.
+                // SQLite has no `ADD COLUMN IF NOT EXISTS`, so add only what's
+                // missing (per `PRAGMA table_info`). Keep this list append-only.
+                add_column_if_missing(
+                    conn,
+                    "contacts",
+                    "is_blocked",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )?;
+                add_column_if_missing(
+                    conn,
+                    "contacts",
+                    "has_pending_request",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )?;
                 Ok(())
             })
             .await

@@ -602,3 +602,82 @@ mod edit_delete_react {
         assert_eq!(store.load_reactions("conv").await.unwrap().len(), 3);
     }
 }
+
+// ── Contacts: blocking + pending request (docs/12 §2, docs/52) ────────────
+
+#[cfg(test)]
+mod contacts_block_pending {
+    use store::DeviceStore;
+    use types::Timestamp;
+
+    #[tokio::test]
+    async fn block_creates_bare_row_without_curating() {
+        // docs/12 §2: blocking a never-seen DID creates a row with only
+        // is_blocked set; is_curated stays false.
+        let store = DeviceStore::open_in_memory().await.unwrap();
+        store.set_blocked("did:plc:stranger", true).await.unwrap();
+
+        let row = store.load_contact("did:plc:stranger").await.unwrap().unwrap();
+        assert!(row.is_blocked);
+        assert!(!row.is_curated, "blocking does not curate");
+
+        let blocked = store.list_blocked().await.unwrap();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].did, "did:plc:stranger");
+    }
+
+    #[tokio::test]
+    async fn unblock_clears_the_flag_and_leaves_list() {
+        let store = DeviceStore::open_in_memory().await.unwrap();
+        store.set_blocked("did:plc:x", true).await.unwrap();
+        store.set_blocked("did:plc:x", false).await.unwrap();
+
+        assert!(!store.load_contact("did:plc:x").await.unwrap().unwrap().is_blocked);
+        assert!(store.list_blocked().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn block_preserves_existing_curation() {
+        // A curated contact stays curated through a block (the relationship is
+        // remembered; block only overrides visibility).
+        let store = DeviceStore::open_in_memory().await.unwrap();
+        store.touch_contact("did:plc:friend", true, Timestamp(100)).await.unwrap();
+        store.set_blocked("did:plc:friend", true).await.unwrap();
+
+        let row = store.load_contact("did:plc:friend").await.unwrap().unwrap();
+        assert!(row.is_curated);
+        assert!(row.is_blocked);
+    }
+
+    #[tokio::test]
+    async fn pending_request_toggles_independently() {
+        let store = DeviceStore::open_in_memory().await.unwrap();
+        store.set_pending_request("did:plc:req", true).await.unwrap();
+        assert!(store.load_contact("did:plc:req").await.unwrap().unwrap().has_pending_request);
+
+        store.set_pending_request("did:plc:req", false).await.unwrap();
+        assert!(!store.load_contact("did:plc:req").await.unwrap().unwrap().has_pending_request);
+    }
+
+    #[tokio::test]
+    async fn apply_synced_contact_overwrites_block_but_maxes_curation() {
+        // Sync LWW (docs/05): the engine applies only strictly-newer versions,
+        // so is_blocked is overwritten with the pulled value (so an unblock
+        // elsewhere propagates) while is_curated/recency take a monotonic MAX.
+        let store = DeviceStore::open_in_memory().await.unwrap();
+        // Local state: curated, blocked, recent.
+        store.touch_contact("did:plc:p", true, Timestamp(500)).await.unwrap();
+        store.set_blocked("did:plc:p", true).await.unwrap();
+
+        // Pull a record that unblocks, is not curated, and is older.
+        store
+            .apply_synced_contact("did:plc:p", false, false, Timestamp(100))
+            .await
+            .unwrap();
+
+        let row = store.load_contact("did:plc:p").await.unwrap().unwrap();
+        assert!(!row.is_blocked, "block overwritten by pulled value");
+        assert!(row.is_curated, "curation never rewinds (MAX)");
+        assert_eq!(row.last_interaction_at, Timestamp(500), "recency never rewinds (MAX)");
+    }
+}

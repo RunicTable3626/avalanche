@@ -14,6 +14,7 @@
 //! blobs that the server cannot decrypt. A database dump reveals routing
 //! metadata (who messaged whom, when, message sizes) but no plaintext.
 
+pub mod abuse;
 pub mod accounts;
 pub mod capabilities;
 pub mod challenges;

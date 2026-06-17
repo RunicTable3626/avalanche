@@ -48,7 +48,14 @@ struct ConversationRow: View {
                 }
 
                 HStack {
-                    if let lastMessage = conversation.lastMessage {
+                    if conversation.isRequest {
+                        // First contact from an un-curated DID (docs/12 §1).
+                        Text("Message request")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundStyle(Color.avBrand)
+                            .lineLimit(1)
+                    } else if let lastMessage = conversation.lastMessage {
                         Text(lastMessage)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)

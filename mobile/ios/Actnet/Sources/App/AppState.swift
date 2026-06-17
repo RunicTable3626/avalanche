@@ -607,6 +607,53 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Abuse handling (docs/12-abuse-handling.md)
+
+    /// Accept a message request: curate the sender (which clears the gate and
+    /// opens read receipts) and refresh the list so the banner disappears.
+    func acceptRequest(did: String, accountId: String) async {
+        guard let core = cores[accountId] else { return }
+        try? await Task.detached { try core.acceptRequest(did: did) }.value
+        await loadConversationsFromStore()
+    }
+
+    /// Delete a message request: clear the pending flag and drop the local
+    /// conversation. A later inbound message starts a fresh request.
+    func deleteRequest(did: String, accountId: String) async {
+        guard let core = cores[accountId] else { return }
+        try? await Task.detached { try core.deleteRequest(did: did) }.value
+        await loadConversationsFromStore()
+    }
+
+    /// Report Spam and Block: file a content-free report with the homeserver,
+    /// then block locally. Surfaced only in the message-request UI (docs/12 §3).
+    func reportAndBlock(did: String, accountId: String, reason: String = "spam") async {
+        guard let core = cores[accountId] else { return }
+        try? await Task.detached { try core.reportAndBlock(did: did, reason: reason) }.value
+        await loadConversationsFromStore()
+    }
+
+    /// Block a contact (docs/12 §2). Multi-device synced; outbound messages to
+    /// the DID are then refused and inbound ones dropped.
+    func blockContact(did: String, accountId: String) async {
+        guard let core = cores[accountId] else { return }
+        try? await Task.detached { try core.blockContact(did: did) }.value
+        await loadConversationsFromStore()
+    }
+
+    /// Unblock a contact (docs/12 §2).
+    func unblockContact(did: String, accountId: String) async {
+        guard let core = cores[accountId] else { return }
+        try? await Task.detached { try core.unblockContact(did: did) }.value
+        await loadConversationsFromStore()
+    }
+
+    /// The block list for an account — backs Settings → Privacy → Blocked.
+    func listBlocked(accountId: String) async -> [ContactRowFfi] {
+        guard let core = cores[accountId] else { return [] }
+        return (try? await Task.detached { try core.listBlocked() }.value) ?? []
+    }
+
     // MARK: - Messaging
 
     func sendMessage(conversationId: String, text: String, recipientDid: String, senderAccountId: String, messageId: String, sentAtMs: Int64) async throws {
@@ -794,7 +841,9 @@ final class AppState: ObservableObject {
                     recipientDid: recipientDid,
                     lastMessage: preview,
                     lastMessageDate: date,
-                    isGroup: false
+                    isGroup: false,
+                    isRequest: s.isRequest,
+                    isBlocked: s.isBlocked
                 ))
             }
         }

@@ -492,6 +492,26 @@ impl Client {
         Ok(resp.json().await?)
     }
 
+    // ── Abuse ────────────────────────────────────────────────────────────
+
+    /// Submit an abuse report to the caller's own homeserver (docs/12 §3). The
+    /// report carries no message content — only the reported DID and a reason
+    /// enum (`spam` | `harassment` | `impersonation` | `other`). The server
+    /// authenticates and rate-limits the reporter, then persists the report for
+    /// operator review.
+    pub async fn report_abuse(&self, reported_did: &str, reason: &str) -> Result<(), NetError> {
+        let body = serde_json::json!({"reported_did": reported_did, "reason": reason});
+        let resp = self
+            .send_authed(reqwest::Method::POST, "/v1/abuse/report", |b| b.json(&body))
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(NetError::Server(resp.status().as_u16(), resp.text().await.unwrap_or_default()));
+        }
+
+        Ok(())
+    }
+
     // ── Push ─────────────────────────────────────────────────────────────
 
     /// Register a push pseudonym with the homeserver.

@@ -217,6 +217,14 @@ pub struct ConversationSummaryFfi {
     /// list falls back to a network fetch in that case.
     pub group_title: Option<String>,
     pub last_message: Option<StoredMessageFfi>,
+    /// True for a DM from an un-curated, un-blocked sender — an unaccepted
+    /// message request (docs/12 §1). The chat list shows a "Message request"
+    /// label and the conversation opens into the Accept/Delete/Report gate.
+    /// Always false for groups.
+    pub is_request: bool,
+    /// True for a DM with a blocked contact (docs/12 §2). The chat list routes
+    /// these into a Blocked section. Always false for groups.
+    pub is_blocked: bool,
 }
 
 /// A delivery status update for an outgoing message (e.g. read receipt received).
@@ -1297,6 +1305,8 @@ impl AppCore {
         ffi_runtime().block_on(async {
             let ws = self.ws.lock().expect("ws mutex poisoned").clone();
             let mut inner = self.inner.lock().await;
+            // Refuse outgoing messages to a blocked contact (docs/12 §2).
+            inner.ensure_not_blocked(&recipient_did).await?;
             let body = String::from_utf8_lossy(&plaintext).into_owned();
             let profile_key = inner.own_profile_key().await;
             let msg = ContentMessage {
@@ -1336,6 +1346,11 @@ impl AppCore {
         ffi_runtime().block_on(async {
             let ws = self.ws.lock().expect("ws mutex poisoned").clone();
             let mut inner = self.inner.lock().await;
+            // Refuse outgoing DMs to a blocked contact (docs/12 §2). Group
+            // sends are unaffected — blocking is a per-DID DM remedy.
+            if let MessageTarget::Dm { recipient_did } = &target {
+                inner.ensure_not_blocked(recipient_did).await?;
+            }
             let body = String::from_utf8_lossy(&plaintext).into_owned();
             inner
                 .send_to_target(
@@ -1400,6 +1415,20 @@ impl AppCore {
         ffi_runtime().block_on(async {
             let ws = self.ws.lock().expect("ws mutex poisoned").clone();
             let mut inner = self.inner.lock().await;
+            // Don't acknowledge reads to an un-accepted sender — opening a
+            // message request to evaluate it isn't acknowledgement (docs/12 §1).
+            // Curation (Accept / reply) is what opens the receipt channel.
+            let curated = inner
+                .store
+                .load_contact(&recipient_did)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.is_curated)
+                .unwrap_or(false);
+            if !curated {
+                return Ok(());
+            }
             let profile_key = inner.own_profile_key().await;
             let msg = ContentMessage {
                 body: Some(Body::Receipt(ReceiptMessage {
@@ -1704,12 +1733,35 @@ impl AppCore {
             // query, so the chat list renders real names on launch without a
             // per-group round trip.
             let titles = groups::local_group_titles(&inner.store).await?;
-            Ok::<_, AppError>(rows.into_iter().map(|c| ConversationSummaryFfi {
-                group_title: c.conversation_id
-                    .strip_prefix("group-")
-                    .and_then(|gid| titles.get(gid).cloned()),
-                conversation_id: c.conversation_id,
-                last_message: c.last_message.map(stored_to_ffi),
+            // Index contacts by DID once so per-DM request/blocked flags resolve
+            // without a query per row (docs/12 §1–2). The DM peer is the tail of
+            // the `dm-{self}-{peer}` conversation id.
+            let dm_prefix = format!("dm-{}-", inner.did);
+            let contacts: std::collections::HashMap<String, store::contacts::ContactRow> = inner
+                .store
+                .list_contacts()
+                .await
+                .map_err(AppError::from)?
+                .into_iter()
+                .map(|c| (c.did.clone(), c))
+                .collect();
+            Ok::<_, AppError>(rows.into_iter().map(|c| {
+                let peer = c.conversation_id.strip_prefix(&dm_prefix);
+                let contact = peer.and_then(|p| contacts.get(p));
+                let is_blocked = contact.map(|c| c.is_blocked).unwrap_or(false);
+                // A request is a DM whose peer is neither curated nor blocked.
+                let is_request = peer.is_some()
+                    && !is_blocked
+                    && !contact.map(|c| c.is_curated).unwrap_or(false);
+                ConversationSummaryFfi {
+                    group_title: c.conversation_id
+                        .strip_prefix("group-")
+                        .and_then(|gid| titles.get(gid).cloned()),
+                    conversation_id: c.conversation_id,
+                    last_message: c.last_message.map(stored_to_ffi),
+                    is_request,
+                    is_blocked,
+                }
             }).collect())
         }).map_err(AppErrorFfi::from)
     }
@@ -2096,6 +2148,116 @@ impl AppCore {
                 .touch_contact(&did, curated, Timestamp::now())
                 .await
                 .map_err(AppError::from)
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// Block a DID (docs/12 §2). Creates a bare contact row if none exists,
+    /// sets `is_blocked`, and clears any pending message request. Local + LWW
+    /// multi-device synced via the contact storage adapter. Incoming messages
+    /// from a blocked DID are dropped after decryption; outgoing messages to it
+    /// are refused.
+    pub fn block_contact(&self, did: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.store.set_blocked(&did, true).await.map_err(AppError::from)?;
+            inner.store.set_pending_request(&did, false).await.map_err(AppError::from)?;
+            Ok::<_, AppError>(())
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// Unblock a DID (docs/12 §2). Symmetric to [`AppCore::block_contact`];
+    /// reverses suppression immediately. Messages dropped while blocked are not
+    /// recovered.
+    pub fn unblock_contact(&self, did: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.store.set_blocked(&did, false).await.map_err(AppError::from)
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// The block list, newest interaction first — backs Settings → Privacy →
+    /// Blocked (docs/12 §7). Names resolve from local caches like
+    /// [`AppCore::list_contacts`].
+    pub fn list_blocked(&self) -> Result<Vec<ContactRowFfi>, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            let rows = inner.store.list_blocked().await.map_err(AppError::from)?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let mut display_name = inner
+                    .store
+                    .load_contact_profile(&row.did)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.display_name)
+                    .unwrap_or_default();
+                if display_name.is_empty() {
+                    display_name = inner
+                        .store
+                        .load_account_info(&row.did)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.display_name)
+                        .unwrap_or_default();
+                }
+                out.push(ContactRowFfi {
+                    did: row.did,
+                    display_name,
+                    is_curated: row.is_curated,
+                    last_interaction_at_ms: row.last_interaction_at.as_millis(),
+                });
+            }
+            Ok::<_, AppError>(out)
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// Accept a message request (docs/12 §1, docs/52). Curates the contact —
+    /// which clears the request gate and lets read receipts flow — and clears
+    /// the pending flag. Replying achieves the same via the deliberate-gesture
+    /// rule; this is the explicit "Accept" affordance with no reply.
+    pub fn accept_request(&self, did: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.store.touch_contact(&did, true, Timestamp::now()).await.map_err(AppError::from)?;
+            inner.store.set_pending_request(&did, false).await.map_err(AppError::from)?;
+            Ok::<_, AppError>(())
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// Delete a message request (docs/12 §1). Clears the pending flag and drops
+    /// the local conversation history. The contact row stays as a profile cache
+    /// (un-curated); a later inbound message starts a fresh request.
+    pub fn delete_request(&self, did: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.store.set_pending_request(&did, false).await.map_err(AppError::from)?;
+            let conv_id = format!("dm-{}-{}", inner.did, did);
+            inner.store.delete_conversation(&conv_id).await.map_err(AppError::from)?;
+            Ok::<_, AppError>(())
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// Report Spam and Block (docs/12 §3). Submits a content-free abuse report
+    /// to the caller's own homeserver, then applies a local block + clears the
+    /// pending request. `reason` is `spam` | `harassment` | `impersonation` |
+    /// `other`. Exposed only in the message-request UI.
+    ///
+    /// Call from a background thread — this blocks on the network call.
+    pub fn report_and_block(&self, did: String, reason: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.client.report_abuse(&did, &reason).await.map_err(AppError::from)?;
+            inner.store.set_blocked(&did, true).await.map_err(AppError::from)?;
+            inner.store.set_pending_request(&did, false).await.map_err(AppError::from)?;
+            Ok::<_, AppError>(())
         })
         .map_err(AppErrorFfi::from)
     }
@@ -2697,6 +2859,19 @@ impl AppCore {
     ) -> Result<(), AppError> {
         let ws = self.ws.lock().expect("ws mutex poisoned").clone();
         let mut inner = self.inner.lock().await;
+        // Mirror the FFI path: no read receipts to an un-accepted sender
+        // (message-request gate, docs/12 §1).
+        let curated = inner
+            .store
+            .load_contact(recipient_did)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.is_curated)
+            .unwrap_or(false);
+        if !curated {
+            return Ok(());
+        }
         let profile_key = inner.own_profile_key().await;
         let msg = ContentMessage {
             body: Some(Body::Receipt(ReceiptMessage {
@@ -2720,6 +2895,9 @@ impl AppCore {
     ) -> Result<(), AppError> {
         let ws = self.ws.lock().expect("ws mutex poisoned").clone();
         let mut inner = self.inner.lock().await;
+        // Refuse outgoing messages to a blocked contact (docs/12 §2), mirroring
+        // the FFI send path.
+        inner.ensure_not_blocked(recipient_did).await?;
         let body = String::from_utf8_lossy(plaintext).into_owned();
         let profile_key = inner.own_profile_key().await;
         let msg = ContentMessage {
@@ -2728,6 +2906,49 @@ impl AppCore {
             profile_key,
         };
         inner.send_dm(ws.as_ref(), recipient_did, &msg.encode_to_vec(), None).await
+    }
+
+    /// Async block/unblock for tests and bots (docs/12 §2). Blocking creates a
+    /// bare contact row if needed and clears any pending request.
+    pub async fn block_contact_async(&self, did: &str, blocked: bool) -> Result<(), AppError> {
+        let inner = self.inner.lock().await;
+        inner.store.set_blocked(did, blocked).await?;
+        if blocked {
+            inner.store.set_pending_request(did, false).await?;
+        }
+        Ok(())
+    }
+
+    /// Async accept-request for tests and bots (docs/12 §1): curate the contact
+    /// and clear the pending flag.
+    pub async fn accept_request_async(&self, did: &str) -> Result<(), AppError> {
+        let inner = self.inner.lock().await;
+        inner.store.touch_contact(did, true, Timestamp::now()).await?;
+        inner.store.set_pending_request(did, false).await?;
+        Ok(())
+    }
+
+    /// Async Report-Spam-and-Block for tests and bots (docs/12 §3): submit the
+    /// content-free report to our homeserver, then block + clear pending.
+    pub async fn report_and_block_async(&self, did: &str, reason: &str) -> Result<(), AppError> {
+        let inner = self.inner.lock().await;
+        inner.client.report_abuse(did, reason).await?;
+        inner.store.set_blocked(did, true).await?;
+        inner.store.set_pending_request(did, false).await?;
+        Ok(())
+    }
+
+    /// Test/bot accessor for a contact's `(is_curated, is_blocked,
+    /// has_pending_request)` gate state.
+    pub async fn contact_state_async(&self, did: &str) -> Option<(bool, bool, bool)> {
+        let inner = self.inner.lock().await;
+        inner
+            .store
+            .load_contact(did)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| (c.is_curated, c.is_blocked, c.has_pending_request))
     }
 
     /// Trigger one-time prekey replenishment now (test/bot helper). Normally

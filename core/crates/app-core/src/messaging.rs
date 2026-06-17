@@ -181,6 +181,22 @@ pub(crate) async fn ensure_group_recipient_sessions(
     Ok(device_ids)
 }
 
+/// Message-request gate decision for an inbound DM sender (docs/12 §1).
+pub(crate) struct SenderGate {
+    pub is_curated: bool,
+    pub is_blocked: bool,
+    pub is_bot: bool,
+}
+
+impl SenderGate {
+    /// True when the message delivers as a normal (non-request) DM: the sender
+    /// is curated, or is a homeserver-known bot (docs/12 §"When is a sender
+    /// known"). Everyone else is gated behind the message-request UI.
+    pub(crate) fn passes(&self) -> bool {
+        self.is_curated || self.is_bot
+    }
+}
+
 impl AppCoreInner {
     /// Process an inbound `profile_key` from a ContentMessage. If non-empty
     /// and different from any cached key, fetch the sender's encrypted blob,
@@ -744,6 +760,43 @@ impl AppCoreInner {
         }
     }
 
+    /// Evaluate the message-request gate for an inbound DM sender (docs/12 §1,
+    /// docs/52 §"What is_curated drives"). A sender delivers as a normal DM iff
+    /// curated or a homeserver-known bot; an un-curated human is a *request*; a
+    /// blocked DID is dropped after decryption.
+    pub(crate) async fn sender_gate(&self, did: &str) -> SenderGate {
+        let contact = self.store.load_contact(did).await.ok().flatten();
+        let is_bot = self
+            .store
+            .load_account_info(did)
+            .await
+            .ok()
+            .flatten()
+            .map(|a| a.is_bot)
+            .unwrap_or(false);
+        SenderGate {
+            is_curated: contact.as_ref().map(|c| c.is_curated).unwrap_or(false),
+            is_blocked: contact.as_ref().map(|c| c.is_blocked).unwrap_or(false),
+            is_bot,
+        }
+    }
+
+    /// Refuse a user-initiated outbound DM to a blocked DID (docs/12 §2).
+    /// Plumbing sends (delivery receipts, SKDM fan-out) deliberately don't call
+    /// this, so blocking a group co-member never breaks group crypto.
+    pub(crate) async fn ensure_not_blocked(&self, did: &str) -> Result<(), AppError> {
+        let blocked = self
+            .store
+            .load_contact(did)
+            .await?
+            .map(|c| c.is_blocked)
+            .unwrap_or(false);
+        if blocked {
+            return Err(AppError::Blocked(did.to_string()));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn receive_messages(
         &mut self,
         ws: Option<&net::ws::WsConnection>,
@@ -784,7 +837,29 @@ impl AppCoreInner {
                             } else {
                                 None
                             };
-                            // Auto-send delivery receipt.
+                            // Message-request gate (DM only — /v1/messages
+                            // carries DMs). A blocked sender's message was
+                            // decrypted to advance the ratchet, then dropped:
+                            // no event, no delivery receipt (docs/12 §2).
+                            let gate = self.sender_gate(&raw.sender_did).await;
+                            if gate.is_blocked {
+                                continue;
+                            }
+                            // Recency bump (non-curating). An un-curated human
+                            // is a pending request; the flag lets Delete dismiss
+                            // it without curating (docs/52).
+                            let _ = self
+                                .store
+                                .touch_contact(&raw.sender_did, false, Timestamp::now())
+                                .await;
+                            if !gate.passes() {
+                                let _ = self
+                                    .store
+                                    .set_pending_request(&raw.sender_did, true)
+                                    .await;
+                            }
+                            // Auto-send delivery receipt — allowed even for an
+                            // un-accepted request (docs/12 §1), DM only.
                             if let Some(ts) = sent_at {
                                 let profile_key = self.own_profile_key().await;
                                 let delivery = ContentMessage {
@@ -1033,9 +1108,29 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
                 None
             };
 
-            // Touch the contact row on inbound traffic — non-curating, just
-            // a recency bump so the People/Other autocomplete sorting works.
-            {
+            // Message-request gate (docs/12 §1) — DMs only; group text arrives
+            // as `GroupMessage`, not here.
+            if decrypted.group_id.is_none() {
+                let inner = core.inner.lock().await;
+                let gate = inner.sender_gate(&decrypted.sender_did).await;
+                if gate.is_blocked {
+                    // Decrypted to advance the ratchet, now dropped: no event,
+                    // no notification, no delivery receipt (docs/12 §2).
+                    return;
+                }
+                // Recency bump (non-curating). Un-curated human → pending
+                // request flag so Delete can dismiss without curating.
+                let _ = inner
+                    .store
+                    .touch_contact(&decrypted.sender_did, false, Timestamp::now())
+                    .await;
+                if !gate.passes() {
+                    let _ = inner
+                        .store
+                        .set_pending_request(&decrypted.sender_did, true)
+                        .await;
+                }
+            } else {
                 let inner = core.inner.lock().await;
                 let _ = inner
                     .store
@@ -1217,6 +1312,21 @@ mod tests {
     use prost::Message as _;
 
     use crate::proto::{content_message::Body, ContentMessage, TimerChangeMessage};
+
+    #[test]
+    fn sender_gate_passes_for_curated_or_bot_only() {
+        use crate::messaging::SenderGate;
+        let g = |is_curated, is_blocked, is_bot| SenderGate { is_curated, is_blocked, is_bot };
+        // Curated human delivers normally.
+        assert!(g(true, false, false).passes());
+        // Homeserver-known bot skips the gate even when un-curated (docs/12).
+        assert!(g(false, false, true).passes());
+        // Un-curated human is a request, not a pass.
+        assert!(!g(false, false, false).passes());
+        // Blocked is handled by the caller (dropped); `passes` only decides
+        // request-vs-normal, so a curated+blocked row still "passes" the gate.
+        assert!(g(true, true, false).passes());
+    }
 
     #[test]
     fn timer_change_proto_round_trip() {

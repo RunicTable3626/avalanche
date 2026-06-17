@@ -206,3 +206,54 @@ async fn alice_reacts_to_a_message_bob_sees_it() {
     bob.receive_messages_async().await.unwrap();
     assert!(bob.load_reactions_async(&bob_conv).await.unwrap().is_empty());
 }
+
+/// Message-request gate + block + report, end to end (docs/12 §1–3).
+#[tokio::test]
+async fn message_request_block_and_report() {
+    let url = server_url();
+
+    let alice = AppCore::create_account_with_store(&url, test_store().await, None, true, common::invite_token()).await.unwrap();
+    let bob = AppCore::create_account_with_store(&url, test_store().await, None, true, common::invite_token()).await.unwrap();
+    let alice_did = alice.did_async().await;
+    let bob_did = bob.did_async().await;
+
+    // 1. Alice, a stranger to Bob, makes first contact. A request is still
+    //    delivered (the gate surfaces it; it doesn't drop), and Bob now has a
+    //    pending, un-curated, un-blocked row for Alice.
+    alice.send_dm_async(&bob_did, b"hi, buy my coins", now_ms()).await.unwrap();
+    let msgs = only_from(&bob.receive_messages_async().await.unwrap(), &alice_did);
+    assert_eq!(msgs.len(), 1, "a first-contact request is still delivered");
+    let (curated, blocked, pending) = bob.contact_state_async(&alice_did).await.unwrap();
+    assert!(!curated && !blocked && pending, "stranger's first contact is a pending request");
+
+    // Bob evaluates but does not accept: no read receipt flows to Alice. The
+    // suppressed receipt means Alice's next fetch surfaces nothing from Bob
+    // (the auto delivery receipt is consumed internally, never an event).
+    bob.send_read_receipt_async(&alice_did, vec![now_ms()]).await.unwrap();
+    assert!(
+        only_from(&alice.receive_messages_async().await.unwrap(), &bob_did).is_empty(),
+        "no read receipt is sent for an un-accepted request"
+    );
+
+    // 2. Bob reports + blocks Alice. The report lands on Bob's homeserver; the
+    //    block is local and clears the pending request.
+    bob.report_and_block_async(&alice_did, "spam").await.unwrap();
+    let (_c, blocked, pending) = bob.contact_state_async(&alice_did).await.unwrap();
+    assert!(blocked && !pending, "report-and-block sets is_blocked and clears the request");
+
+    // 3. Alice messages again; Bob drops it after decryption — no event.
+    alice.send_dm_async(&bob_did, b"please respond", now_ms()).await.unwrap();
+    let msgs = only_from(&bob.receive_messages_async().await.unwrap(), &alice_did);
+    assert!(msgs.is_empty(), "messages from a blocked sender are dropped");
+
+    // 4. Bob's own outgoing message to the blocked Alice is refused locally.
+    let err = bob.send_dm_async(&alice_did, b"nope", now_ms()).await;
+    assert!(
+        matches!(err, Err(app_core::error::AppError::Blocked(_))),
+        "outgoing to a blocked contact is refused, got {err:?}"
+    );
+
+    // 5. Unblock restores sending.
+    bob.block_contact_async(&alice_did, false).await.unwrap();
+    bob.send_dm_async(&alice_did, b"ok let's talk", now_ms()).await.unwrap();
+}

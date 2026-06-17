@@ -201,10 +201,18 @@ CREATE TABLE IF NOT EXISTS groups (
 
 -- Minimal contact table (docs/52-contacts-and-profiles.md). `is_curated` flips
 -- true on any deliberate gesture; `last_interaction_at` drives recency sort.
+-- `is_blocked` (docs/12 §2) suppresses a DID and syncs across the identity's
+-- devices via the contact storage-sync adapter; `has_pending_request` (docs/52)
+-- marks an un-accepted inbound first contact and is local-only (the
+-- message-request gate itself is driven by `is_curated`).
+-- New columns are also added to pre-existing databases by a guarded
+-- `ALTER TABLE ADD COLUMN` in `IdentityStore::migrate`.
 CREATE TABLE IF NOT EXISTS contacts (
     did                  TEXT    PRIMARY KEY,
     is_curated           INTEGER NOT NULL DEFAULT 0,
-    last_interaction_at  INTEGER NOT NULL DEFAULT 0
+    last_interaction_at  INTEGER NOT NULL DEFAULT 0,
+    is_blocked           INTEGER NOT NULL DEFAULT 0,
+    has_pending_request  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_contacts_recency
     ON contacts (last_interaction_at DESC);

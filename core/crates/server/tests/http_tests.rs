@@ -1185,3 +1185,62 @@ async fn account_joined_catch_up() {
         admin_req(&app, "GET", "/v1/admin/events", &plain_token, None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+// ── Abuse report (docs/12 §3) ────────────────────────────────────────────
+
+async fn post_abuse_report(
+    app: &axum::Router,
+    token: Option<&str>,
+    body: Value,
+) -> StatusCode {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/abuse/report")
+        .header("content-type", "application/json");
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    app.clone()
+        .oneshot(builder.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn abuse_report_succeeds_for_authenticated_reporter() {
+    let app = routes::router().with_state(test_state().await);
+    let (_did, token) = register_and_get_token(&app).await;
+    let status = post_abuse_report(
+        &app,
+        Some(&token),
+        serde_json::json!({"reported_did": "did:plc:spammer", "reason": "spam"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "valid report must be accepted");
+}
+
+#[tokio::test]
+async fn abuse_report_rejects_unknown_reason() {
+    let app = routes::router().with_state(test_state().await);
+    let (_did, token) = register_and_get_token(&app).await;
+    let status = post_abuse_report(
+        &app,
+        Some(&token),
+        serde_json::json!({"reported_did": "did:plc:x", "reason": "because-i-said-so"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown reason must be rejected");
+}
+
+#[tokio::test]
+async fn abuse_report_requires_auth() {
+    let app = routes::router().with_state(test_state().await);
+    let status = post_abuse_report(
+        &app,
+        None,
+        serde_json::json!({"reported_did": "did:plc:x", "reason": "spam"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "report must require a session token");
+}

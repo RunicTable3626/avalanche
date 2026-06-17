@@ -390,15 +390,21 @@ impl SyncedType for GroupKeyAdapter {
 
 // ── Contact adapter (tag 2) ───────────────────────────────────────────────────
 
-/// Syncs the curated-contacts list (`contacts` table). `logical_key` is the
-/// DID. Payload is `is_curated(1) ‖ last_interaction_at(i64 BE 8)`. The contact's
-/// name/profile_key roam separately as [`ContactProfileAdapter`] records.
+/// Syncs the curated/blocked contacts list (`contacts` table). `logical_key` is
+/// the DID. Payload is `is_curated(1) ‖ last_interaction_at(i64 BE 8) ‖
+/// is_blocked(1)`. The trailing `is_blocked` byte is optional on decode: a
+/// 9-byte payload written before the block list shipped reads as `false`, so
+/// the format is backward- and forward-compatible. `has_pending_request` is
+/// deliberately not carried — it's local inbox state, not durable identity
+/// state. The contact's name/profile_key roam separately as
+/// [`ContactProfileAdapter`] records.
 pub struct ContactAdapter;
 
 pub struct ContactRecord {
     pub did: String,
     pub is_curated: bool,
     pub last_interaction_at: i64,
+    pub is_blocked: bool,
 }
 
 #[async_trait]
@@ -409,9 +415,10 @@ impl SyncedType for ContactAdapter {
     type Record = ContactRecord;
 
     fn encode(record: &ContactRecord) -> Vec<u8> {
-        let mut v = Vec::with_capacity(9);
+        let mut v = Vec::with_capacity(10);
         v.push(record.is_curated as u8);
         v.extend_from_slice(&record.last_interaction_at.to_be_bytes());
+        v.push(record.is_blocked as u8);
         v
     }
 
@@ -421,20 +428,26 @@ impl SyncedType for ContactAdapter {
         }
         let is_curated = bytes[0] != 0;
         let last_interaction_at = i64::from_be_bytes(bytes[1..9].try_into().unwrap());
+        // Trailing block byte is optional: legacy 9-byte records read as false.
+        let is_blocked = bytes.get(9).is_some_and(|b| *b != 0);
         Ok(ContactRecord {
             did: logical_key.to_string(),
             is_curated,
             last_interaction_at,
+            is_blocked,
         })
     }
 
     async fn upsert(store: &store::IdentityStore, record: &ContactRecord) -> Result<(), AppError> {
-        // touch_contact's MAX merge is the right LWW behavior here: it never
-        // un-curates and never rewinds recency, both of which are monotonic.
+        // The engine only applies strictly-newer versions (LWW), so the pulled
+        // record is authoritative: is_curated/recency take a monotonic MAX
+        // (they never rewind), is_blocked is overwritten so an unblock on
+        // another device propagates. See store::apply_synced_contact.
         store
-            .touch_contact(
+            .apply_synced_contact(
                 &record.did,
                 record.is_curated,
+                record.is_blocked,
                 Timestamp(record.last_interaction_at),
             )
             .await?;
@@ -454,6 +467,7 @@ impl SyncedType for ContactAdapter {
             did: c.did,
             is_curated: c.is_curated,
             last_interaction_at: c.last_interaction_at.as_millis(),
+            is_blocked: c.is_blocked,
         }))
     }
 }
@@ -899,12 +913,21 @@ mod tests {
             did: "did:plc:x".into(),
             is_curated: true,
             last_interaction_at: 1_700_000_000_000,
+            is_blocked: true,
         };
         let bytes = ContactAdapter::encode(&r);
+        assert_eq!(bytes.len(), 10);
         let back = ContactAdapter::decode("did:plc:x", &bytes).unwrap();
         assert_eq!(back.did, "did:plc:x"); // logical_key injected, not in payload
         assert!(back.is_curated);
         assert_eq!(back.last_interaction_at, 1_700_000_000_000);
+        assert!(back.is_blocked);
+
+        // Legacy 9-byte payload (written before the block byte) reads as false.
+        let legacy = &bytes[..9];
+        let old = ContactAdapter::decode("did:plc:x", legacy).unwrap();
+        assert!(!old.is_blocked, "legacy record decodes to unblocked");
+        assert!(old.is_curated);
     }
 
     #[test]
@@ -979,6 +1002,7 @@ mod tests {
             did: "did:plc:z".into(),
             is_curated: true,
             last_interaction_at: 100,
+            is_blocked: false,
         };
         let payload = ContactAdapter::encode(&rec);
         adapter.apply(&store, "did:plc:z", Some(&payload)).await.unwrap();

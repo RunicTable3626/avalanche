@@ -46,6 +46,7 @@
 		A58A9D263F1E4921F319B28F /* IdentityPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AB2D93100F9BA3D2C8BBD22 /* IdentityPickerView.swift */; };
 		ABB54957015CF8BAA7F9AB29 /* QRCodeCameraView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F233E23BDFE8CD9A1FA85D1 /* QRCodeCameraView.swift */; };
 		B1BE1C0F66D5E81BA2BE3ED4 /* AppLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28910BDF4DFA815CEDDA7F15 /* AppLog.swift */; };
+		B514347DE5B82B23C61F63D9 /* BlockedContactsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9F568020569E5B672851351 /* BlockedContactsView.swift */; };
 		C239EC74DDDF816075F9D6C2 /* PasskeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6168BA4AD89E27656AE0A59 /* PasskeyManager.swift */; };
 		C8BE5993A5A4E8838F9D0C29 /* ConversationRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0BC2191A5A534D46806501B /* ConversationRow.swift */; };
 		CB587AAF86CE72E9AFCE06E1 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E5E1613DCC5CA3E0E49D097E /* LaunchScreen.storyboard */; };
@@ -114,6 +115,7 @@
 		B6264C3F09805D88EB5983A6 /* ProjectWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectWebView.swift; sourceTree = "<group>"; };
 		C0BC2191A5A534D46806501B /* ConversationRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRow.swift; sourceTree = "<group>"; };
 		C175D8D86EA1A357FB1515A9 /* RecoveryConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryConsoleView.swift; sourceTree = "<group>"; };
+		C9F568020569E5B672851351 /* BlockedContactsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedContactsView.swift; sourceTree = "<group>"; };
 		CA3B34B7A3FF40359D732B62 /* OfflineBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineBanner.swift; sourceTree = "<group>"; };
 		D0B344D75428AFD0B731E724 /* AccountAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountAvatar.swift; sourceTree = "<group>"; };
 		D3E414B6BFBC7FD68C41B63E /* SecureEnclaveKeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureEnclaveKeyManager.swift; sourceTree = "<group>"; };
@@ -263,6 +265,7 @@
 			children = (
 				7313225243535C7C945AD8D7 /* AccountsView.swift */,
 				A516614278B12B45D3E876E6 /* AddAccountView.swift */,
+				C9F568020569E5B672851351 /* BlockedContactsView.swift */,
 				81668B961AEA3548EB74341C /* IdentityDetailView.swift */,
 				26186BC45147144B3B351CCB /* ServerDetailView.swift */,
 			);
@@ -403,6 +406,7 @@
 				DD42A62234B9DF687F2AE7BB /* AppState.swift in Sources */,
 				EF24D30DE8AE1125CB83DB84 /* AvalancheColors.swift in Sources */,
 				835054B2BD1DA05A5F04B452 /* Base64URL.swift in Sources */,
+				B514347DE5B82B23C61F63D9 /* BlockedContactsView.swift in Sources */,
 				4CB5F41795DCD29D8786B22B /* CallsView.swift in Sources */,
 				DCB3ED6719400E9479A29C98 /* ChatsView.swift in Sources */,
 				E74703FA755ACEF9C2B0DAA5 /* ComposeMessageView.swift in Sources */,

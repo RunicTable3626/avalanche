@@ -94,6 +94,25 @@ struct IdentityDetailView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
 
+                VStack(spacing: 12) {
+                    NavigationLink {
+                        BlockedContactsView(account: account)
+                    } label: {
+                        HStack {
+                            Label("Blocked Contacts", systemImage: "hand.raised")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(12)
+                        .background(Color.sand50, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal)
+                .padding(.top, 8)
+
                 Button(role: .destructive) {
                     showDeleteConfirmation = true
                 } label: {

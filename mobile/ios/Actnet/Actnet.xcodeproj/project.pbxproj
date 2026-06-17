@@ -27,7 +27,6 @@
 		3E096A5CEAF5136996B05DB3 /* app_core.swift in Sources */ = {isa = PBXBuildFile; fileRef = DADF188CB0F720072C71A2DF /* app_core.swift */; };
 		40A41102CF36127A10602343 /* AddAccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A516614278B12B45D3E876E6 /* AddAccountView.swift */; };
 		453C9CABA749A1A2D5191AC4 /* AppCoreProtocol+Defaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A8F652C3B8F59F3A47CB029 /* AppCoreProtocol+Defaults.swift */; };
-		4CB5F41795DCD29D8786B22B /* CallsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E488C4D9264B250098E100E /* CallsView.swift */; };
 		5E07B0FD87D07465DAB28703 /* RecoveryKeyBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CE6D8359E844CDAC7396157 /* RecoveryKeyBanner.swift */; };
 		5E9CE6A936CB3EE5A7D534D1 /* EditHistorySheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C69AF8A0D806372AF28BDA9 /* EditHistorySheet.swift */; };
 		638610176DD56586489BAF89 /* ActnetApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65A7BC7A36A4F6D36947106A /* ActnetApp.swift */; };
@@ -80,7 +79,6 @@
 		2F41810D70D78B7CB00C38FA /* ActnetService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActnetService.swift; sourceTree = "<group>"; };
 		32115C1BD46227602D3C5A71 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		33A33BB9BDC1959B6580927C /* NewAccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewAccountView.swift; sourceTree = "<group>"; };
-		3E488C4D9264B250098E100E /* CallsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallsView.swift; sourceTree = "<group>"; };
 		59A82BC1AF50974F0759EC90 /* InviteLinkEntryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InviteLinkEntryView.swift; sourceTree = "<group>"; };
 		60B3DC7CBE016789D232757D /* ChatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatsView.swift; sourceTree = "<group>"; };
 		61ED846E5A712650DB67C893 /* Conversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Conversation.swift; sourceTree = "<group>"; };
@@ -163,18 +161,9 @@
 			path = Services;
 			sourceTree = "<group>";
 		};
-		1D9710FE7A4C49249FC32AAC /* Calls */ = {
-			isa = PBXGroup;
-			children = (
-				3E488C4D9264B250098E100E /* CallsView.swift */,
-			);
-			path = Calls;
-			sourceTree = "<group>";
-		};
 		2FEC46E298F92D2DF1B84795 /* Views */ = {
 			isa = PBXGroup;
 			children = (
-				1D9710FE7A4C49249FC32AAC /* Calls */,
 				3E11A5DB2587F144B7D53C07 /* Chats */,
 				FCE9CD51137719AE8A7053E3 /* Common */,
 				A2271B699E124970E6D50032 /* Network */,
@@ -407,7 +396,6 @@
 				EF24D30DE8AE1125CB83DB84 /* AvalancheColors.swift in Sources */,
 				835054B2BD1DA05A5F04B452 /* Base64URL.swift in Sources */,
 				B514347DE5B82B23C61F63D9 /* BlockedContactsView.swift in Sources */,
-				4CB5F41795DCD29D8786B22B /* CallsView.swift in Sources */,
 				DCB3ED6719400E9479A29C98 /* ChatsView.swift in Sources */,
 				E74703FA755ACEF9C2B0DAA5 /* ComposeMessageView.swift in Sources */,
 				784454627F0BB442850E2F3A /* ContactAvatar.swift in Sources */,

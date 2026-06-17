@@ -1,7 +1,6 @@
 # Deferred TODOs
 
 ## Next
-- iOS app defaults to mock `ActnetService` mode instead of the live one, which is confusing — a fresh install looks like it's working but isn't actually talking to a homeserver. Default to live mode and make mock an explicit opt-in (debug menu toggle, env-var, or build config).
 - Rename everything to avalanche
 
 ## Mobile app
@@ -53,8 +52,7 @@ See `docs/14-bitchat-fallback.md` for the full design. BLE mesh transport as a f
 - Display-name profanity filter (client-side, on by default, tap-to-reveal). Satisfies the "filter objectionable material" prong of App Store 1.2 at the profile layer.
 - Projects framework App Store 4.7 compliance: (1) maintain a Project index with universal links (4.7.4); (2) per-Project consent prompt before granting data/permissions, re-prompt on permission expansion (4.7.3); (3) age-restriction mechanism for mature Projects with verified or declared age (4.7.5); (4) keep the JS bridge surface conservative — no exposing native APIs without prior Apple approval (4.7.2). Document policy that all in-Project digital-goods purchases route through IAP (4.7.1 / 3.1).
 - Privacy policy URL plumbing: homeserver metadata endpoint exposes the operator's privacy policy URL; client displays it during signup alongside the app's own policy. Required because each homeserver is a separate data controller under GDPR.
-- Reviewer demo flow: passkey-only signup is hostile to App Review. Either ship a debug build flag that bypasses passkey with a synthetic key, or pre-provision a reviewer account with embedded credentials and document in review notes. Without this, first submission will be rejected for "couldn't complete signup."
-- Support contact info: support email shown in Settings → About (mailto link is fine, no ticketing system needed) and Support URL set in App Store Connect. Required by 1.2 (UGC contact) and 1.5 (developer info).
+- Support contact info: point the in-app Support link and the App Store Connect Support URL at the GitHub issues page (no personal email required). Required by 1.2 (UGC contact) and 1.5 (developer info). Make sure the page reads as a support channel (link the Issues tab or a README that says "report problems here"). If a reviewer needs a direct contact during review, put it in the App Review notes.
 - Age rating: aim for 12+ (matching Signal), set via honest answers to the App Store Connect rating questionnaire — acknowledge UGC exists but no shipped objectionable content, no gambling, no unrestricted web. Don't use "Kids" or "Children" anywhere in metadata (2.3.8).
 
 

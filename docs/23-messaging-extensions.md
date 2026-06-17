@@ -22,7 +22,7 @@ This doc gives the boundary as a few rules and a deliberately small set of surfa
 | Custom emoji / reaction pack              | **Split**           | reaction picker                | Project contributes assets into the core react mechanism                                    |
 | Bot slash commands                        | **Split**           | composer `/` (autocomplete)    | Bot advertises commands; the command is a normal message it interprets                      |
 | Giphy / sticker / GIF search              | **Project**         | "+" menu → webview             | Entry point opens a webview that returns a GIF you send                                     |
-| Cardstack / swipe survey                  | **Project**         | launcher message → webview     | Deep-link launcher → webview; the bot posts results back                                    |
+| Cardstack / swipe survey                  | **Project**         | magic link → webview           | Bot posts a magic link → webview; the bot posts results back                                |
 | "Create task from this", "Translate this" | **Project**         | message long-press → webview   | Entry point opens a webview with the message as context                                     |
 | Action Day map + markers                  | **Project**         | Network tab → webview          | Destination Project; builds on the core location primitive                                  |
 
@@ -37,11 +37,11 @@ This doc gives the boundary as a few rules and a deliberately small set of surfa
 
 There are exactly three places a feature can live, and the design pushes hard toward keeping the first one boring:
 
-- **In the conversation (core).** Native, auditable, E2E. *Substrate grammar and built-ins* (reactions, replies, receipts, live location, simple polls), *generic link previews*, and *bot-posted messages* (plain or rich-text, possibly carrying a deep-link launcher). **Nothing in the feed collects input or renders untrusted UI.**
+- **In the conversation (core).** Native, auditable, E2E. *Substrate grammar and built-ins* (reactions, replies, receipts, live location, simple polls), *generic link previews*, and *bot-posted messages* (plain or rich-text, possibly carrying a magic link). **Nothing in the feed collects input or renders untrusted UI.**
 - **A full-screen Project webview.** All real interactivity (GIF search, forms, multi-step flows, the cardstack, maps) lives here, behind an explicit "open this Project" handoff, sandboxed from E2E data.
 - **The Project's bot, as a conversation member.** Posts messages into the conversation, observes reactions/replies as lightweight signals, and posts results back from webview sessions.
 
-The things we explicitly **do not** build: inline interactive cards, in-feed form controls, and display cards. Once a webview exists for real interaction, every in-feed interactive widget is a redundant middle layer that adds native cross-platform rendering, a submission-routing substrate, and an in-feed phishing surface — to do badly what the webview does well. Lightweight in-feed actions (approve/deny, "I'm in") are served by **reactions or replies a member bot observes**; a tappable launcher is just a **deep link in a (rich-text) bot message**; anything with real input goes to the webview.
+The things we explicitly **do not** build: inline interactive cards, in-feed form controls, and display cards. Once a webview exists for real interaction, every in-feed interactive widget is a redundant middle layer that adds native cross-platform rendering, a submission-routing substrate, and an in-feed phishing surface — to do badly what the webview does well. Lightweight in-feed actions (approve/deny, "I'm in") are served by **reactions or replies a member bot observes**; a tappable launcher is just a **magic link in a (rich-text) bot message** — self-authenticating and allowlist-gated (see `20-project-security.md`, *Project permissions*); anything with real input goes to the webview.
 
 ## The surfaces core exposes
 
@@ -49,11 +49,14 @@ It really comes down to one primitive, plus rich text. (And one anti-surface, li
 
 ### 1. The one primitive: open a Project webview
 
-Everything interactive is "open a Project's webview, with context and a scoped token." A Project registers **entry points** — `{ id, label, icon, scope }` — that core surfaces in one of three places:
+Everything interactive is "open a Project's webview, with context and a scoped token." There are two ways a webview opens: a **registered entry point** and a **magic link**.
 
-- the composer **"+" menu**,
-- the **message long-press menu** (the entry point receives that message as context — an explicit, per-message disclosure to the Project, consent-gated by the tap),
-- a **deep link** inside a message (e.g. a bot posts "Priorities deck — tap to rank 12 items"; tapping opens the webview).
+A Project registers **entry points** — `{ id, label, icon, scope }` — that core surfaces in one of two places:
+
+- the composer **"+" menu** (`surface:compose`),
+- the **message long-press menu** (`message:context-on-action`) — the entry point receives that message as context, an explicit, per-message disclosure to the Project, consent-gated by the tap.
+
+A **magic link** is the third path, and it is *not* a registered entry point: it's a Project-issued, self-authenticating link that opens the Project's webview wherever it's tapped — including from inside a message (e.g. a bot posts "Priorities deck — tap to rank 12 items"). The link carries no credential; the clicking device injects a Project-scoped identity token at tap time, and only for Projects on the clicker's own vetted allowlist (the no-open-redirect rule). Because the client recognizes it by URL against that allowlist rather than by a registered id, *anyone* can share a magic link — it isn't restricted to the owning bot or to conversations the bot is a member of. It is typically dressed with a rich-text label (a link span) for presentation. See `20-project-security.md`, *Project permissions* (`identity:magic-links`).
 
 Slash commands are **not** one of these — they don't invoke anything client-side. They're a separate, lighter thing (next).
 
@@ -99,7 +102,7 @@ Generic link unfurling and `@user` mention autocomplete (and anything compose-ti
 
 The wire envelope is `core/proto/content.proto`, and the extensions here are tiny — the feed gains formatting and a built-in poll, and nothing that routes user input through messages:
 
-- **Rich text & mentions** — `repeated BodyRange ranges` on `TextMessage`, claiming the field reserved for "formatting / mentions" (`TextMessage` reserves `4 to 10` for mentions / reply_to / formatting per `35-attachments.md`). One field carries styles, link spans (= launchers), and member-mention spans; no card variant exists.
+- **Rich text & mentions** — `repeated BodyRange ranges` on `TextMessage`, claiming the field reserved for "formatting / mentions" (`TextMessage` reserves `4 to 10` for mentions / reply_to / formatting per `35-attachments.md`). One field carries styles, link spans (= magic-link launchers), and member-mention spans; no card variant exists.
 - **Simple polls** — a core built-in, not a Project surface. A poll is a small structured message; a vote is a **reaction-shaped PEER substrate message** keyed on `(poll, voter)`, last-vote-wins, **client-tallied** exactly like the reaction cluster in `33-reactions.md` — E2E, no bot, works in a DM, eventually consistent.
 - **Slash commands** — no wire change at all: a slash command is a plain `TextMessage`. The only Project-side data is the bot's **command manifest** (in its profile / Project metadata), which the client syncs to drive the typeahead.
 
@@ -111,7 +114,7 @@ Everything interactive beyond a poll vote is either content the user sends as a 
 
 **Simple polls** — a core built-in surfaced under "+". The poll is a structured message; votes are reaction-shaped PEER messages every client tallies locally. No bot, fully E2E, works in a 1:1 DM, offline-tolerant. Deliberately *not* a Project (a Project poll couldn't run in a DM or offline). It serves the dominant "quick question to the group" job.
 
-**Cardstack / swipe survey** — the "vote yes/no through a deck of prompts" idea wants fluid, instant, *local* advancement, which an in-feed surface can't give. So it's a **Project webview**: the bot posts a launcher message ("Priorities deck — tap to rank 12 items"); tapping opens the Project's webview; the user swipes there; the Project collects answers and its **bot posts the result** back. Framed as its own tool (triage / prioritization), it doesn't compete with the simple poll — differentiation, not suppression, lets both survive.
+**Cardstack / swipe survey** — the "vote yes/no through a deck of prompts" idea wants fluid, instant, *local* advancement, which an in-feed surface can't give. So it's a **Project webview**: the bot posts a **magic link** ("Priorities deck — tap to rank 12 items") as a rich-text launcher; tapping opens the Project's webview; the user swipes there; the Project collects answers and its **bot posts the result** back. Framed as its own tool (triage / prioritization), it doesn't compete with the simple poll — differentiation, not suppression, lets both survive.
 
 **Bot-formatted announcement** — an adminbot posts a message with **rich-text ranges** (API 3): bold headers, links, emphasis. No new surface; just formatting on a normal bot message.
 
@@ -130,7 +133,7 @@ Everything interactive beyond a poll vote is either content the user sends as a 
 ## Open questions / decisions
 
 1. **Full-screen webview surface spec.** The webview surface is arguably bigger than this doc — the inbound launch-param/scoped-token format, the outbound deeplink vocabulary (`attach`, `close`, …), the sender-side fetch guard (allowlist/size/SSRF), isolation guarantees, content packaging (remote-loaded vs. signed bundle), and App Store constraints need their own pass, likely a dedicated `2x` doc, with a security review alongside `20-project-security.md`. (Note: no JS bridge — I/O is URL params in, deeplinks out.)
-2. **New Project scopes & threat model** — entry-point registration, webview launch, return-content, and "post a result back" are new scopes with their own risks: command-name squatting, webview phishing, result-spam. Needs a pass with `20-project-security.md` before committing.
+2. **New Project scopes & threat model** — entry-point registration, webview launch, return-content, and "post a result back" are new scopes with their own risks: command-name squatting, webview phishing, result-spam. An initial scope set (incl. `identity:magic-links`) is now drafted in `20-project-security.md`, *Project permissions (admin-granted scopes)*; the threat-model pass against it still needs to happen before committing.
 3. **Rich text scope** — inline ranges (bold/italic/strike/monospace/spoiler) ship first, Signal-shaped. Decide whether bot content ever needs *block-level* structure (lists, headings, quotes, code blocks) and, if so, how to add it without it becoming a layout/junk-drawer vector.
 4. **Poll details** — single vs multi-select, closing a poll, anonymity (note: client-tallied votes are inherently visible to members; a secret ballot would need a trusted aggregator, i.e. a Project, leaving the DM/offline/E2E sweet spot). Spec with the poll built-in.
 

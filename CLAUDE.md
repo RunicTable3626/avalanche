@@ -38,7 +38,9 @@ minimum work. See the header of `Makefile` for the build chain.
 
 ## Key Docs
 
-Read these first — they cover the overall design, technical approach, and backlog:
+**Before any design, architecture, or cross-subsystem work, read `docs/DIGEST.md` first.** It is a ~12K-token compressed index of every design doc — decisions, their rationale, and rejected alternatives, with pointers back to the source doc for detail — so you can hold the whole design in context at once. (For a trivial, localized change you can skip it.) Source docs remain authoritative; regenerate the digest if the docs change materially.
+
+For further detail, open the relevant source doc — the digest cites them inline (e.g. `(03 §3.9)`):
 
 - `docs/00-design.md` — goals, architecture, threat model, first-party Project designs
 - `docs/01-technical-implementation.md` — tech stack, crypto approach, repo structure, staged build plan

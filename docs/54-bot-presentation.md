@@ -14,9 +14,12 @@ admin bot, confirm your recovery phrase"). The presentation has to defend both
 directions without overclaiming what it can prove.
 
 Bots are full Signal-protocol participants (`21-chatbot-project.md`): same
-account shape, same DID, no special server-side flag. So "bot status" is not a
-fact the substrate hands us — it's something we either **attest** to or
-**self-declare**, and the UI must show *which*.
+account shape, same DID. The server *does* vouch for bots it installed (an
+`official` flag, plus `is_bot` on registered bot accounts — `52-contacts-and-profiles.md`),
+but for an *arbitrary* identity — a bot a user invited that registered as an
+ordinary account — automation is only ever **self-declared**. So "bot status"
+is partly **server-vouched** (provenance) and partly a claim we merely **relay**
+(automation), and the UI must show *which*.
 
 `36-message-editing-deletion.md` already branches on "is this author a bot"
 (bots get a wider edit/delete envelope). This doc supplies the definition that
@@ -27,11 +30,15 @@ branch leans on: what makes an identity read as a bot, and how strongly.
 The single phrase "bot status" collapses two independent properties with very
 different enforceability. Keeping them separate is the whole design:
 
-- **Provenance — is this an *official* bot?** Cryptographically verifiable. The
-  `OfficialBotAttestation` chain in `22-adminbot.md` (server trust root → adminbot
-  delegation cert → attestation, embedded in the bot's profile blob) lets the
-  client prove an identity is an official bot run within this server's trust
-  domain. Cannot be forged. This is the ✓ badge.
+- **Provenance — is this an *official* bot?** Vouched for by your homeserver. An
+  `official` flag on the bot's account record (`20-project-security.md`, read via
+  `get_account_info` / `account_info_cache` — the same path as `display_name` /
+  `is_bot` in `52-contacts-and-profiles.md`) tells the client this is a Project the
+  operator installed within this server's trust domain. The trust is the **trust
+  chain** — you believe your own homeserver over its authenticated connection —
+  not a cryptographic signature, so it is **same-server only**. It can't be forged
+  by another *account*: the flag lives on the server's record for the real bot, so
+  an impersonator simply doesn't carry it. This is the ✓ badge.
 - **Automation — is this identity a *bot* rather than a *human*?** For an
   arbitrary identity this is **only ever self-declared** and **not enforceable**.
   A bot a user invited into a casual group (`00-design.md`: participants may
@@ -40,16 +47,17 @@ different enforceability. Keeping them separate is the whole design:
 
 The UI must never present a self-declared "bot" as if it were a proven one, and
 must never let a missing declaration imply "definitely human." Provenance is a
-claim we verify; automation is a claim we relay.
+claim our homeserver vouches for; automation is a claim we relay.
 
 ## Core model — a three-tier presentation
 
 Every identity renders at exactly one of three trust tiers, decided client-side:
 
-1. **Verified bot** — carries a valid `OfficialBotAttestation` whose chain
-   verifies against the hosting server's pinned trust root and isn't expired.
-   Render with the **bot frame + ✓ badge** and an attributable line ("Official
-   bot · run by {server}"). This is the only tier whose "bot" claim is provable.
+1. **Verified bot** — your homeserver reports the `official` flag on this bot's
+   account record. Render with the **bot frame + ✓ badge** and an attributable
+   line ("Official bot · run by {server}"). This is the only tier whose "official"
+   claim is vouched for — by your own server, same-server only; the ✓ means
+   nothing coming from a server you don't have an account on.
 2. **Self-identified bot** — profile declares `account_kind = bot` (see below)
    but carries no valid attestation. Render with the **bot frame, no ✓**, and an
    explicitly hedged label ("Automated (not verified)"). Honest bots get
@@ -72,9 +80,10 @@ identities render in a squared frame humans don't get.
 Why chrome rather than constraining the avatar image:
 
 - **Unspoofable by the avatar.** The *client* chooses the mask and badge from the
-  attestation/declaration, not from the uploaded bytes. A bot cannot ship an
-  image that "undoes" the bot frame, and a human cannot ship one that forges the
-  ✓.
+  server's account record (the `official` flag, `is_bot`) and the self-declared
+  `account_kind`, not from the uploaded bytes. A bot cannot ship an image that
+  "undoes" the bot frame, and a user account cannot ship one that forges the ✓ —
+  the flag isn't in anything the account uploads.
 - **It doesn't fight branding.** Real Project bots (the Q&A bot, an engagement
   bot, a campaign's own bot) want *their own* avatar — a forced generic image
   would erase exactly the identity they need. Chrome leaves the image free.
@@ -95,7 +104,7 @@ checking each avatar. A *literal* regular octagon can't hold a text bubble
 a rectangle with chamfered corners: an octagon when square, a beveled rectangle
 at bubble proportions. (Implemented; the avatar-frame badge tiers above are not
 yet — today every bot renders the hexagon frame and octagon bubbles, with no
-badge, until the attestation tier lands.)
+badge, until the official-flag badge tier lands.)
 
 ## On the constrained-avatar-palette idea
 
@@ -106,8 +115,9 @@ ecosystem a shared look. But as a *security* mechanism it mostly doesn't hold,
 and it's worth being precise about why:
 
 - **The asymmetry only exists if something the bot can't lie about constrains the
-  image.** The only such thing is the attestation. So a *security-grade* palette
-  is parasitic on — and redundant with — the badge we already have. For
+  image.** The only such thing is the server's `official` flag (which an account
+  can't set for itself). So a *security-grade* palette is parasitic on — and
+  redundant with — the badge we already have. For
   self-run, unattested bots there is no enforcement point: a malicious bot writes
   its own client and sets any avatar it likes. "A bot couldn't *easily* pretend
   to be a user" reduces to "the bot SDK doesn't offer that affordance" — real
@@ -120,7 +130,7 @@ and it's worth being precise about why:
   *looking* like a human only if the bot is honest enough to use the palette in
   the first place — i.e. it doesn't stop the dishonest case at all. The genuinely
   dangerous case (a human posing as the *official* bot) is already covered by the
-  unforgeable ✓.
+  ✓ — an impersonator account doesn't carry the server's `official` flag.
 
 **Recommendation:** don't make the palette mandatory and don't lean on it for
 security. Keep the chrome (frame + badge) as the load-bearing distinction, and
@@ -146,13 +156,15 @@ Two additions, both reusing existing machinery:
   Self-declared, distributed and cached exactly like every other profile field;
   it drives tier 2 vs tier 3. Unknown values degrade to `person` (older clients
   ignore it — same forward-compat rule as the rest of the blob).
-- **An `is_bot`/`kind` field on `OfficialBotAttestation`** (`22-adminbot.md`).
-  Adminbot already attests `subject_did`, `display_name`, `purpose`; marking the
-  subject a bot there makes tier 1 fully attestation-driven rather than trusting
+- **The `official` flag (and `is_bot`) on the bot's account record**
+  (`20-project-security.md`, `22-adminbot.md`), served by `get_account_info` and
+  cached in `account_info_cache` (`52-contacts-and-profiles.md`). Set by the
+  operator at install, this drives tier 1 — server-vouched, so it doesn't rely on
   the self-declared `account_kind` for official bots. A well-run server's bots
-  thus all carry the proven signal.
+  thus all carry the vouched signal.
 
-No new transport: both ride the profile/attestation paths that already exist.
+No new transport: both ride the profile blob and the public account-record paths
+that already exist.
 
 ## Surfaces
 
@@ -178,9 +190,10 @@ avatar or name does:
 - **Editing/deletion (`36`)** — the bot envelope (no edit cap, 30-day window, no
   retained history) keys off the self-declared `account_kind`. This doc is where
   that "is this a bot" question is answered.
-- **Auto-accept of official-bot invites (`22`)** — already gated on the
-  attestation chain; the ✓ tier here is the same verification surfaced visually.
-  A self-identified (tier 2) bot's invite gets the normal accept/decline UX, not
+- **Auto-accept of bot invites (`20`/`22`)** — the `invites:auto-accept` scope (a
+  same-server, client-honored grant), typically held by official bots; the ✓ tier
+  here surfaces the same server-vouched officialness visually. A self-identified
+  (tier 2) bot without that scope gets the normal accept/decline UX, not
   auto-accept.
 - **Contacts (`52`)** — `account_kind` is just another cached profile field;
   nothing about curation, blocking, or the People list changes. A bot can be a

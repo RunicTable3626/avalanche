@@ -91,8 +91,9 @@ pub async fn update_recovery_blob(
 ///  13. storage_items          (→ accounts)
 ///  14. storage_seq            (→ accounts)
 ///  15. storage_snapshots      (→ accounts)
-///  16. devices                (→ accounts)
-///  17. accounts               (root)
+///  16. project_bots           (→ accounts; Project row survives)
+///  17. devices                (→ accounts)
+///  18. accounts               (root)
 pub async fn delete_account(conn: &mut PgConnection, account_id: i64) -> Result<(), sqlx::Error> {
     let mut tx = conn.begin().await?;
 
@@ -211,13 +212,21 @@ pub async fn delete_account(conn: &mut PgConnection, account_id: i64) -> Result<
         .execute(&mut *tx)
         .await?;
 
-    // 16. devices references accounts
+    // 16. project_bots references accounts (docs/24). Removing a bot account
+    // unlinks it from its Project; the Project row itself survives (a bot can
+    // be rotated/removed without deleting the Project).
+    sqlx::query("DELETE FROM project_bots WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 17. devices references accounts
     sqlx::query("DELETE FROM devices WHERE account_id = $1")
         .bind(account_id)
         .execute(&mut *tx)
         .await?;
 
-    // 17. accounts (root row)
+    // 18. accounts (root row)
     sqlx::query("DELETE FROM accounts WHERE id = $1")
         .bind(account_id)
         .execute(&mut *tx)

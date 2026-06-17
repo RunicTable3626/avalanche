@@ -22,7 +22,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgConnection;
 
-use crate::{db, error::ServerError, middleware::client_ip::ClientIp, state::AppState};
+use crate::{
+    config::{RegistrationMode, ADMINBOT_PROJECT_SLUG},
+    db,
+    error::ServerError,
+    invite_token::{self, TokenError, PURPOSE_INVITE},
+    middleware::client_ip::ClientIp,
+    state::{AppState, WsPush},
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/v1/accounts", post(register))
@@ -62,6 +69,11 @@ struct RegisterRequest {
     /// Signs the canonical payload `"register:{did}"` (base64url, no padding).
     /// Required when `did` is provided.
     identity_key_signature: Option<String>, // base64url
+    /// Project-signed invite token (docs/24). Required to register under closed
+    /// registration unless the caller qualifies for a bootstrap admission arm.
+    /// The raw string is passed through to subscribed bots in the
+    /// `AccountJoinedEvent` so they can route by its issuer + routing tags.
+    invite_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -153,9 +165,24 @@ async fn register(
 
     let mut conn = state.db.acquire().await?;
 
+    // Closed-registration gating + single-use invite-token validation (docs/24).
+    // The server validates the token locally against the issuing Project's
+    // pinned key — it never calls the Project. Fails closed.
+    gate_registration(&mut conn, &state, &did, &req).await?;
+
     // Create account.
     let account_id =
         db::accounts::create(&mut conn, &did, req.display_name.as_deref(), req.is_bot).await?;
+
+    // Bootstrap link: if this DID is a configured adminbot identity, link it
+    // into the pinned adminbot Project so its session carries superuser
+    // authority. Membership is config-driven only — never settable via the
+    // admin API — preserving the "superuser only via operator config"
+    // invariant (docs/22).
+    if state.config.adminbot_dids.iter().any(|d| d == &did) {
+        let pid = db::projects::ensure_adminbot_project(&mut conn, ADMINBOT_PROJECT_SLUG).await?;
+        db::projects::link_bot(&mut conn, pid, account_id).await?;
+    }
 
     // Store recovery blob if provided.
     if let Some(blob) = &recovery_blob {
@@ -210,33 +237,35 @@ async fn register(
         db::sessions::create(&mut conn, &token, device_pk, state.config.token_lifetime_secs)
             .await?;
 
-    // Notify adminbot (if connected and not registering itself) so it can
-    // act on the new account. Best-effort: a disconnected adminbot misses
-    // the event in v1.
-    if did != state.config.adminbot_did {
-        let slot = state.adminbot_session.read().await;
-        match slot.as_ref() {
-            Some(tx) => {
-                let joined_at_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                match tx.send(crate::state::WsPush::AccountJoined {
-                    did: did.clone(),
-                    joined_at_ms,
-                }) {
-                    Ok(()) => tracing::info!(%did, "adminbot AccountJoined pushed"),
-                    Err(_) => tracing::warn!(
-                        %did,
-                        "adminbot AccountJoined send failed (receiver dropped)"
-                    ),
-                }
-            }
-            None => tracing::warn!(
-                %did,
-                adminbot_did = %state.config.adminbot_did,
-                "adminbot AccountJoined dropped: no adminbot WS session connected"
-            ),
+    // Announce the new account to bots holding `subscribe.account_joined`.
+    // Two paths: (1) a durable append to `server_events` so a disconnected bot
+    // can catch up via `GET /v1/admin/events`; (2) a best-effort live fan-out
+    // to every currently-subscribed session. The event carries the raw invite
+    // token so bots can route by its issuer + routing tags (docs/22, 24).
+    let joined_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    if let Err(e) = db::server_events::append_account_joined(
+        &mut conn,
+        &did,
+        req.invite_token.as_deref(),
+        joined_at_ms,
+    )
+    .await
+    {
+        // Non-fatal: the account exists; only catch-up is degraded.
+        tracing::warn!(%did, "failed to append account_joined server event: {e}");
+    }
+    {
+        let subs = state.account_joined_subscribers.read().await;
+        tracing::info!(%did, subscribers = subs.len(), "fanning out AccountJoined");
+        for tx in subs.values() {
+            let _ = tx.send(WsPush::AccountJoined {
+                did: did.clone(),
+                joined_at_ms,
+                invite_token: req.invite_token.clone(),
+            });
         }
     }
 
@@ -248,6 +277,102 @@ async fn register(
             expires_at: expires_at.to_string(),
         }),
     ))
+}
+
+/// Closed-registration admission + single-use invite-token validation.
+///
+/// In `Open` mode any registration is admitted, but a supplied token is still
+/// validated and redeemed (so a token can't be silently ignored or reused). In
+/// `Closed` mode a registration is admitted only if one of these holds:
+///   (a) it carries a valid, unredeemed gatekeeper invite token,
+///   (b) it is a bot whose reserved `did_suffix` is in the bootstrap allowlist,
+///   (c) its DID is a configured adminbot identity.
+/// Otherwise it fails closed (403).
+///
+/// The server validates the token against the issuing Project's pinned key
+/// locally — it never calls the Project.
+async fn gate_registration(
+    conn: &mut PgConnection,
+    state: &AppState,
+    did: &str,
+    req: &RegisterRequest,
+) -> Result<(), ServerError> {
+    // Validate + redeem a supplied token (both modes). Returns true if a valid
+    // token was redeemed for this registration.
+    let has_valid_token = if let Some(raw) = req.invite_token.as_deref() {
+        let envelope = invite_token::parse_envelope(raw).map_err(map_token_err)?;
+
+        let project = db::projects::find_by_slug(conn, &envelope.iss)
+            .await?
+            .ok_or_else(|| ServerError::Forbidden("unknown invite token issuer".into()))?;
+        if !db::capabilities::project_has(
+            conn,
+            project.id,
+            db::capabilities::REGISTRATION_GATEKEEPER,
+        )
+        .await?
+        {
+            return Err(ServerError::Forbidden(
+                "issuer is not a registration gatekeeper".into(),
+            ));
+        }
+        let key = project.signing_public_key.ok_or_else(|| {
+            ServerError::Forbidden("gatekeeper has no registered signing key".into())
+        })?;
+
+        let claims = invite_token::verify_claims(
+            &envelope,
+            &key,
+            &state.config.server_url,
+            PURPOSE_INVITE,
+            invite_token::now_unix(),
+        )
+        .map_err(map_token_err)?;
+
+        // Single-use: INSERT-as-gate before account creation. A replay
+        // conflicts and is rejected. A token consumed here is spent even if a
+        // later step fails — the fail-closed direction.
+        let redeemed =
+            db::token_redemptions::try_redeem(conn, &claims.jti, &claims.iss, &claims.purpose, did)
+                .await?;
+        if !redeemed {
+            return Err(ServerError::Forbidden("invite token already redeemed".into()));
+        }
+        true
+    } else {
+        false
+    };
+
+    match state.config.registration_mode {
+        RegistrationMode::Open => Ok(()),
+        RegistrationMode::Closed => {
+            let bootstrap_bot = req.is_bot
+                && req.did_suffix.as_deref().is_some_and(|s| {
+                    state
+                        .config
+                        .registration_bootstrap_suffixes
+                        .iter()
+                        .any(|allowed| allowed == s)
+                });
+            let is_adminbot_did = state.config.adminbot_dids.iter().any(|d| d == did);
+            if has_valid_token || bootstrap_bot || is_adminbot_did {
+                Ok(())
+            } else {
+                Err(ServerError::Forbidden(
+                    "registration is closed: a valid invite token is required".into(),
+                ))
+            }
+        }
+    }
+}
+
+/// Map an invite-token validation failure to an HTTP status: structural
+/// problems are 400; admission failures are 403 (fail-closed).
+fn map_token_err(e: TokenError) -> ServerError {
+    match e {
+        TokenError::Malformed(m) => ServerError::BadRequest(format!("invalid invite token: {m}")),
+        other => ServerError::Forbidden(other.to_string()),
+    }
 }
 
 async fn store_prekeys(

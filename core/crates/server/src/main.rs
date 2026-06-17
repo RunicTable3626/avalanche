@@ -95,6 +95,33 @@ async fn main() {
         (zk, chain)
     };
 
+    // Seed the pinned adminbot Project (the anchor for adminbot authority) and
+    // link any already-registered adminbot accounts. Idempotent. New adminbot
+    // accounts are linked lazily at registration (see routes::registration).
+    {
+        let mut conn = pool.acquire().await.expect("failed to acquire db connection");
+        let pid = db::projects::ensure_adminbot_project(
+            &mut conn,
+            server::config::ADMINBOT_PROJECT_SLUG,
+        )
+        .await
+        .expect("failed to seed adminbot project");
+        for did in &config.adminbot_dids {
+            if let Some(acct) = db::accounts::find_by_did(&mut conn, did)
+                .await
+                .expect("failed to look up adminbot account")
+            {
+                db::projects::link_bot(&mut conn, pid, acct.id)
+                    .await
+                    .expect("failed to link adminbot account");
+            }
+        }
+        tracing::info!(
+            adminbot_dids = ?config.adminbot_dids,
+            "adminbot project seeded"
+        );
+    }
+
     let state = AppState::new(pool, config.clone(), zkgroup_secret, sender_cert_chain);
     tasks::spawn_all(state.clone());
     let app = routes::router()

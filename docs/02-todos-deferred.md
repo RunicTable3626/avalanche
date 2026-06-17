@@ -3,6 +3,12 @@
 ## Next
 - Rename everything to avalanche
 
+## Build samples of the following projects
+- Gatekeeper project + onboarding flow (see 24-vetted-onboarding-project); the infra should be there but there's no project yet. `#approvals` group, approve/decline review flow, invite tokens.
+- Chatbot to answer questions
+- Full participant CRM project: list everyone who has signed up & oversee them
+- Training modules inside CRM: browse to the training site via Network tab, complete modules
+
 ## Mobile app
 - Mobile app 'console': nerdly scrolling log which appears during long loads and debugging tools (currently everything is fast so maybe not needed)
 - Written-down recovery phrase alternative to passkey (generate memorable phrase, encrypt recovery blob with it, cache derived key in Secure Enclave)
@@ -29,19 +35,21 @@
 - Legacy raw-text group messages decode heuristically on receive (`process_decrypted` tries `ContentMessage::decode`, falls back to raw text). All new group messages carry the envelope; the fallback only matters for messages sent before this migration. Pre-launch there are none, so the heuristic is effectively dead code — drop the fallback (require the envelope) once there's confidence no pre-migration group messages remain in any store.
 
 ## Server
+- Adminbot routing config (docs/22): map an `AccountJoinedEvent`'s invite-token issuer + routing tags → channels (declarative rules), now that the event carries `invite_token`.
+- Adminbot node bot: consume the catch-up endpoint `GET /v1/admin/events?since=` on reconnect (events are now persisted in `server_events`); today it only acts on live WS pushes.
+- Future `bots.provision` capability + `purpose = "bot"` registration tokens (docs/24 end state — bots sign up with a token signed by their Project). The token format already carries `purpose` and the redemption table is generic, so this is additive: add the capability string, a `purpose == "bot"` admission arm, and auto-link the new bot to the issuing Project via the token's `iss`.
+
+## Infra
+- Right now foreground apps poll the server every minute for storage updates; implement something that reduces this poll rate -- probably proactive sync of some sort. Part of multi-device implementation.
 
 ## Project-wide
 - Mass rename: rename repo, update bundle IDs, update all remaining `actnet` references in code and docs to `avalanche`
 
 ## Big milestones (not yet started)
-- Groups: action-bound (zkgroup) and cross-server casual (Sender Keys)
-- Invite links & onboarding: QR codes, deep links, auto-enrollment into groups/Projects
-- Projects framework: SDK, scoped bot permissions, JS bridge for webviews
 - First-party Projects: channel directory, team assignment, action-day map, Q&A bot, collab docs, engagement tracking
 - Federation: server-to-server protocol, cross-server DMs, full DID portability (PLC directory), guest access
 - Calls: voice and video (VoIP)
 - Public profiles: client-owned profile blobs (display name, avatar, bio) pushed to servers
-- Multi-account support in mobile app
 
 ## Mesh Fallback / BitChat protocol (optional — implement only after core features are stable)
 

@@ -1075,3 +1075,164 @@ async fn storage_snapshot_is_scoped_to_account() {
     // Account b has no snapshot of its own.
     assert!(storage::get_snapshot(&mut *tx, b).await.unwrap().is_none());
 }
+
+// ── Projects / capabilities / tokens / events (docs/22, 24) ──────────────────
+
+use server::db::{capabilities, projects, server_events, token_redemptions};
+
+#[tokio::test]
+async fn project_create_find_delete() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let id = projects::create(&mut *tx, "proj-cfd", "Project", Some("https://x.test")).await.unwrap();
+    let found = projects::find_by_slug(&mut *tx, "proj-cfd").await.unwrap().unwrap();
+    assert_eq!(found.id, id);
+    assert_eq!(found.name, "Project");
+    assert_eq!(found.url.as_deref(), Some("https://x.test"));
+    assert!(found.signing_public_key.is_none());
+
+    assert!(projects::delete_by_slug(&mut *tx, "proj-cfd").await.unwrap());
+    assert!(projects::find_by_slug(&mut *tx, "proj-cfd").await.unwrap().is_none());
+    assert!(!projects::delete_by_slug(&mut *tx, "proj-cfd").await.unwrap());
+}
+
+#[tokio::test]
+async fn ensure_adminbot_project_idempotent() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let a = projects::ensure_adminbot_project(&mut *tx, "adminbot").await.unwrap();
+    let b = projects::ensure_adminbot_project(&mut *tx, "adminbot").await.unwrap();
+    assert_eq!(a, b, "ensure must be idempotent");
+}
+
+#[tokio::test]
+async fn project_bots_one_to_many_and_resolution() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let p1 = projects::create(&mut *tx, "proj-otm-1", "P1", None).await.unwrap();
+    let p2 = projects::create(&mut *tx, "proj-otm-2", "P2", None).await.unwrap();
+    let bot_a = server::db::accounts::create(&mut *tx, "did:local:botm1", None, true).await.unwrap();
+    let bot_b = server::db::accounts::create(&mut *tx, "did:local:botm2", None, true).await.unwrap();
+
+    // One Project, many bots.
+    projects::link_bot(&mut *tx, p1, bot_a).await.unwrap();
+    projects::link_bot(&mut *tx, p1, bot_b).await.unwrap();
+    let dids = projects::bot_dids(&mut *tx, p1).await.unwrap();
+    assert_eq!(dids.len(), 2);
+
+    // Resolution: account -> its project.
+    let (pid, slug) = projects::project_for_account(&mut *tx, bot_a).await.unwrap().unwrap();
+    assert_eq!(pid, p1);
+    assert_eq!(slug, "proj-otm-1");
+
+    // Re-linking a bot moves it to another Project (a bot is in <=1 Project).
+    projects::link_bot(&mut *tx, p2, bot_a).await.unwrap();
+    let (pid2, _) = projects::project_for_account(&mut *tx, bot_a).await.unwrap().unwrap();
+    assert_eq!(pid2, p2);
+    assert_eq!(projects::bot_dids(&mut *tx, p1).await.unwrap().len(), 1);
+
+    // Unlink.
+    assert!(projects::unlink_bot(&mut *tx, bot_a).await.unwrap());
+    assert!(projects::project_for_account(&mut *tx, bot_a).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn capabilities_grant_check_revoke() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let p = projects::create(&mut *tx, "proj-cap", "P", None).await.unwrap();
+    let bot = server::db::accounts::create(&mut *tx, "did:local:capbot1", None, true).await.unwrap();
+    projects::link_bot(&mut *tx, p, bot).await.unwrap();
+
+    assert!(!capabilities::account_has_capability(&mut *tx, bot, capabilities::SUBSCRIBE_ACCOUNT_JOINED).await.unwrap());
+
+    capabilities::grant(&mut *tx, p, capabilities::SUBSCRIBE_ACCOUNT_JOINED, "did:local:admin").await.unwrap();
+    // Idempotent re-grant.
+    capabilities::grant(&mut *tx, p, capabilities::SUBSCRIBE_ACCOUNT_JOINED, "did:local:admin").await.unwrap();
+    assert!(capabilities::account_has_capability(&mut *tx, bot, capabilities::SUBSCRIBE_ACCOUNT_JOINED).await.unwrap());
+    assert_eq!(capabilities::list(&mut *tx, p).await.unwrap(), vec![capabilities::SUBSCRIBE_ACCOUNT_JOINED.to_string()]);
+
+    assert!(capabilities::revoke(&mut *tx, p, capabilities::SUBSCRIBE_ACCOUNT_JOINED).await.unwrap());
+    assert!(!capabilities::account_has_capability(&mut *tx, bot, capabilities::SUBSCRIBE_ACCOUNT_JOINED).await.unwrap());
+    assert!(!capabilities::revoke(&mut *tx, p, capabilities::SUBSCRIBE_ACCOUNT_JOINED).await.unwrap());
+}
+
+#[tokio::test]
+async fn adminbot_superuser_short_circuit() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let pid = projects::ensure_adminbot_project(&mut *tx, "adminbot").await.unwrap();
+    let bot = server::db::accounts::create(&mut *tx, "did:local:superu1", None, true).await.unwrap();
+    projects::link_bot(&mut *tx, pid, bot).await.unwrap();
+
+    // No capability rows granted, yet the adminbot Project's bot holds all.
+    assert!(capabilities::account_has_capability(&mut *tx, bot, capabilities::SUBSCRIBE_ACCOUNT_JOINED).await.unwrap());
+    assert!(capabilities::account_has_capability(&mut *tx, bot, capabilities::REGISTRATION_GATEKEEPER).await.unwrap());
+}
+
+#[tokio::test]
+async fn gatekeeper_signing_key_set_and_clear() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let p = projects::create(&mut *tx, "proj-gk", "GK", None).await.unwrap();
+    projects::set_signing_key(&mut *tx, p, Some(&[7u8; 32])).await.unwrap();
+    let found = projects::find_by_slug(&mut *tx, "proj-gk").await.unwrap().unwrap();
+    assert_eq!(found.signing_public_key.as_deref(), Some(&[7u8; 32][..]));
+
+    projects::set_signing_key(&mut *tx, p, None).await.unwrap();
+    assert!(projects::find_by_slug(&mut *tx, "proj-gk").await.unwrap().unwrap().signing_public_key.is_none());
+}
+
+#[tokio::test]
+async fn token_redemption_is_single_use() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    assert!(!token_redemptions::is_redeemed(&mut *tx, "jti-su-1").await.unwrap());
+    assert!(token_redemptions::try_redeem(&mut *tx, "jti-su-1", "gk", "invite", "did:plc:x").await.unwrap());
+    assert!(token_redemptions::is_redeemed(&mut *tx, "jti-su-1").await.unwrap());
+    // Replay conflicts.
+    assert!(!token_redemptions::try_redeem(&mut *tx, "jti-su-1", "gk", "invite", "did:plc:y").await.unwrap());
+}
+
+#[tokio::test]
+async fn server_events_append_and_fetch() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let id1 = server_events::append_account_joined(&mut *tx, "did:plc:ev1", Some("tok-1"), 1000).await.unwrap();
+    let id2 = server_events::append_account_joined(&mut *tx, "did:plc:ev2", None, 2000).await.unwrap();
+    assert!(id2 > id1);
+
+    let since_first = server_events::fetch_since(&mut *tx, id1, server_events::KIND_ACCOUNT_JOINED, 500).await.unwrap();
+    assert_eq!(since_first.len(), 1);
+    assert_eq!(since_first[0].did, "did:plc:ev2");
+    assert!(since_first[0].invite_token.is_none());
+
+    let from_zero = server_events::fetch_since(&mut *tx, 0, server_events::KIND_ACCOUNT_JOINED, 500).await.unwrap();
+    let mine: Vec<_> = from_zero.iter().filter(|e| e.id == id1 || e.id == id2).collect();
+    assert_eq!(mine.len(), 2);
+    assert_eq!(mine.iter().find(|e| e.id == id1).unwrap().invite_token.as_deref(), Some("tok-1"));
+}
+
+#[tokio::test]
+async fn delete_account_unlinks_from_project() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let p = projects::create(&mut *tx, "proj-del", "P", None).await.unwrap();
+    let bot = server::db::accounts::create(&mut *tx, "did:local:delbot1", None, true).await.unwrap();
+    projects::link_bot(&mut *tx, p, bot).await.unwrap();
+
+    server::db::accounts::delete_account(&mut *tx, bot).await.unwrap();
+
+    // Bot link is gone; the Project row survives.
+    assert!(projects::project_for_account(&mut *tx, bot).await.unwrap().is_none());
+    assert!(projects::find_by_slug(&mut *tx, "proj-del").await.unwrap().is_some());
+}

@@ -58,7 +58,9 @@ async fn test_state() -> AppState {
         relay_url: None,
         server_name: "Test".into(),
         invite_domain: "go.example.test".into(),
-        adminbot_did: String::new(),
+        adminbot_dids: vec![],
+        registration_mode: server::config::RegistrationMode::Open,
+        registration_bootstrap_suffixes: vec![],
     };
     // Load (or seed) the group crypto bundle exactly as `main.rs` does — a
     // bincoded `GroupCryptoBundle` under the current version. Seeding the raw

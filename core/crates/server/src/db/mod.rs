@@ -15,6 +15,7 @@
 //! metadata (who messaged whom, when, message sizes) but no plaintext.
 
 pub mod accounts;
+pub mod capabilities;
 pub mod challenges;
 pub mod devices;
 pub mod did;
@@ -23,10 +24,13 @@ pub mod group_messages;
 pub mod messages;
 pub mod prekeys;
 pub mod profiles;
+pub mod projects;
 pub mod project_tokens;
 pub mod push;
 pub mod ip_rate_limits;
 pub mod rate_limits;
+pub mod server_events;
 pub mod sessions;
 pub mod storage;
+pub mod token_redemptions;
 pub mod zkgroup_params;

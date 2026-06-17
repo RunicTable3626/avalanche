@@ -4,7 +4,7 @@ This document describes the user-facing flows for creating accounts, logging in,
 
 ## Background
 
-Actnet has no phone numbers or emails. Identity is a DID (`did:plc`), a cryptographic identifier hosted in the public PLC directory. Each DID has two kinds of keys:
+Avalanche has no phone numbers or emails. Identity is a DID (`did:plc`), a cryptographic identifier hosted in the public PLC directory. Each DID has two kinds of keys:
 
 - **Rotation keys** — control the DID itself. Can change signing keys, service endpoints, or transfer the identity. These are the "root authority."
 - **Signing keys (verification methods)** — used for day-to-day operations (encrypting messages, authenticating to servers). Don't control the DID unless also listed as rotation keys.
@@ -66,7 +66,7 @@ During recovery, the app resolves the DID via the PLC directory → finds the cu
 
 ### 1. First signup: new identity at a rally
 
-**Story:** Sam scans a QR code at a rally. They've never used actnet before. They type a name, create a passkey with Face ID, and they're in — with recovery already set up.
+**Story:** Sam scans a QR code at a rally. They've never used avalanche before. They type a name, create a passkey with Face ID, and they're in — with recovery already set up.
 
 **Flow:**
 
@@ -86,7 +86,7 @@ During recovery, the app resolves the DID via the PLC directory → finds the cu
 14. Sam lands in Chats with groups populated. Recovery is already active.
 
 **Technical details:**
-- Passkey relying party: a universal actnet domain (e.g. `theavalanche.net`), not the homeserver's domain. This means recovery of a passkey identity can only be done by our official mobile apps and/or web application on our domain.
+- Passkey relying party: a universal avalanche domain (e.g. `theavalanche.net`), not the homeserver's domain. This means recovery of a passkey identity can only be done by our official mobile apps and/or web application on our domain.
 - `user.id` (WebAuthn userHandle): set to the signup server URL bytes. This is what gets returned during any future assertion, letting a recovering device reconstruct the genesis op without prompting the user. It never changes, even after discovery-server migration.
 - PRF extension: a fixed app-wide salt (e.g. `"actnet-recovery-v1"`) is provided during the ceremony. The authenticator returns 32 deterministic bytes from `HMAC-SHA256(passkey_secret, salt)`. HKDF-Expand with two labels then derives the rotation keypair and the blob-encryption key. Both are recoverable from the passkey alone.
 - Why two PLC ops: the genesis op must be signable before the identity key exists (because we want the DID to be derivable from just the passkey + signup server URL, with no dependency on the random per-device identity key). A second op adds the identity key as a verification method.
@@ -148,11 +148,11 @@ Sam now has two identities. Both appear in the app. Chats from both identities a
 
 ### 4. Recovering an identity after device loss
 
-**Story:** Sam loses their phone. They get a new one, install actnet, and recover their activist identity using the passkey synced through 1Password.
+**Story:** Sam loses their phone. They get a new one, install avalanche, and recover their activist identity using the passkey synced through 1Password.
 
 **Flow:**
 
-1. Install actnet on new phone. Tap "Recover existing identity."
+1. Install avalanche on new phone. Tap "Recover existing identity."
 2. App initiates a WebAuthn assertion ceremony (no `allowCredentials`, discoverable mode) with the PRF extension and the same salt as signup.
 3. 1Password syncs to the new phone and presents Sam's passkey(s). Sam selects the one for their activist identity and authenticates with Face ID.
 4. Authenticator returns `{credentialId, userHandle = signup_server_url_bytes, prfOutput}`.
@@ -225,7 +225,7 @@ Passkeys are never touched during normal use. They exist solely for recovery.
 
 ### Bluesky-linked identities (future)
 
-The flows above cover standalone actnet identities. A future extension could allow users to connect an existing Bluesky identity via ATProto OAuth — authenticating with Bluesky to prove ownership of a `did:plc` that already exists, then registering that DID on an actnet homeserver. This would let public organizers use the same identity across both networks.
+The flows above cover standalone avalanche identities. A future extension could allow users to connect an existing Bluesky identity via ATProto OAuth — authenticating with Bluesky to prove ownership of a `did:plc` that already exists, then registering that DID on an avalanche homeserver. This would let public organizers use the same identity across both networks.
 
 Key differences from standalone identities:
 
@@ -233,13 +233,13 @@ Key differences from standalone identities:
 - No PLC directory writes — Bluesky manages the DID document
 - No recovery blob — device loss means new keys, sessions reset, contacts see a safety number change (same tradeoff Signal makes with phone numbers)
 - No automatic server list recovery — the user must remember which servers they were on and re-authenticate with Bluesky on each one individually
-- Could extend to other OAuth providers (Google, Apple, etc.) that create a new actnet DID on the user's behalf with the OAuth provider as the recovery authority
+- Could extend to other OAuth providers (Google, Apple, etc.) that create a new avalanche DID on the user's behalf with the OAuth provider as the recovery authority
 
-Privacy tradeoff: connecting a Bluesky account means Bluesky can verify that identity on actnet. For sensitive organizing, users should create a separate standalone identity instead.
+Privacy tradeoff: connecting a Bluesky account means Bluesky can verify that identity on avalanche. For sensitive organizing, users should create a separate standalone identity instead.
 
 ### Other OAuth providers
 
-Any OAuth provider could serve as an identity authority using the same pattern as Bluesky. The difference is that non-Bluesky providers don't use `did:plc`, so the actnet homeserver would create a new DID on the user's behalf and link it to the OAuth identity. Recovery = re-authenticate with the provider. Same lossy recovery (new keys, safety number change) as the Bluesky case.
+Any OAuth provider could serve as an identity authority using the same pattern as Bluesky. The difference is that non-Bluesky providers don't use `did:plc`, so the avalanche homeserver would create a new DID on the user's behalf and link it to the OAuth identity. Recovery = re-authenticate with the provider. Same lossy recovery (new keys, safety number change) as the Bluesky case.
 
 
 ## Screen Flow

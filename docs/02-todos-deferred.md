@@ -1,8 +1,5 @@
 # Deferred TODOs
 
-## Next
-- Rename everything to avalanche
-
 ## Build samples of the following projects
 - $ Gatekeeper project + onboarding flow (see 24-vetted-onboarding-project); the infra should be there but there's no project yet. `#approvals` group, approve/decline review flow, invite tokens.
 - $ Chatbot to answer questions
@@ -56,9 +53,9 @@
 See `docs/14-bitchat-fallback.md` for the full design. BLE mesh transport as a fallback when the homeserver is unreachable.
 
 ## App Store readiness
+- Remove calls tab
+- Add help info at the bottom of the settings page (version, github issues link)
 - Implement abuse handling per `docs/12-abuse-handling.md`: message-request gate for unknown senders, block list (client-side, multi-device synced), Report Spam in the request UI, homeserver-mediated cross-server abuse report endpoint, account-level enforcement ladder on receiving server.
-- Display-name profanity filter (client-side, on by default, tap-to-reveal). Satisfies the "filter objectionable material" prong of App Store 1.2 at the profile layer.
-- Projects framework App Store 4.7 compliance: (1) maintain a Project index with universal links (4.7.4); (2) per-Project consent prompt before granting data/permissions, re-prompt on permission expansion (4.7.3); (3) age-restriction mechanism for mature Projects with verified or declared age (4.7.5); (4) keep the JS bridge surface conservative — no exposing native APIs without prior Apple approval (4.7.2). Document policy that all in-Project digital-goods purchases route through IAP (4.7.1 / 3.1).
 - Privacy policy URL plumbing: homeserver metadata endpoint exposes the operator's privacy policy URL; client displays it during signup alongside the app's own policy. Required because each homeserver is a separate data controller under GDPR.
 - Support contact info: point the in-app Support link and the App Store Connect Support URL at the GitHub issues page (no personal email required). Required by 1.2 (UGC contact) and 1.5 (developer info). Make sure the page reads as a support channel (link the Issues tab or a README that says "report problems here"). If a reviewer needs a direct contact during review, put it in the App Review notes.
 - Age rating: aim for 12+ (matching Signal), set via honest answers to the App Store Connect rating questionnaire — acknowledge UGC exists but no shipped objectionable content, no gambling, no unrestricted web. Don't use "Kids" or "Children" anywhere in metadata (2.3.8).

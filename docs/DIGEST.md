@@ -54,7 +54,7 @@ is the root authority (changes signing keys / endpoints / transfers DID); signin
 
 **Recovery authority = the passkey** (or written phrase). Rotation key + recovery-blob key are
 **deterministically derived** from the WebAuthn PRF output via HKDF labels `"actnet-rotation-v1"` /
-`"actnet-blob-v1"` — never stored on a server. RP is a universal actnet domain (`theavalanche.net`),
+`"actnet-blob-v1"` — never stored on a server. RP is a universal avalanche domain (`theavalanche.net`),
 so only official apps can recover. `user.id`(userHandle) = signup server URL → recovering device
 reconstructs the genesis op (and thus the DID) with no prompt; `user.displayName` is cosmetic.
 

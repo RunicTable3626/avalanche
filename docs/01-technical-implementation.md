@@ -14,7 +14,7 @@ Two principles govern every technical decision here:
 The repository is a monorepo. The Rust codebase is the platform core — the cryptography, the homeserver, the mobile shared library, the push relay — but first-party Projects may be written in any language, and the mobile UI layers are Swift and Kotlin. Rust does not own the root.
 
 ```
-actnet/
+avalanche/
 ├── core/                     # Rust — Cargo workspace root
 ├── mobile/
 │   ├── ios/                  # Swift/SwiftUI

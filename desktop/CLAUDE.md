@@ -12,7 +12,7 @@ feature-for-feature. When in doubt about behavior, check the iOS source.
 The same rule applies across all three platforms — see `mobile/CLAUDE.md` for
 iOS/Android and the root `CLAUDE.md` for the overall parity rule.
 
-Use `docs/desktop-implementation.md` as the parity tracking document — update
+Use `docs/61-desktop-implementation.md` as the parity tracking document — update
 the `[ ]` / `[x]` checkboxes as each component is completed.
 
 ---
@@ -98,7 +98,7 @@ Before closing any branch that adds or changes Desktop UI:
 - [ ] IPC handler added to `desktop/src/main/ipc.ts` if new Rust calls needed
 - [ ] AppContext updated to match AppState changes
 - [ ] New model fields added to both `.swift` and `.ts` types
-- [ ] `docs/desktop-implementation.md` parity table updated
+- [ ] `docs/61-desktop-implementation.md` parity table updated
 - [ ] *(macOS only)* Screenshot taken and saved to `docs/screenshots/<screen-name>.png`
 
 ## Adding a New FFI Method (checklist)

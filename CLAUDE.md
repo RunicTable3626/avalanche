@@ -98,8 +98,8 @@ Pinned to commit `4c460615` (not branch main). This is a git dependency in Cargo
 The app has three UI platforms sharing one Rust core:
 
 - **iOS** — Swift/SwiftUI, UniFFI bindings. Reference implementation.
-- **Android** — Kotlin/Jetpack Compose, UniFFI bindings. See `docs/android-implementation.md`.
-- **Desktop** — Electron/React/TypeScript, napi-rs bindings. See `docs/desktop-implementation.md`.
+- **Android** — Kotlin/Jetpack Compose, UniFFI bindings. See `docs/60-android-implementation.md`.
+- **Desktop** — Electron/React/TypeScript, napi-rs bindings. See `docs/61-desktop-implementation.md`.
 
 **Any feature added or changed on one platform must be implemented on all three
 in the same session.** iOS is the reference — when behavior is ambiguous, check

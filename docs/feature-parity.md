@@ -4,8 +4,8 @@ Tracks which user-facing features are implemented on each client platform. Updat
 
 **Platforms:**
 - **iOS** — Swift/SwiftUI, UniFFI bindings (`mobile/ios/`)
-- **Android** — Kotlin/Jetpack Compose, UniFFI bindings (`mobile/android/`) — not started
-- **Desktop** — Electron + napi-rs bindings (`node/`) — not started
+- **Android** — Kotlin/Jetpack Compose, UniFFI bindings (`mobile/android/`) — not started · see [`docs/60-android-implementation.md`](60-android-implementation.md)
+- **Desktop** — Electron + napi-rs bindings (`desktop/`) — not started · see [`docs/61-desktop-implementation.md`](61-desktop-implementation.md)
 - **Bots/Node** — napi-rs bindings (`node/packages/app-core/`) — used by adminbot
 
 Status: ✅ done · 🚧 partial · ⬜ not started · n/a not applicable
@@ -70,5 +70,5 @@ Status: ✅ done · 🚧 partial · ⬜ not started · n/a not applicable
 ## Notes
 
 - **Android**: UniFFI generates Kotlin bindings as a byproduct of the iOS build (`make bindings`). The Kotlin glue exists; the UI layer does not.
-- **Desktop**: The napi-rs bindings (`node/packages/app-core/`) expose the full `app-core` surface and are Electron-compatible. The UI layer does not exist yet.
+- **Desktop**: The napi-rs bindings (`desktop/` via `core/crates/app-core-node/`) expose the full `app-core` surface and are Electron-compatible. The UI layer does not exist yet. See `docs/61-desktop-implementation.md` for the build plan.
 - **Bots/Node**: Adminbot uses account creation, DMs, groups (create/invite), and admin events. Other features are available via the napi API but not exercised by any shipped bot.

@@ -11,7 +11,7 @@ When in doubt about behavior, check the iOS source.
 The same rule applies across all three platforms — see the root parity rule in
 `CLAUDE.md` and `desktop/CLAUDE.md` for Desktop.
 
-Use `docs/android-implementation.md` as the parity tracking document — update
+Use `docs/60-android-implementation.md` as the parity tracking document — update
 the `[ ]` / `[x]` checkboxes as each component is completed.
 
 ---
@@ -84,7 +84,7 @@ cd mobile/android && ./gradlew connectedAndroidTest      # run device tests
 
 The SQLCipher DB key is `"dev-placeholder-key"` until Android Keystore integration lands.
 
-See `docs/android-implementation.md` for the full parity map and implementation phases.
+See `docs/60-android-implementation.md` for the full parity map and implementation phases.
 
 ---
 
@@ -109,7 +109,7 @@ Before closing any branch that adds or changes mobile UI:
 - [ ] Android Compose screen created/updated in `mobile/android/`
 - [ ] AppState (iOS) and AppViewModel (Android) updated consistently
 - [ ] New model fields added to both `.swift` and `.kt` data classes
-- [ ] `docs/android-implementation.md` parity table updated
+- [ ] `docs/60-android-implementation.md` parity table updated
 - [ ] *(macOS only)* Screenshot taken and saved to `docs/screenshots/<screen-name>.png`
 
 ## Adding a New FFI Method (checklist)

@@ -44,6 +44,7 @@ Doc filenames follow `NN-description.md`. The first digit is the category:
 | `3x` | Messaging & conversation UX | Mobile UX, read tracking, identity, invites, contacts, connection state |
 | `4x` | Deploy & infra | Deployment guides, relay deployment, server upgrades |
 | `5x` | Identity & accounts | (reserved for future identity/account docs) |
+| `6x` | Mobile & Desktop platforms | Android and Desktop implementation plans, parity tracking |
 
 ## signal-research/
 

@@ -1,6 +1,5 @@
 import SwiftUI
 import AuthenticationServices
-import CryptoKit
 
 struct RecoveryExplainerView: View {
     @EnvironmentObject var appState: AppState
@@ -66,19 +65,37 @@ struct RecoveryExplainerView: View {
             RecoveryConsoleView(prfOutput: prfOutput ?? Data(), did: recoveryDid ?? "")
         }
         .sheet(isPresented: $showPhraseEntry) {
-            RecoveryPhraseEntryView(onComplete: { phrase in
-                showPhraseEntry = false
-                // Treat the phrase as a 32-byte seed by hashing it. Rust's
-                // HKDF expects a 32-byte input; the hash plays the same role
-                // a passkey PRF output would.
-                let phraseData = Data(phrase.utf8)
-                let hash = SHA256Hash.hash(data: phraseData)
-                prfOutput = Data(hash)
-                // Phrase recovery doesn't know the signup server URL; the
-                // console prompts for it and asks Rust to recompute the DID.
-                recoveryDid = ""
-                showRecoveryConsole = true
+            RecoveryPhraseEntryView(onComplete: { phrase, serverUrl in
+                recoverWithPhrase(phrase: phrase, serverUrl: serverUrl)
             })
+        }
+    }
+
+    /// Validate the phrase, derive the seed (BIP39 → 32-byte seed in Rust), then
+    /// recompute the DID from that seed + the user-entered home server URL — the
+    /// phrase analogue of the passkey path, which recovers the URL from the
+    /// credential's userHandle. On success, hands a fully-resolved DID to the
+    /// console so the normal blob-download/restore path runs.
+    private func recoverWithPhrase(phrase: String, serverUrl: String) {
+        errorMessage = nil
+        Task {
+            do {
+                let seed = try recoveryPhraseToSeed(phrase: phrase)
+                let derivedDid = try deriveDidFromPasskey(
+                    prfOutput: seed,
+                    signupServerUrl: serverUrl
+                )
+                if appState.accounts.contains(where: { $0.id == derivedDid }) {
+                    errorMessage = "This identity is already signed in on this device."
+                    return
+                }
+                showPhraseEntry = false
+                prfOutput = seed
+                recoveryDid = derivedDid
+                showRecoveryConsole = true
+            } catch {
+                errorMessage = "Invalid recovery phrase: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -122,20 +139,22 @@ struct RecoveryExplainerView: View {
     }
 }
 
-/// Simple SHA-256 wrapper.
-private enum SHA256Hash {
-    static func hash(data: Data) -> [UInt8] {
-        let digest = CryptoKit.SHA256.hash(data: data)
-        return Array(digest)
-    }
-}
-
-/// Sheet for entering a written-down recovery phrase.
+/// Sheet for entering a written-down recovery phrase plus the home server it
+/// was created on. Both are needed: the phrase derives the keys, and the server
+/// URL lets Rust recompute the DID (a bare phrase carries no server metadata,
+/// unlike a passkey's userHandle).
 private struct RecoveryPhraseEntryView: View {
     @Environment(\.dismiss) private var dismiss
-    let onComplete: (String) -> Void
+    let onComplete: (_ phrase: String, _ serverUrl: String) -> Void
 
     @State private var phrase = ""
+    @State private var serverUrl: String = {
+        #if DEBUG
+        return "http://localhost:3000"
+        #else
+        return ""
+        #endif
+    }()
 
     var body: some View {
         NavigationStack {
@@ -145,15 +164,29 @@ private struct RecoveryPhraseEntryView: View {
 
                 TextField("Recovery phrase", text: $phrase, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
+                    .autocapitalization(.none)
+                    .autocorrectionDisabled()
                     .padding(.horizontal, 32)
                     .lineLimit(3...6)
 
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Home server")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("https://server.example", text: $serverUrl)
+                        .textFieldStyle(.roundedBorder)
+                        .autocapitalization(.none)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                }
+                .padding(.horizontal, 32)
+
                 Button("Recover") {
-                    onComplete(phrase)
+                    onComplete(phrase, serverUrl.trimmingCharacters(in: .whitespaces))
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(phrase.isEmpty)
+                .disabled(phrase.isEmpty || serverUrl.isEmpty)
 
                 Spacer()
             }

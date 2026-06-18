@@ -2316,6 +2316,41 @@ pub fn download_recovery_blob(
     }).map_err(AppErrorFfi::from)
 }
 
+/// Generate a fresh 12-word BIP39 recovery phrase (128 bits of entropy).
+///
+/// This is the seed material for the "recovery phrase" account mode — an
+/// alternative to a WebAuthn passkey. The caller displays the phrase for the
+/// user to write down, then feeds it back through [`recovery_phrase_to_seed`]
+/// to obtain the 32-byte seed that plays the same role a passkey's PRF output
+/// would (see [`derive_did_from_passkey`] / `PreparedAccount`).
+#[uniffi::export]
+pub fn generate_recovery_phrase() -> Result<String, AppErrorFfi> {
+    let entropy: [u8; 16] = rand::Rng::random(&mut rand::rng());
+    let mnemonic = bip39::Mnemonic::from_entropy(&entropy)
+        .map_err(|e| AppError::Protocol(format!("recovery phrase generation failed: {e}")))?;
+    Ok(mnemonic.to_string())
+}
+
+/// Validate a BIP39 recovery phrase and derive its 32-byte seed.
+///
+/// Whitespace/casing are normalized and the BIP39 checksum is verified, so an
+/// invalid or mistyped phrase returns an error the UI can surface (rather than
+/// silently deriving the wrong identity). The seed is the first 32 bytes of the
+/// standard BIP39 seed (empty passphrase); it is the input to the same
+/// `derive_recovery_keys_from_prf` pipeline used for passkey PRF output, so
+/// signup and recovery agree as long as both call this function.
+#[uniffi::export]
+pub fn recovery_phrase_to_seed(phrase: String) -> Result<Vec<u8>, AppErrorFfi> {
+    // Lowercase before parsing: the BIP39 English wordlist is all-lowercase,
+    // but phone keyboards autocapitalize, so a recovering user's input often
+    // isn't. (Safe for English; other wordlists aren't case-foldable this way.)
+    let normalized = phrase.trim().to_lowercase();
+    let mnemonic = bip39::Mnemonic::parse_normalized(&normalized)
+        .map_err(|e| AppError::Protocol(format!("invalid recovery phrase: {e}")))?;
+    let seed = mnemonic.to_seed("");
+    Ok(seed[..32].to_vec())
+}
+
 /// Derive the rotation-key public bytes + DID that a given PRF output and
 /// signup server URL would produce. Used by recovery flows that need to
 /// know the DID before fetching anything — particularly when the user's
@@ -3321,6 +3356,73 @@ impl AppCore {
         ffi_runtime()
             .block_on(self.sync_storage_async())
             .map_err(AppErrorFfi::from)
+    }
+}
+
+#[cfg(test)]
+mod recovery_phrase_tests {
+    use super::*;
+
+    #[test]
+    fn generated_phrase_is_twelve_words_and_valid() {
+        let phrase = generate_recovery_phrase().expect("generate");
+        assert_eq!(phrase.split_whitespace().count(), 12);
+        // A freshly generated phrase must pass validation.
+        recovery_phrase_to_seed(phrase).expect("round-trip validates");
+    }
+
+    #[test]
+    fn seed_is_32_bytes_and_deterministic() {
+        let phrase = generate_recovery_phrase().expect("generate");
+        let a = recovery_phrase_to_seed(phrase.clone()).expect("seed a");
+        let b = recovery_phrase_to_seed(phrase).expect("seed b");
+        assert_eq!(a.len(), 32);
+        assert_eq!(a, b, "same phrase derives the same seed");
+    }
+
+    #[test]
+    fn normalization_tolerates_whitespace_and_case() {
+        let phrase = generate_recovery_phrase().expect("generate");
+        let canonical = recovery_phrase_to_seed(phrase.clone()).expect("canonical");
+        let messy = format!("  {}  ", phrase.to_uppercase());
+        let normalized = recovery_phrase_to_seed(messy).expect("normalized");
+        assert_eq!(canonical, normalized);
+    }
+
+    #[test]
+    fn distinct_phrases_give_distinct_seeds() {
+        let a = recovery_phrase_to_seed(generate_recovery_phrase().unwrap()).unwrap();
+        let b = recovery_phrase_to_seed(generate_recovery_phrase().unwrap()).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn bad_checksum_is_rejected() {
+        // Twelve valid words but an invalid BIP39 checksum.
+        let bogus = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo";
+        assert!(recovery_phrase_to_seed(bogus.to_string()).is_err());
+        // Garbage / unknown words are also rejected.
+        assert!(recovery_phrase_to_seed("not a real recovery phrase at all".to_string()).is_err());
+    }
+
+    #[test]
+    fn known_vector_seed_matches_bip39_spec() {
+        // BIP39 English test vector (all-zero entropy), empty passphrase.
+        // The full 64-byte seed is well-known; we take its first 32 bytes.
+        let phrase = "abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon about";
+        let seed = recovery_phrase_to_seed(phrase.to_string()).expect("known vector");
+        let expected_full = "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1\
+                             9a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4";
+        let expected_first32 = hex_to_bytes(&expected_full[..64]);
+        assert_eq!(seed, expected_first32);
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
     }
 }
 

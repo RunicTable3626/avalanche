@@ -94,7 +94,7 @@ During recovery, the app resolves the DID via the PLC directory → finds the cu
 - Server registration: `POST /v1/accounts` with identity key, registration_id, device_id, prekeys, and recovery blob (stored opaque ciphertext).
 - Server stores the DID document with the device's public key as a verification method and the homeserver as a service endpoint.
 - **What if the user skips recovery?** No passkey is created, so the rotation key is generated randomly on-device and no recovery blob is written. If Sam loses their phone they cannot recover this identity at all. The server knows this and can nag the user. This is the only case where DID control is not deterministically derivable from a user-held secret.
-- **Written-down recovery phrase:** instead of a passkey, generate a high-entropy memorable phrase and tell the user to write it down. The phrase is run through the same HKDF (same labels) to produce the rotation keypair and the blob-encryption key. Since there's no WebAuthn ceremony, the signup server URL is stored alongside the phrase (e.g. printed on the recovery card as "Server: safe-haven.org"). To avoid making the user retype the phrase every time the blob needs re-encrypting, the derived symmetric key is cached in the Secure Enclave after first entry.
+- **Written-down recovery phrase:** ✅ implemented as a 12-word **BIP39** mnemonic (128 bits of entropy), generated in `app-core` (`generate_recovery_phrase`). The phrase → 32-byte seed (`recovery_phrase_to_seed`: first 32 bytes of the standard BIP39 seed) is run through the same HKDF (same labels) to produce the rotation keypair and the blob-encryption key — identical to the passkey PRF path, so the same `prepare`/`finalize`/`recover` code is reused. Since there's no WebAuthn ceremony, the signup server URL is **not** embedded in the phrase; instead the signup screen displays the home server URL alongside the 12 words for the user to record, and at recovery the user enters **both** the phrase and the server URL. The server URL lets Rust recompute the DID (`derive_did_from_passkey`, which works for any 32-byte seed); the rest of recovery (PLC resolve → blob download → restore) is unchanged. The blob-encryption key is cached locally (SQLCipher) after creation so silent re-encryption on later server joins needs no re-entry. Signup includes a verification step that re-prompts for three of the words before the account is created.
 
 ---
 
@@ -351,13 +351,13 @@ The exact implementation needs to be planned out for this. For now we can just s
 - Shows the profile picture and display name as they will appear on the Choose ID page in the future
 - "Passkeys are stored securely in your password manager or iCloud, and synced across all your devices. You'll use it to sign back into this identity if you lose this device. [More about passkeys →]" (links to explainer page on our website)
 - **⚷ Create Passkey** — primary action. Triggers a WebAuthn registration ceremony: the system presents a sheet (1Password, iCloud Keychain, or hardware key), the user confirms with Face ID, and a new passkey is created for the `theavalanche.net` relying party.
-- "Use a recovery phrase instead →" — generates a high-entropy memorable phrase, user writes it down
+- "Use a recovery phrase instead →" — generates a 12-word BIP39 phrase shown alongside the home server URL for the user to write down, then a verification step re-prompts for three of the words before creating the account (`RecoveryPhraseSetupView`)
 - "Skip recovery setup →" — proceeds without recovery (server may nag later)
 
 ### Recovery Explainer Page
 - "Recover an identity"
 - **⚷ Recover using Passkey** — primary action. Triggers a WebAuthn authentication ceremony: the system presents a sheet showing all passkeys stored for `theavalanche.net`. The user picks one and confirms with Face ID. The app receives the PRF-derived symmetric key and the DID from the user handle. If the user picks an identity that is already signed-in on this device, we explain that they're already signed in and prompt to pick another.
-- "Enter your recovery phrase instead →" — text entry for the written-down phrase
+- "Enter your recovery phrase instead →" — text entry for the written-down phrase **plus the home server URL** (the URL recomputes the DID, since a bare phrase carries no server metadata). Routes through the same progress console as passkey recovery once the DID is derived.
 
 ### Progress Console
 A monospace-text console that scrolls through status updates as the app works in the background. Used for both signup and recovery.

@@ -56,6 +56,7 @@
 		D9E4B5C5F5EF30326808E80D /* ActnetService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F41810D70D78B7CB00C38FA /* ActnetService.swift */; };
 		DCB3ED6719400E9479A29C98 /* ChatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60B3DC7CBE016789D232757D /* ChatsView.swift */; };
 		DD42A62234B9DF687F2AE7BB /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C65A994903B9410FFAC5B3 /* AppState.swift */; };
+		DE9A7991ABFFACEA54D2762D /* RecoveryPhraseSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A034B0812F64EFB0BA5C36E6 /* RecoveryPhraseSetupView.swift */; };
 		E74703FA755ACEF9C2B0DAA5 /* ComposeMessageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77499BEF2E32D27D96CCD2F1 /* ComposeMessageView.swift */; };
 		ED6FC7D997F37C6A0A85E0B9 /* Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8B337C1C0A8BF5C7BDA6E41 /* Message.swift */; };
 		EF24D30DE8AE1125CB83DB84 /* AvalancheColors.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F9630D7E7FE4B5EA6E04E6D /* AvalancheColors.swift */; };
@@ -105,6 +106,7 @@
 		9AC5E72995147ED8AD25E532 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
 		9C977CCCEBCC89682DA83AC6 /* LogViewerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogViewerView.swift; sourceTree = "<group>"; };
 		9F9630D7E7FE4B5EA6E04E6D /* AvalancheColors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvalancheColors.swift; sourceTree = "<group>"; };
+		A034B0812F64EFB0BA5C36E6 /* RecoveryPhraseSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryPhraseSetupView.swift; sourceTree = "<group>"; };
 		A516614278B12B45D3E876E6 /* AddAccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddAccountView.swift; sourceTree = "<group>"; };
 		A8B337C1C0A8BF5C7BDA6E41 /* Message.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Message.swift; sourceTree = "<group>"; };
 		AA8617C28764494BD378CE66 /* NotificationPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPresenter.swift; sourceTree = "<group>"; };
@@ -275,6 +277,7 @@
 				9AC5E72995147ED8AD25E532 /* QRScannerView.swift */,
 				C175D8D86EA1A357FB1515A9 /* RecoveryConsoleView.swift */,
 				27783892A8D4D88BE570F79C /* RecoveryExplainerView.swift */,
+				A034B0812F64EFB0BA5C36E6 /* RecoveryPhraseSetupView.swift */,
 				D8CA6139805AD099FD6E40C8 /* SplashView.swift */,
 			);
 			path = Onboarding;
@@ -436,6 +439,7 @@
 				99FD87ED3F4EB328193828FF /* RecoveryConsoleView.swift in Sources */,
 				6C9898720C9563E270D15E23 /* RecoveryExplainerView.swift in Sources */,
 				5E07B0FD87D07465DAB28703 /* RecoveryKeyBanner.swift in Sources */,
+				DE9A7991ABFFACEA54D2762D /* RecoveryPhraseSetupView.swift in Sources */,
 				FA8DF8441A2584B4F6FFFDFE /* RootView.swift in Sources */,
 				3C45CC65E3C39FE080399694 /* SecureEnclaveKeyManager.swift in Sources */,
 				D3716E6E29A1BEF9424F3F79 /* ServerDetailView.swift in Sources */,

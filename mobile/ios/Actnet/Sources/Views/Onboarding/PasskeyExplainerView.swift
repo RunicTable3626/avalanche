@@ -8,6 +8,7 @@ struct PasskeyExplainerView: View {
 
     @State private var isRegistering = false
     @State private var errorMessage: String?
+    @State private var showRecoveryPhraseSetup = false
 
     var body: some View {
         VStack(spacing: 24) {
@@ -64,8 +65,7 @@ struct PasskeyExplainerView: View {
                 .disabled(isRegistering)
 
                 Button {
-                    // TODO: Recovery phrase generation flow
-                    register(prfOutput: Data())
+                    showRecoveryPhraseSetup = true
                 } label: {
                     Text("Use a recovery phrase instead")
                         .font(.subheadline)
@@ -88,6 +88,9 @@ struct PasskeyExplainerView: View {
         .background(Color.avPaper)
         .navigationTitle("Recovery")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(isPresented: $showRecoveryPhraseSetup) {
+            RecoveryPhraseSetupView(inviteToken: inviteToken, displayName: displayName)
+        }
     }
 
     private func registerWithPasskey() {

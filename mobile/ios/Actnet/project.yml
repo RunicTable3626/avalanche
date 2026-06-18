@@ -34,8 +34,14 @@ targets:
       base:
         DEVELOPMENT_TEAM: 7FVK3RR3TV
         PRODUCT_BUNDLE_IDENTIFIER: net.theavalanche.app
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: 3
+        # Substituted at xcodegen time from the environment, which the Makefile
+        # derives from git: latest tag (leading `v` stripped) → MARKETING_VERSION,
+        # total commit count → CURRENT_PROJECT_VERSION. `make ios`/`make archive`
+        # additionally override these on the xcodebuild command line, so an
+        # archive is always stamped with the current git-derived version even if
+        # the .xcodeproj wasn't regenerated. Build via make, not bare xcodegen.
+        MARKETING_VERSION: ${MARKETING_VERSION}
+        CURRENT_PROJECT_VERSION: ${CURRENT_PROJECT_VERSION}
         SWIFT_VERSION: "6.0"
         EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

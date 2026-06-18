@@ -15,6 +15,10 @@ struct RecoveryConsoleView: View {
         #endif
     }()
     @State private var needsServerUrl = false
+    /// Guards against `.task` running `performRecovery` more than once for this
+    /// view instance (the authoritative single-flight guard is in
+    /// `AppState.recoverAccount`; this just avoids the duplicate PLC lookup).
+    @State private var didStart = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -64,6 +68,8 @@ struct RecoveryConsoleView: View {
         .navigationTitle("Recovering...")
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            guard !didStart else { return }
+            didStart = true
             await performRecovery()
         }
     }

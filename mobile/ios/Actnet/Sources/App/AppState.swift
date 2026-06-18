@@ -57,6 +57,11 @@ final class AppState: ObservableObject {
 
     /// Active AppCore instances, keyed by DID.
     private var cores: [String: any AppCoreProtocol] = [:]
+    /// DIDs with an in-flight `recoverAccount`. Single-flight guard: the
+    /// recovery console's SwiftUI `.task` can fire more than once, and recovery
+    /// is heavy and side-effectful (device replace, group rejoin, welcome
+    /// sends), so it must run exactly once per DID.
+    private var recoveriesInFlight: Set<String> = []
     /// Per-account connection-state listener tasks. Cancelled on logout/mode switch.
     private var stateTasks: [String: Task<Void, Never>] = [:]
     /// Per-account event-channel listener tasks. Cancelled on logout/mode switch.
@@ -384,6 +389,15 @@ final class AppState: ObservableObject {
         prfOutput: Data,
         displayName: String
     ) async throws {
+        // Single-flight: run recovery once per DID. Atomic because AppState is
+        // @MainActor and these checks complete before the first `await`, so a
+        // second invocation (e.g. the console's `.task` re-firing) is dropped
+        // rather than spawning a duplicate AppCore + duplicate account entry and
+        // re-doing the device replace / group rejoin / welcome sends.
+        guard !accounts.contains(where: { $0.id == did }) else { return }
+        guard recoveriesInFlight.insert(did).inserted else { return }
+        defer { recoveriesInFlight.remove(did) }
+
         let dir = dbDir
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 

@@ -485,12 +485,64 @@ pub async fn fetch_group_state(
         .update_group_state(group_id_b64_s, resp.revision, plaintext, policy.clone())
         .await?;
 
+    // Populate contact_profiles for fellow members from the profile keys carried
+    // in the group state, so the member list can show display names. A human's
+    // name is only knowable via their profile key, and for someone we've never
+    // DMed the *only* place we see that key is the group roster — without this,
+    // such members render as "Unknown" (e.g. a second account joining #admins
+    // sees the first member with no name).
+    prime_member_profiles(store, client, did, &state.members).await;
+
     let row = GroupRow {
         revision: resp.revision,
         policy,
         ..row
     };
     Ok(summary_from_state(&row, &state))
+}
+
+/// Best-effort: for each group member other than ourselves whose roster entry
+/// carries a profile key we don't already have cached, fetch + decrypt their
+/// profile blob and upsert it into `contact_profiles`. Mirrors
+/// `AppCoreInner::handle_inbound_profile_key` (the DM path) but sourced from the
+/// group roster instead of an inbound message. Errors are swallowed — a missing
+/// or undecryptable profile just leaves that member unresolved, never blocking
+/// the roster load.
+async fn prime_member_profiles(
+    store: &store::DeviceStore,
+    client: &net::Client,
+    self_did: &str,
+    members: &[gproto::Member],
+) {
+    for m in members {
+        if m.did == self_did || m.profile_key.len() != crate::profile::PROFILE_KEY_LEN {
+            continue;
+        }
+        // Skip if we already hold this exact key (the name is cached with it).
+        match store.load_contact_profile_key(&m.did).await {
+            Ok(Some(cached)) if cached == m.profile_key => continue,
+            Ok(_) => {}
+            Err(_) => continue,
+        }
+        let blob = match client.get_profile(&m.did).await {
+            Ok(Some(b)) => b,
+            _ => continue,
+        };
+        let mut key = [0u8; crate::profile::PROFILE_KEY_LEN];
+        key.copy_from_slice(&m.profile_key);
+        let plaintext = match crate::profile::decrypt_profile(&blob, &key) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let _ = store
+            .upsert_contact_profile(&store::profiles::ContactProfile {
+                did: m.did.clone(),
+                display_name: plaintext.display_name,
+                profile_key: m.profile_key.clone(),
+                fetched_at: Timestamp::now(),
+            })
+            .await;
+    }
 }
 
 // ── action submission helpers ────────────────────────────────────────────

@@ -128,7 +128,7 @@ async function loadReleases() {
         o.textContent = t;
         el.appendChild(o);
       }
-      el.value = tags[0]; // newest
+      el.value = tags[0]; // always default to the latest release
       render();
       if (status) status.textContent = '';
     } else if (status) {
@@ -139,15 +139,41 @@ async function loadReleases() {
   }
 }
 
-TEXT_FIELDS.forEach(f => {
-  document.getElementById(f).addEventListener('input', render);
-});
-['release_tag', 'install_adminbot', 'install_testbot'].forEach(id => {
-  document.getElementById(id).addEventListener('change', render);
-});
+// Persist the form across refreshes. The release version is intentionally NOT
+// stored — it always defaults to the latest release. Secrets aren't stored
+// either (a fresh bootstrap secret is generated each load).
+const STORAGE_KEY = 'avalanche-configure-v1';
+
+function saveConfig() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      server_url: document.getElementById('server_url').value,
+      server_name: document.getElementById('server_name').value,
+      install_adminbot: document.getElementById('install_adminbot').checked,
+      install_testbot: document.getElementById('install_testbot').checked,
+    }));
+  } catch (_) { /* storage unavailable (e.g. private mode) — skip */ }
+}
+
+function restoreConfig() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (_) { /* ignore */ }
+  if (!saved) return;
+  if (typeof saved.server_url === 'string') document.getElementById('server_url').value = saved.server_url;
+  if (typeof saved.server_name === 'string') document.getElementById('server_name').value = saved.server_name;
+  if (typeof saved.install_adminbot === 'boolean') document.getElementById('install_adminbot').checked = saved.install_adminbot;
+  if (typeof saved.install_testbot === 'boolean') document.getElementById('install_testbot').checked = saved.install_testbot;
+}
+
+const persistAndRender = () => { render(); saveConfig(); };
+TEXT_FIELDS.forEach(f => document.getElementById(f).addEventListener('input', persistAndRender));
+['release_tag', 'install_adminbot', 'install_testbot'].forEach(id =>
+  document.getElementById(id).addEventListener('change', persistAndRender));
 wireCopy('copy_cloudinit', 'copy_cloudinit_status',
          () => document.getElementById('cloudinit_out').value);
 wireCopy('copy_invite', 'copy_invite_status',
          () => document.getElementById('invite_link').href);
+
+restoreConfig();
 render();
 loadReleases();

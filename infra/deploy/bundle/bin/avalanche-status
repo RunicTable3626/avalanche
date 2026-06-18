@@ -7,12 +7,11 @@ echo "-- version --------------------------------------"
 readlink /opt/avalanche/deployments/current 2>/dev/null || echo "(no deployment)"
 echo
 echo "-- services -------------------------------------"
-units=""
 for u in avalanche avalanche-adminbot avalanche-testbot caddy postgresql; do
-  if systemctl cat "$u.service" >/dev/null 2>&1; then units="$units $u"; fi
+  if systemctl cat "$u.service" >/dev/null 2>&1; then
+    printf '  %-22s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"
+  fi
 done
-# shellcheck disable=SC2086
-systemctl is-active $units || true
 echo
 echo "-- public URL -----------------------------------"
 if [ -f /etc/avalanche/avalanche.env ]; then

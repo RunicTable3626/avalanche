@@ -12,7 +12,11 @@ PRUNE_KEEP=3   # deployments to retain (including current)
 
 # ---- activate phase: driven by the NEW bundle after build (re-exec target) ----
 activate() {
-  local tag="$1" dep="$DEPLOYMENTS/$tag" comps=() c u
+  # Separate declarations: `local tag=.. dep="...$tag"` expands $tag before
+  # local assigns it, which trips `set -u`.
+  local tag="$1"
+  local dep="$DEPLOYMENTS/$tag"
+  local comps=() c u
   while IFS= read -r c; do [ -n "$c" ] && comps+=("$c"); done < <(deployment_components "$dep")
   [ "${#comps[@]}" -gt 0 ] || die "no components staged in $dep"
   has_server() { printf '%s\n' "${comps[@]}" | grep -qx server; }

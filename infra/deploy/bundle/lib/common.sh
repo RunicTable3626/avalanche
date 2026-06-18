@@ -95,7 +95,11 @@ fetch_component() {
 # is the one spot with per-bot config knowledge -- the updater itself stays
 # bot-agnostic. Requires SERVER_URL and REGISTRATION_SHARED_SECRET in scope.
 write_bot_env() {
-  local name="$1" f="$ETC/$name.env" key
+  # Separate declarations: a single `local a=.. b=$a` expands $a before local
+  # assigns it (word expansion precedes the builtin), which trips `set -u`.
+  local name="$1"
+  local f="$ETC/$name.env"
+  local key
   if [ -f "$f" ]; then log "$f exists, leaving as-is"; return 0; fi
   case "$name" in
     adminbot)

@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NonInteractive -NoProfile -Command \"$raw = [System.Console]::In.ReadToEnd(); try { $d = $raw | ConvertFrom-Json; if ($d.tool_input.command -match 'gh pr create') { [System.Console]::Error.WriteLine(''); [System.Console]::Error.WriteLine('⚠  CLAUDE.md reminder: delete the matching TODO line from docs/02-todos-deferred.md (remove the line entirely — no strikethrough, no checkbox).'); [System.Console]::Error.WriteLine('') } } catch {}\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NonInteractive -NoProfile -Command \"$raw = [System.Console]::In.ReadToEnd(); try { $d = $raw | ConvertFrom-Json; $fp = $d.tool_input.file_path; if ($fp) { $isIos = $fp -match 'mobile[\\\\/]ios[\\\\/]'; $isAndroid = $fp -match 'mobile[\\\\/]android[\\\\/]'; $isDesktop = $fp -match 'desktop[\\\\/]'; if ($isIos -or $isAndroid -or $isDesktop) { $platform = if ($isIos) { 'iOS' } elseif ($isAndroid) { 'Android' } else { 'Desktop' }; $others = @('iOS','Android','Desktop') | Where-Object { $_ -ne $platform }; [System.Console]::Error.WriteLine(''); [System.Console]::Error.WriteLine(\\\"📱 $platform file edited — implement the $($others -join ' + ') equivalent before closing this branch (mobile/CLAUDE.md).\\\"); [System.Console]::Error.WriteLine('') } } } catch {}\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NonInteractive -NoProfile -Command \"$raw = [System.Console]::In.ReadToEnd(); try { $d = $raw | ConvertFrom-Json; $fp = $d.tool_input.file_path; if ($fp) { $isIos = $fp -match 'mobile[\\\\/]ios[\\\\/]'; $isAndroid = $fp -match 'mobile[\\\\/]android[\\\\/]'; $isDesktop = $fp -match 'desktop[\\\\/]'; if ($isIos -or $isAndroid -or $isDesktop) { $platform = if ($isIos) { 'iOS' } elseif ($isAndroid) { 'Android' } else { 'Desktop' }; $others = @('iOS','Android','Desktop') | Where-Object { $_ -ne $platform }; [System.Console]::Error.WriteLine(''); [System.Console]::Error.WriteLine(\\\"📱 $platform file written — implement the $($others -join ' + ') equivalent before closing this branch (mobile/CLAUDE.md).\\\"); [System.Console]::Error.WriteLine('') } } } catch {}\""
+          }
+        ]
+      }
+    ]
+  }
+}

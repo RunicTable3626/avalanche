@@ -1,4 +1,20 @@
-# mobile/ — iOS (and future Android) apps
+# mobile/ — iOS and Android apps
+
+## Platform Parity Rule
+
+**Any feature added or changed on iOS must be implemented on Android in the same
+session. Any feature added or changed on Android must be implemented on iOS.**
+
+iOS is the reference implementation. Android must match it feature-for-feature.
+When in doubt about behavior, check the iOS source.
+
+The same rule applies across all three platforms — see the root parity rule in
+`CLAUDE.md` and `desktop/CLAUDE.md` for Desktop.
+
+Use `docs/android-implementation.md` as the parity tracking document — update
+the `[ ]` / `[x]` checkboxes as each component is completed.
+
+---
 
 ## iOS
 
@@ -44,5 +60,64 @@ Use `/new-ffi-method <name>` to scaffold all four steps as a single command (see
 | `Sources/Services/ActnetService.swift` | `AppCoreProtocol` definition + live implementation |
 | `Sources/Services/MockActnetService.swift` | Stub for previews/tests |
 | `Sources/App/AppState.swift` | Top-level observable state, calls FFI via `Task.detached` |
-| `Sources/App/AppState.swift` | Account list, active account, connection state |
 | `project.yml` | XcodeGen project definition (source of truth for Xcode project) |
+
+---
+
+## Android
+
+The Android app is a Kotlin/Jetpack Compose project under `mobile/android/`.
+
+### Build commands
+
+```bash
+make android-bindings                                    # cross-compile Rust core, generate Kotlin bindings, package AAR
+cd mobile/android && ./gradlew assembleDebug             # build APK
+cd mobile/android && ./gradlew connectedAndroidTest      # run device tests
+```
+
+### FFI constraints (same as iOS, different syntax)
+
+- All UniFFI calls from Kotlin must use `withContext(Dispatchers.IO) { core.method() }`
+- The WebSocket loop runs in `viewModelScope` coroutines, cancelled when ViewModel is cleared
+- Min SDK: 26 (Android 8.0)
+
+The SQLCipher DB key is `"dev-placeholder-key"` until Android Keystore integration lands.
+
+See `docs/android-implementation.md` for the full parity map and implementation phases.
+
+---
+
+## Visual Reference: Screenshots
+
+`docs/screenshots/` contains iOS simulator screenshots organized by screen name
+(e.g. `splash.png`, `chats-list.png`, `conversation.png`). When implementing a
+screen on Android or Desktop, use the matching screenshot as a visual reference
+if it exists. If it doesn't exist, derive the layout from the iOS source alone —
+screenshots are optional, not required.
+
+Screenshots are only capturable on macOS with the iOS simulator. Contributors on
+Windows or Linux skip this step entirely.
+
+---
+
+## Adding a New Screen (checklist)
+
+Before closing any branch that adds or changes mobile UI:
+
+- [ ] iOS SwiftUI view created/updated in `mobile/ios/`
+- [ ] Android Compose screen created/updated in `mobile/android/`
+- [ ] AppState (iOS) and AppViewModel (Android) updated consistently
+- [ ] New model fields added to both `.swift` and `.kt` data classes
+- [ ] `docs/android-implementation.md` parity table updated
+- [ ] *(macOS only)* Screenshot taken and saved to `docs/screenshots/<screen-name>.png`
+
+## Adding a New FFI Method (checklist)
+
+1. Add Rust method to `core/crates/app-core/src/lib.rs` (`#[uniffi::export]`, sync)
+2. `make bindings` — regenerates Swift + Kotlin glue
+3. Add to `AppCoreProtocol` in `ActnetService.swift` and stub in `MockActnetService.swift`
+4. Add to `ActnetService` interface in Kotlin and stub in `MockActnetService.kt`
+5. Call from `AppState.swift` via `Task.detached`
+6. Call from `AppViewModel.kt` via `withContext(Dispatchers.IO)`
+7. Update Desktop simultaneously (see `desktop/CLAUDE.md`)

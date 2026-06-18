@@ -679,27 +679,34 @@ pub(crate) async fn run_scheduler(weak: std::sync::Weak<crate::AppCore>) {
 /// pull everything newer than the cursor (write-through to domain tables), then
 /// push every dirty row with per-record CAS. A no-op if no storage key is
 /// provisioned yet.
+/// Returns the number of remote records the pull applied to local domain
+/// tables — callers use a non-zero count to know the conversation list may have
+/// changed and emit a refresh signal.
 pub async fn sync(
     store: &store::DeviceStore,
     client: &net::Client,
     registry: &SyncRegistry,
-) -> Result<(), AppError> {
+) -> Result<usize, AppError> {
     let storage_key = match store.load_storage_key().await? {
         Some(k) => k,
-        None => return Ok(()),
+        None => return Ok(0),
     };
 
-    pull(store, client, registry, &storage_key).await?;
+    let applied = pull(store, client, registry, &storage_key).await?;
     push(store, client, registry, &storage_key).await?;
-    Ok(())
+    Ok(applied)
 }
 
+/// Pull remote records newer than the cursor, applying each to its domain
+/// table. Returns how many were applied (skips for already-seen versions and
+/// unknown tags don't count).
 async fn pull(
     store: &store::DeviceStore,
     client: &net::Client,
     registry: &SyncRegistry,
     storage_key: &[u8; 32],
-) -> Result<(), AppError> {
+) -> Result<usize, AppError> {
+    let mut applied_count = 0usize;
     let mut cursor = store.storage_cursor().await?;
     loop {
         let page = client.storage_pull(cursor, PULL_LIMIT).await?;
@@ -743,6 +750,7 @@ async fn pull(
                     store
                         .set_sync_meta(tag, &logical_key, it.version, false, it.deleted)
                         .await?;
+                    applied_count += 1;
                 }
                 None => {
                     // A record type this client build doesn't know yet. Record
@@ -761,7 +769,7 @@ async fn pull(
         }
     }
     store.set_storage_cursor(cursor).await?;
-    Ok(())
+    Ok(applied_count)
 }
 
 async fn push(

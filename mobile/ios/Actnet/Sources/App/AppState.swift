@@ -465,6 +465,15 @@ final class AppState: ObservableObject {
             servers: [PersistedServer(id: serverUrl, name: serverName, url: serverUrl)]
         ))
 
+        // Rebuild the conversation list from the freshly-registered core's
+        // store. For recovery this is what surfaces groups restored from the
+        // recovery blob (their master keys are already in the `groups` table,
+        // which `loadConversations` lists even before any message arrives) —
+        // otherwise recovered groups don't appear until the next launch. For a
+        // brand-new account it's a harmless empty load. Done before the mock
+        // seed below so mock previews still append their fixtures.
+        await loadConversationsFromStore()
+
         // In mock mode, seed some fake conversations
         if serviceMode == .mock {
             conversations.append(contentsOf: MockData.seedConversations(
@@ -1268,7 +1277,7 @@ final class AppState: ObservableObject {
             guard !Task.isCancelled else { break }
             var messages: [DecryptedMessage] = []
             var receiptUpdates: [DeliveryStatusUpdate] = []
-            var sawGroupInvite = false
+            var needsConversationReload = false
             for ev in events {
                 switch ev {
                 case .message(let msg): messages.append(msg)
@@ -1276,7 +1285,13 @@ final class AppState: ObservableObject {
                 case .groupInvite:
                     // Master key already persisted by app-core; just refresh
                     // the chat list so the new group becomes visible.
-                    sawGroupInvite = true
+                    needsConversationReload = true
+                case .storageSynced:
+                    // A background storage sync applied remote durable state
+                    // (e.g. a group key synced from another device). The store
+                    // is updated; rebuild the chat list so it shows without a
+                    // restart.
+                    needsConversationReload = true
                 case let .messageEdited(conversationId, authorDid, sentAtMs, newBody, editedAtMs):
                     applyInboundEdit(conversationId: conversationId, authorDid: authorDid, sentAtMs: sentAtMs, newBody: newBody, editedAtMs: editedAtMs)
                 case let .messageDeleted(conversationId, authorDid, sentAtMs):
@@ -1291,7 +1306,7 @@ final class AppState: ObservableObject {
             if !receiptUpdates.isEmpty {
                 applyDeliveryStatusUpdates(receiptUpdates)
             }
-            if sawGroupInvite {
+            if needsConversationReload {
                 await loadConversationsFromStore()
             }
         }

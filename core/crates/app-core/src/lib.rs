@@ -407,6 +407,13 @@ pub enum IncomingEvent {
         emoji: String,
         removed: bool,
     },
+    /// A background storage sync pulled and applied remote durable-state
+    /// records (e.g. a group master key synced from another device, or an
+    /// updated contact/profile). The domain tables are already updated; the UI
+    /// should rebuild its conversation list so newly-synced groups/contacts
+    /// appear without an app restart. Same "refresh the list" contract as
+    /// `GroupInvite`, but driven by the storage service rather than a DM.
+    StorageSynced,
 }
 
 /// Admin-only events surfaced to a separate queue, drained by
@@ -3080,13 +3087,22 @@ impl AppCore {
     /// Async variant of `sync_storage` (for tests). Reconciles the durable-state
     /// store with the authoritative server: pull then push (docs/05 §6).
     pub async fn sync_storage_async(&self) -> Result<(), AppError> {
-        let inner = self.inner.lock().await;
-        storage_sync::sync(
-            &inner.store,
-            &inner.client,
-            &storage_sync::SyncRegistry::default_registry(),
-        )
-        .await
+        let applied = {
+            let inner = self.inner.lock().await;
+            storage_sync::sync(
+                &inner.store,
+                &inner.client,
+                &storage_sync::SyncRegistry::default_registry(),
+            )
+            .await?
+        };
+        // If the pull applied remote records (a synced group key, a contact or
+        // profile update from another device, …), nudge the UI to rebuild its
+        // conversation list so the change shows without an app restart.
+        if applied > 0 {
+            let _ = self.event_tx.send(IncomingEvent::StorageSynced);
+        }
+        Ok(())
     }
 
     /// Async receive_messages for use in tests running inside a tokio runtime.

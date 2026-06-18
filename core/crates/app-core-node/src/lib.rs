@@ -420,6 +420,15 @@ impl From<IncomingEvent> for IncomingEventJs {
                 receipt: None,
                 group_invite: None,
             },
+            // A background storage sync applied remote records. Bots don't
+            // render conversation lists (and opt out of storage sync), so this
+            // is surfaced as a bare kind for completeness/parity only.
+            IncomingEvent::StorageSynced => Self {
+                kind: "storageSynced".into(),
+                message: None,
+                receipt: None,
+                group_invite: None,
+            },
         }
     }
 }

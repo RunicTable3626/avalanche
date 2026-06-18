@@ -195,6 +195,19 @@ impl SenderGate {
     pub(crate) fn passes(&self) -> bool {
         self.is_curated || self.is_bot
     }
+
+    /// True when this DM should surface as a *message request* (the
+    /// Accept/Delete/Report gate): an un-blocked sender that doesn't auto-pass.
+    ///
+    /// This is the single source of truth for "is it a request", shared by the
+    /// inbound delivery path (which sets `has_pending_request` from it) and the
+    /// conversation-load path (`load_conversations`). Keep it shared: the two
+    /// drifted once — a bot DM delivered as a normal DM but flipped to a request
+    /// on relaunch — because the load path re-derived the rule and missed the
+    /// `is_bot` exemption.
+    pub(crate) fn is_request(&self) -> bool {
+        !self.is_blocked && !self.passes()
+    }
 }
 
 impl AppCoreInner {
@@ -852,7 +865,7 @@ impl AppCoreInner {
                                 .store
                                 .touch_contact(&raw.sender_did, false, Timestamp::now())
                                 .await;
-                            if !gate.passes() {
+                            if gate.is_request() {
                                 let _ = self
                                     .store
                                     .set_pending_request(&raw.sender_did, true)
@@ -1124,7 +1137,7 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
                     .store
                     .touch_contact(&decrypted.sender_did, false, Timestamp::now())
                     .await;
-                if !gate.passes() {
+                if gate.is_request() {
                     let _ = inner
                         .store
                         .set_pending_request(&decrypted.sender_did, true)
@@ -1326,6 +1339,21 @@ mod tests {
         // Blocked is handled by the caller (dropped); `passes` only decides
         // request-vs-normal, so a curated+blocked row still "passes" the gate.
         assert!(g(true, true, false).passes());
+    }
+
+    #[test]
+    fn sender_gate_is_request_matches_delivery_and_load_paths() {
+        use crate::messaging::SenderGate;
+        let g = |is_curated, is_blocked, is_bot| SenderGate { is_curated, is_blocked, is_bot };
+        // Un-curated human → request.
+        assert!(g(false, false, false).is_request());
+        // Curated human → not a request.
+        assert!(!g(true, false, false).is_request());
+        // Homeserver-known bot (e.g. adminbot's welcome) → never a request, even
+        // un-curated. This is the case that regressed on relaunch.
+        assert!(!g(false, false, true).is_request());
+        // Blocked is never surfaced as a request (it's dropped / shown blocked).
+        assert!(!g(false, true, false).is_request());
     }
 
     #[test]

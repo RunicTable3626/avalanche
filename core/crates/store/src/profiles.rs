@@ -289,4 +289,22 @@ impl IdentityStore {
             .await
             .map_err(StoreError::Db)
     }
+
+    /// DIDs of every cached account flagged as a homeserver-known bot. Used to
+    /// resolve the message-request gate in bulk (mirrors `SenderGate::passes`,
+    /// which treats a bot sender as non-request) without a per-conversation
+    /// query on load.
+    pub async fn list_bot_dids(&self) -> Result<Vec<String>, StoreError> {
+        self.conn
+            .call(move |conn| {
+                let mut stmt =
+                    conn.prepare("SELECT did FROM account_info_cache WHERE is_bot = 1")?;
+                let dids = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(dids)
+            })
+            .await
+            .map_err(StoreError::Db)
+    }
 }

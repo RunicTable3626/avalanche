@@ -228,6 +228,34 @@ async fn account_info_cache_round_trip() {
 }
 
 #[tokio::test]
+async fn list_bot_dids_returns_only_bots() {
+    use types::Timestamp;
+    let store = DeviceStore::open_in_memory().await.unwrap();
+
+    assert!(store.list_bot_dids().await.unwrap().is_empty());
+
+    let bot = store::profiles::AccountInfoCache {
+        did: "did:local:adminbot".into(),
+        display_name: "Admin Bot".into(),
+        is_bot: true,
+        fetched_at: Timestamp(1000),
+    };
+    let human = store::profiles::AccountInfoCache {
+        did: "did:plc:human".into(),
+        display_name: String::new(),
+        is_bot: false,
+        fetched_at: Timestamp(1000),
+    };
+    store.upsert_account_info(&bot).await.unwrap();
+    store.upsert_account_info(&human).await.unwrap();
+
+    // Only the bot DID comes back — this is what the conversation-load path
+    // uses to keep an auto-accepted bot DM out of the message-request gate.
+    let bots = store.list_bot_dids().await.unwrap();
+    assert_eq!(bots, vec!["did:local:adminbot".to_string()]);
+}
+
+#[tokio::test]
 async fn profile_fetch_state_round_trip() {
     use types::Timestamp;
     let store = DeviceStore::open_in_memory().await.unwrap();

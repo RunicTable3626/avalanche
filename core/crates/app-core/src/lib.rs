@@ -1745,14 +1745,34 @@ impl AppCore {
                 .into_iter()
                 .map(|c| (c.did.clone(), c))
                 .collect();
+            // Homeserver-known bots are never message requests (docs/12). The
+            // inbound gate (`SenderGate::passes`) already exempts them via
+            // `is_bot`, so this load path must too — otherwise an auto-accepted
+            // bot DM (e.g. adminbot's welcome) flips to "message request" on the
+            // next launch, when the conversation is rebuilt from the store.
+            let bot_dids: std::collections::HashSet<String> = inner
+                .store
+                .list_bot_dids()
+                .await
+                .map_err(AppError::from)?
+                .into_iter()
+                .collect();
             Ok::<_, AppError>(rows.into_iter().map(|c| {
                 let peer = c.conversation_id.strip_prefix(&dm_prefix);
                 let contact = peer.and_then(|p| contacts.get(p));
                 let is_blocked = contact.map(|c| c.is_blocked).unwrap_or(false);
-                // A request is a DM whose peer is neither curated nor blocked.
-                let is_request = peer.is_some()
-                    && !is_blocked
-                    && !contact.map(|c| c.is_curated).unwrap_or(false);
+                // Defer the request/blocked decision to the same `SenderGate`
+                // the inbound delivery path uses, so the two can't drift (see
+                // SenderGate::is_request). Non-DM rows (peer == None) are never
+                // requests.
+                let is_request = peer.map_or(false, |p| {
+                    crate::messaging::SenderGate {
+                        is_curated: contact.map(|c| c.is_curated).unwrap_or(false),
+                        is_blocked,
+                        is_bot: bot_dids.contains(p),
+                    }
+                    .is_request()
+                });
                 ConversationSummaryFfi {
                     group_title: c.conversation_id
                         .strip_prefix("group-")

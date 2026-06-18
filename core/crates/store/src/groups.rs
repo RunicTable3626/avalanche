@@ -179,6 +179,59 @@ impl IdentityStore {
         let group_id = group_id.to_string();
         self.conn
             .call(move |conn| {
+                // Skip a no-op rewrite entirely. `fetch_group_state` calls this
+                // on every group / group-info open, usually with byte-identical
+                // values (the server revision hasn't moved). It is NOT enough to
+                // make the UPDATE match zero rows: SQLite fires the commit hook
+                // for any committed write transaction — even a 0-row UPDATE — and
+                // that hook pokes the storage-sync scheduler, forcing a redundant
+                // pull (and, before the row trigger was tamed, a push) on every
+                // open. A read-only SELECT doesn't commit, so we compare first and
+                // only issue the UPDATE when something actually differs. A genuine
+                // change still writes (a sync then is acceptable).
+                // `policy_invite_link_password` is nullable → NULL-safe `IS NOT`.
+                // Bind to named locals so the same `params` slice can be reused
+                // by both the compare query and the UPDATE (avoids temporaries
+                // in the array literal).
+                let invite_members = policy.invite_members_role as i64;
+                let remove_members = policy.remove_members_role as i64;
+                let modify_title = policy.modify_title_role as i64;
+                let modify_description = policy.modify_description_role as i64;
+                let modify_expiry = policy.modify_expiry_role as i64;
+                let join_policy = policy.join_policy as i64;
+                let announcement_only = policy.announcement_only as i64;
+                let params = rusqlite::params![
+                    group_id,
+                    revision,
+                    encrypted_state_plaintext,
+                    invite_members,
+                    remove_members,
+                    modify_title,
+                    modify_description,
+                    modify_expiry,
+                    join_policy,
+                    policy.invite_link_password,
+                    announcement_only,
+                ];
+                let differs: bool = conn.query_row(
+                    "SELECT EXISTS( \
+                       SELECT 1 FROM groups WHERE group_id = ?1 AND ( \
+                            revision <> ?2 \
+                            OR encrypted_state_plaintext <> ?3 \
+                            OR policy_invite_members_role <> ?4 \
+                            OR policy_remove_members_role <> ?5 \
+                            OR policy_modify_title_role <> ?6 \
+                            OR policy_modify_description_role <> ?7 \
+                            OR policy_modify_expiry_role <> ?8 \
+                            OR policy_join_policy <> ?9 \
+                            OR policy_invite_link_password IS NOT ?10 \
+                            OR policy_announcement_only <> ?11 ) )",
+                    params,
+                    |row| row.get::<_, i64>(0),
+                )? != 0;
+                if !differs {
+                    return Ok(());
+                }
                 conn.execute(
                     "UPDATE groups SET revision = ?2, encrypted_state_plaintext = ?3, \
                             policy_invite_members_role = ?4, policy_remove_members_role = ?5, \
@@ -186,19 +239,7 @@ impl IdentityStore {
                             policy_modify_expiry_role = ?8, policy_join_policy = ?9, \
                             policy_invite_link_password = ?10, policy_announcement_only = ?11 \
                      WHERE group_id = ?1",
-                    rusqlite::params![
-                        group_id,
-                        revision,
-                        encrypted_state_plaintext,
-                        policy.invite_members_role as i64,
-                        policy.remove_members_role as i64,
-                        policy.modify_title_role as i64,
-                        policy.modify_description_role as i64,
-                        policy.modify_expiry_role as i64,
-                        policy.join_policy as i64,
-                        policy.invite_link_password,
-                        policy.announcement_only as i64,
-                    ],
+                    params,
                 )?;
                 Ok(())
             })

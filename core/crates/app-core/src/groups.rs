@@ -183,14 +183,22 @@ pub async fn ensure_server_params(
     client: &net::Client,
     server_url: &str,
 ) -> Result<ServerPublicParams, AppError> {
-    let fresh = client.get_group_server_params().await?;
-    if let Some((cached_version, cached_bytes, _trust_root)) =
+    // Fast path: trust the cached params. zkgroup server params are
+    // version-pinned and effectively immutable for the life of a server
+    // (rotating them would invalidate every outstanding credential and group),
+    // so we don't pay a round trip on every group operation just to re-confirm
+    // the version — that confirmation is what made simply opening a group hit
+    // the network. Mirrors `load_sender_cert_trust_root`, which already trusts
+    // this same cache without a version check.
+    if let Some((_version, cached_bytes, _trust_root)) =
         store.load_group_server_params(server_url).await?
     {
-        if cached_version == fresh.version && cached_bytes == fresh.params {
-            return Ok(ServerPublicParams::from_bytes(&cached_bytes)?);
-        }
+        return Ok(ServerPublicParams::from_bytes(&cached_bytes)?);
     }
+    // Cold cache — fetch once and persist. (A genuine param rotation would only
+    // surface as a crypto verification failure; refreshing on that is a separate
+    // change, not handled here.)
+    let fresh = client.get_group_server_params().await?;
     store
         .save_group_server_params(
             server_url,

@@ -423,6 +423,93 @@ mod storage_sync {
     }
 
     #[tokio::test]
+    async fn update_group_state_noop_does_not_redirty() {
+        let store = store_with_group_triggers().await;
+        let g = sample_group("g-noop");
+        store.save_group(&g).await.unwrap();
+        // Clear the insert's dirty mark (mimic a successful push).
+        store.set_sync_meta(1, "g-noop", 1, false, false).await.unwrap();
+        assert!(store.dirty_records().await.unwrap().is_empty());
+
+        // Re-fetch with byte-identical state — the common case when you open a
+        // group and the server revision hasn't moved. Must NOT re-dirty: the
+        // guarded UPDATE matches zero rows, so the trigger never fires.
+        store
+            .update_group_state(
+                "g-noop",
+                g.revision,
+                g.encrypted_state_plaintext.clone(),
+                PolicyRow::default_admin_only(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            store.dirty_records().await.unwrap().is_empty(),
+            "a no-op refetch must not mark the group dirty"
+        );
+
+        // A genuine change (new revision + state) does dirty — a sync then is
+        // expected and fine.
+        store
+            .update_group_state(
+                "g-noop",
+                g.revision + 1,
+                b"new-state".to_vec(),
+                PolicyRow::default_admin_only(),
+            )
+            .await
+            .unwrap();
+        let dirty = store.dirty_records().await.unwrap();
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0].logical_key, "g-noop");
+    }
+
+    #[tokio::test]
+    async fn noop_update_group_state_does_not_poke_commit_hook() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        // A 0-row UPDATE still commits a write transaction and fires SQLite's
+        // commit hook — which pokes the storage-sync scheduler into a redundant
+        // pull. So `update_group_state` must skip the write entirely (read-only
+        // compare) on an unchanged refetch, the common case when opening a group.
+        let store = store_with_group_triggers().await;
+        let g = sample_group("g-hook");
+        store.save_group(&g).await.unwrap();
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let c2 = count.clone();
+        store
+            .set_commit_hook(move || {
+                c2.fetch_add(1, Ordering::SeqCst);
+            })
+            .await
+            .unwrap();
+
+        // No-op refetch: identical values → no write → no commit-hook poke.
+        store
+            .update_group_state(
+                "g-hook",
+                g.revision,
+                g.encrypted_state_plaintext.clone(),
+                PolicyRow::default_admin_only(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "a no-op group-state refetch must not poke the sync scheduler"
+        );
+
+        // A genuine change writes and fires the hook (a sync then is fine).
+        store
+            .update_group_state("g-hook", g.revision + 1, b"x".to_vec(), PolicyRow::default_admin_only())
+            .await
+            .unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn sync_version_defaults_zero_for_unknown_record() {
         let store = DeviceStore::open_in_memory().await.unwrap();
         assert_eq!(store.sync_version(1, "never-seen").await.unwrap(), 0);

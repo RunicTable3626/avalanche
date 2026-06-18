@@ -33,15 +33,6 @@ struct InviteLinkEntryView: View {
             .controlSize(.large)
             .disabled(linkText.isEmpty || isValidating)
 
-            #if DEBUG
-            Button("Use localhost:3000 (dev)") {
-                linkText = Self.localhostDevToken
-                validateLink()
-            }
-            .font(.callout)
-            .disabled(isValidating)
-            #endif
-
             Spacer()
         }
         .padding(.top, 32)

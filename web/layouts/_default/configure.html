@@ -1,0 +1,84 @@
+{{ define "main" }}
+<article class="prose configure">
+  <h1>{{ .Title }}</h1>
+
+  <p>Fill in the values below, then copy the generated cloud-init into
+  DigitalOcean's <em>"Add Initial Scripts (user data)"</em> field when creating a
+  droplet. About 3 minutes after the droplet starts, scan the QR code
+  below with your phone (with the app installed) to sign up as the first user.</p>
+
+  <form id="form">
+    <label><span>Server URL</span>
+      <input type="text" id="server_url" value="https://av.example.org" autocomplete="off">
+      <span class="field-hint">An unused subdomain of your org's existing domain is great. We recommend <code>av</code>, but you can choose any domain.</span>
+    </label>
+    <label><span>Server name</span>
+      <input type="text" id="server_name" value="My Org Homeserver" autocomplete="off">
+      <span class="field-hint">This will be shown to users when joining your server.</span>
+    </label>
+
+    <details class="advanced">
+      <summary>More options</summary>
+      <div class="advanced-body">
+        <label><span>Release version</span>
+          <select id="release_tag"><option value="0.1.0">0.1.0</option></select>
+          <span class="field-hint">Which Avalanche release to install. <span id="release_tag_status"></span></span>
+        </label>
+  
+        <label class="check"><input type="checkbox" id="install_adminbot" checked> <span>Include adminbot</span></label>
+        <span class="field-hint">Bot that automatically adds new users to a group.</span>
+  
+        <label class="check"><input type="checkbox" id="install_testbot"> <span>Include testbot</span></label>
+        <span class="field-hint">A demo bot that you can talk to.</span>
+      </div>
+    </details>
+  
+  </form>
+
+
+  <h2>1. Cloud-init for DigitalOcean</h2>
+  <p class="hint">Paste this entire block into "Add Initial Scripts (user data)" on the droplet creation page.</p>
+  <div class="copy-row">
+    <button type="button" id="copy_cloudinit">Copy cloud-init</button>
+    <span id="copy_cloudinit_status" class="hint"></span>
+  </div>
+  <textarea id="cloudinit_out" rows="20" readonly></textarea>
+
+  <h2>2. Next steps after droplet boot</h2>
+  <ol>
+    <li>Point your domain's DNS A-record at the droplet's public IP (shown in the DigitalOcean console).</li>
+    <li>Wait ~3 minutes for cloud-init + Let's Encrypt to finish.</li>
+    <li><code>ssh root@&lt;droplet-ip&gt;</code> and run <code>avalanche-status</code> to verify health.</li>
+    <li>Scan the QR code below with the Avalanche app to sign up as the first user.</li>
+  </ol>
+
+  <h2>3. First invite QR</h2>
+  <p class="hint">Open the Avalanche app on your phone and scan to sign up. You can re-scan or share this link until someone uses it.</p>
+  <div class="qr-wrap">
+    <div id="qr"></div>
+    <div>
+      <p style="margin-top:0"><strong>Invite URL</strong></p>
+      <p><a id="invite_link" target="_blank" style="word-break:break-all"></a></p>
+      <div class="copy-row">
+        <button type="button" id="copy_invite">Copy URL</button>
+        <span id="copy_invite_status" class="hint"></span>
+      </div>
+    </div>
+  </div>
+</article>
+
+<!-- QR generator: small (~12KB), pure JS, MIT-licensed. -->
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"
+        integrity="sha384-lQXOAyZwHXE55JFyrOMB7nY2Wv+m5ZWNtJcHrd1rceRQXAYNLak8ukN5TjBTcIwz"
+        crossorigin="anonymous"></script>
+
+{{/* The cloud-init template and the page JS live in assets/configure/ and are
+     injected here at build time. Kept out of the template literal so Hugo's
+     html/template engine doesn't try to parse the YAML/shell as HTML.
+     assets/configure/cloudinit-template.yaml is the canonical bootstrap. */}}
+<script>
+'use strict';
+const TEMPLATE = {{ (resources.Get "configure/cloudinit-template.yaml").Content | jsonify | safeJS }};
+{{ (resources.Get "configure/configure.js").Content | safeJS }}
+</script>
+{{ end }}

@@ -1,0 +1,30 @@
+{{ define "main" }}
+<section class="hero">
+  <img src="{{ "/wordmark.svg" | relURL }}" alt="Avalanche" class="hero-wordmark">
+  <p class="tagline">{{ site.Params.tagline }}</p>
+  <div class="hero-body">
+    {{ .Content }}
+  </div>
+  <div class="hero-actions">
+    <a class="btn btn-primary" href="{{ site.Params.github }}" rel="noopener">GitHub</a>
+  </div>
+</section>
+
+{{ $blog := site.GetPage "/blog" }}
+{{ with $blog }}
+  {{ $recent := first 3 .RegularPagesRecursive }}
+  {{ with $recent }}
+  <section class="recent">
+    <h2>From the blog</h2>
+    <ul class="post-list">
+      {{ range . }}
+      <li>
+        <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+        {{ with .Date }}<time datetime="{{ .Format "2006-01-02" }}">{{ .Format "Jan 2, 2006" }}</time>{{ end }}
+      </li>
+      {{ end }}
+    </ul>
+  </section>
+  {{ end }}
+{{ end }}
+{{ end }}

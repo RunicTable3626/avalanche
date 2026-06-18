@@ -1,0 +1,298 @@
+:root {
+  --bg: #FFF1E9;
+  --ink: #6B3E50;
+  --ink-soft: #6B3E50cc;
+  --ink-faint: #6B3E5099;
+  --card: #FFFFFF80;
+  --rule: #6B3E5022;
+  --accent: #6B3E50;
+  --max: 720px;
+  --font: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-head: "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 17px;
+  line-height: 1.65;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-head);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---------- Header / nav ---------- */
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  max-width: var(--max);
+  width: 100%;
+  margin: 0 auto;
+  padding: 1.5rem 1.5rem 1rem;
+}
+.brand-mark { height: 28px; width: auto; display: block; }
+.brand:hover { text-decoration: none; opacity: 0.85; }
+.site-nav { display: flex; gap: 1.25rem; flex-wrap: wrap; font-size: 0.95rem; }
+.site-nav a { color: var(--ink-soft); }
+.site-nav a.active { color: var(--ink); font-weight: 600; }
+
+/* ---------- Main ---------- */
+.content {
+  flex: 1;
+  width: 100%;
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+/* ---------- Home hero ---------- */
+/* On the home page the wordmark lives in the hero, not the header. */
+.home .site-header .brand { display: none; }
+/* Brand is gone, so keep the nav pinned to the right instead of sliding left. */
+.home .site-header { justify-content: flex-end; }
+
+.hero { padding: 3rem 0 2rem; text-align: center; }
+.hero-wordmark {
+  display: block;
+  width: min(420px, 80%);
+  height: auto;
+  margin: 0 auto 2rem;
+}
+.hero .tagline {
+  font-family: var(--font-head);
+  font-size: 1.5rem;
+  line-height: 1.4;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 1.25rem;
+}
+.hero-body { color: var(--ink-soft); font-size: 1.1rem; text-align: left; }
+.hero-body p { margin-bottom: 1rem; }
+.hero-actions { margin-top: 2rem; display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: center; }
+
+.btn {
+  display: inline-block;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: transparent;
+  padding: 0.65rem 1.5rem;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: opacity 0.15s, background 0.15s;
+}
+.btn:hover { text-decoration: none; opacity: 0.85; }
+.btn-primary { background: var(--accent); color: var(--bg); }
+
+.recent { margin-top: 3rem; border-top: 1px solid var(--rule); padding-top: 2rem; }
+.recent h2 { font-size: 1.1rem; margin-bottom: 1rem; }
+
+/* ---------- Lists ---------- */
+.post-list, .doc-list { list-style: none; }
+.post-list li { margin-bottom: 1.25rem; }
+.post-list li a { font-size: 1.1rem; font-weight: 600; }
+.post-list time { display: block; font-size: 0.85rem; color: var(--ink-faint); margin-top: 0.15rem; }
+.post-summary { color: var(--ink-soft); font-size: 0.95rem; margin-top: 0.25rem; }
+
+.doc-list li { margin-bottom: 0.85rem; }
+.doc-list li a { font-weight: 600; }
+.doc-summary { display: block; color: var(--ink-faint); font-size: 0.9rem; }
+
+/* ---------- Prose (docs & posts) ---------- */
+.prose h1 { font-size: 2rem; line-height: 1.2; margin-bottom: 1rem; }
+.prose h2 { font-size: 1.4rem; margin: 2rem 0 0.75rem; }
+.prose h3 { font-size: 1.15rem; margin: 1.5rem 0 0.5rem; }
+.prose p, .prose ul, .prose ol { margin-bottom: 1rem; }
+.prose ul, .prose ol { padding-left: 1.5rem; }
+.prose li { margin-bottom: 0.35rem; }
+.prose img { max-width: 100%; height: auto; border-radius: 8px; }
+.prose hr { border: none; border-top: 1px solid var(--rule); margin: 2rem 0; }
+.prose blockquote {
+  border-left: 3px solid var(--rule);
+  padding-left: 1rem;
+  color: var(--ink-soft);
+  margin: 1rem 0;
+}
+.prose a { text-decoration: underline; text-underline-offset: 2px; }
+
+.byline { color: var(--ink-faint); font-size: 0.9rem; margin-bottom: 1.5rem; }
+.back { margin-top: 2.5rem; }
+
+/* ---------- Code ---------- */
+code, pre { font-family: var(--mono); font-size: 0.9em; }
+:not(pre) > code {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+pre {
+  background: #2b1d24;
+  color: #f3e9e3;
+  padding: 1rem 1.25rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin-bottom: 1rem;
+  line-height: 1.5;
+}
+pre code { background: none; border: none; padding: 0; color: inherit; }
+
+table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+th, td { border: 1px solid var(--rule); padding: 0.5rem 0.75rem; text-align: left; }
+th { background: var(--card); }
+
+/* ---------- Configure (homeserver bootstrap tool) ---------- */
+.configure form {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  margin: 1.5rem 0 2rem;
+}
+.configure label { display: block; margin: 1rem 0; }
+.configure label:first-child { margin-top: 0; }
+.configure label > span:first-child {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+.configure .field-hint {
+  display: block;
+  font-weight: 400;
+  color: var(--ink-faint);
+  font-size: 0.85rem;
+  margin-top: 0.35rem;
+  max-width: 42rem;
+}
+.configure input[type=text] {
+  width: 100%;
+  max-width: 32rem;
+  padding: 0.5rem 0.65rem;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+.configure textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+.configure input[type=text]:focus,
+.configure textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px #6B3E5022;
+}
+.configure button {
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.5rem 1.1rem;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.configure button:hover { background: var(--accent); color: var(--bg); }
+/* Advanced lives inside the form card, so it reads as a section of the form
+   (a divider rule + a disclosure row) rather than a nested box. */
+.configure .advanced {
+  border-top: 1px solid var(--rule);
+  margin-top: 1.25rem;
+}
+.configure .advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  font-weight: 600;
+  color: var(--ink-soft);
+  padding: 0.85rem 0 0.35rem;
+}
+.configure .advanced > summary::-webkit-details-marker { display: none; }
+.configure .advanced > summary::before { content: "\25B8\00a0"; color: var(--ink-faint); }
+.configure .advanced[open] > summary::before { content: "\25BE\00a0"; }
+.configure .advanced > summary:hover { color: var(--ink); }
+.configure .advanced-body { padding-top: 0.25rem; }
+.configure .advanced-body > label:first-child { margin-top: 0.5rem; }
+.configure select {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  padding: 0.45rem 0.55rem;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+.configure label.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 1.1rem 0 0.2rem;
+  font-weight: 600;
+}
+.configure label.check input { width: auto; margin: 0; }
+
+.configure .copy-row { display: flex; gap: 0.6rem; align-items: center; margin: 0.6rem 0; }
+.configure .hint { color: var(--ink-faint); font-size: 0.9rem; }
+.configure .qr-wrap { display: flex; gap: 2rem; align-items: flex-start; flex-wrap: wrap; }
+.configure .qr-wrap > div:first-child {
+  background: #fff;
+  padding: 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  line-height: 0;
+}
+
+/* ---------- Footer ---------- */
+.site-footer {
+  border-top: 1px solid var(--rule);
+  margin-top: 3rem;
+  padding: 1.5rem;
+  font-size: 0.85rem;
+  color: var(--ink-faint);
+}
+.footer-inner {
+  max-width: var(--max);
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.site-footer nav { display: flex; gap: 1rem; flex-wrap: wrap; }
+.site-footer a { color: var(--ink-faint); }
+
+@media (max-width: 560px) {
+  body { font-size: 16px; }
+  .hero .tagline { font-size: 1.35rem; }
+}

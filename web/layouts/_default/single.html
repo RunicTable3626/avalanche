@@ -1,0 +1,16 @@
+{{ define "main" }}
+<article class="prose">
+  <h1>{{ .Title }}</h1>
+  {{ if and (eq .Section "blog") .Date }}
+  <p class="byline">
+    <time datetime="{{ .Date.Format "2006-01-02" }}">{{ .Date.Format "January 2, 2006" }}</time>
+    {{ with .Params.author }} · {{ . }}{{ end }}
+  </p>
+  {{ end }}
+  {{ .Content }}
+
+  {{ if eq .Section "blog" }}
+  <p class="back"><a href="{{ "/blog" | relURL }}">← All posts</a></p>
+  {{ end }}
+</article>
+{{ end }}

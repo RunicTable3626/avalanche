@@ -1,0 +1,11 @@
+<header class="site-header">
+  <a class="brand" href="{{ "/" | relURL }}" aria-label="Avalanche home">
+    <img src="{{ "/wordmark_bub.svg" | relURL }}" alt="Avalanche" class="brand-mark">
+  </a>
+  <nav class="site-nav">
+    {{ range site.Menus.main }}
+      {{- $active := or ($.IsMenuCurrent "main" .) ($.HasMenuCurrent "main" .) -}}
+      <a href="{{ .URL }}"{{ if $active }} class="active"{{ end }}{{ if strings.HasPrefix .URL "http" }} rel="noopener"{{ end }}>{{ .Name }}</a>
+    {{ end }}
+  </nav>
+</header>

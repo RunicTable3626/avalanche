@@ -1,0 +1,37 @@
+baseURL = "https://theavalanche.net/"
+languageCode = "en-us"
+title = "Avalanche"
+enableRobotsTXT = true
+
+# Don't let Hugo emit its own generator meta / RSS we don't want noise from.
+disableKinds = ["taxonomy", "term"]
+
+[params]
+  tagline = "Comms-first organizing."
+  description = "Encrypted organizing for collective action. Standing on the shoulders of Signal to build the best organizing platform for conferences, rallies, and actions."
+  github = "https://github.com/lincolnq/avalanche"
+
+[markup.goldmark.renderer]
+  unsafe = true  # allow raw HTML in markdown (needed for the README-style content)
+
+[markup.highlight]
+  noClasses = false
+  style = "github"
+
+# Top navigation — order controlled by weight.
+[[menu.main]]
+  name = "Getting Started"
+  pageRef = "/getting-started"
+  weight = 10
+[[menu.main]]
+  name = "Docs"
+  pageRef = "/docs"
+  weight = 20
+[[menu.main]]
+  name = "Blog"
+  pageRef = "/blog"
+  weight = 30
+[[menu.main]]
+  name = "GitHub"
+  url = "https://github.com/lincolnq/actnet"
+  weight = 40

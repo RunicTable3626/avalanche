@@ -1,0 +1,35 @@
+{{ define "main" }}
+<article class="prose">
+  <h1>{{ .Title }}</h1>
+  {{ .Content }}
+
+  {{ $pages := .RegularPagesRecursive }}
+  {{ if eq .Section "blog" }}
+    {{/* Blog: reverse-chronological list with dates */}}
+    {{ with $pages }}
+    <ul class="post-list">
+      {{ range . }}
+      <li>
+        <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+        {{ with .Date }}<time datetime="{{ .Format "2006-01-02" }}">{{ .Format "Jan 2, 2006" }}</time>{{ end }}
+        {{ with .Description }}<p class="post-summary">{{ . }}</p>{{ end }}
+      </li>
+      {{ end }}
+    </ul>
+    {{ end }}
+  {{ else }}
+    {{/* Docs / other sections: weight-ordered index */}}
+    {{ $sorted := $pages.ByWeight }}
+    {{ with $sorted }}
+    <ul class="doc-list">
+      {{ range . }}
+      <li>
+        <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+        {{ with .Description }}<span class="doc-summary">{{ . }}</span>{{ end }}
+      </li>
+      {{ end }}
+    </ul>
+    {{ end }}
+  {{ end }}
+</article>
+{{ end }}

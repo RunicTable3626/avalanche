@@ -129,7 +129,8 @@ struct PasskeyExplainerView: View {
                     prepared: prepared,
                     serverUrl: inviteToken.serverUrl.absoluteString,
                     serverName: inviteToken.serverName,
-                    displayName: displayName
+                    displayName: displayName,
+                    inviteToken: inviteToken.token
                 )
 
                 if let redirect = inviteToken.postOnboardingRedirect,
@@ -157,6 +158,7 @@ struct PasskeyExplainerView: View {
                     serverUrl: inviteToken.serverUrl.absoluteString,
                     serverName: inviteToken.serverName,
                     displayName: displayName,
+                    inviteToken: inviteToken.token,
                     prfOutput: prfOutput
                 )
                 // createAccount sets isOnboarding = false, which navigates to MainTabView.

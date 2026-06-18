@@ -302,7 +302,7 @@ final class AppState: ObservableObject {
     /// Create a new account. `prfOutput` is the raw 32-byte WebAuthn PRF
     /// output from the just-completed passkey ceremony (or the hash of a
     /// recovery phrase). Pass empty Data to skip recovery setup.
-    func createAccount(serverUrl: String, serverName: String, displayName: String, prfOutput: Data = Data()) async throws {
+    func createAccount(serverUrl: String, serverName: String, displayName: String, inviteToken: String?, prfOutput: Data = Data()) async throws {
         let dir = dbDir
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -313,10 +313,13 @@ final class AppState: ObservableObject {
         let svc = _service
         let prf = prfOutput
         let dn = displayName
-        // Forward the raw invite token (the server evaluates it; docs/24). The
-        // dev server runs closed registration, so onboarding via an invite link
-        // carries the bootstrap secret in this token.
-        let token = pendingInviteToken
+        // Forward the raw invite token the onboarding flow validated (the server
+        // re-evaluates it; docs/24). Threaded explicitly from the InviteToken so
+        // every entry path works — pasted link, QR scan, and deep link all reach
+        // here with the token, not just the deep-link path that set
+        // `pendingInviteToken`. The dev server runs closed registration, so this
+        // token carries the bootstrap secret.
+        let token = inviteToken
         let core = try await Task.detached {
             try svc.createAccount(serverUrl: serverUrl, dbPath: dbPath, dbKey: dbKey, prfOutput: prf, displayName: dn, inviteToken: token)
         }.value
@@ -346,7 +349,8 @@ final class AppState: ObservableObject {
         prepared: any PreparedAccountProtocol,
         serverUrl: String,
         serverName: String,
-        displayName: String
+        displayName: String,
+        inviteToken: String?
     ) async throws {
         let dir = dbDir
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -357,7 +361,8 @@ final class AppState: ObservableObject {
 
         let svc = _service
         let dn = displayName
-        let token = pendingInviteToken
+        // Explicitly threaded from the validated InviteToken — see createAccount.
+        let token = inviteToken
         let core = try await Task.detached {
             try svc.finalizeAccount(prepared: prepared, dbPath: dbPath, dbKey: dbKey, displayName: dn, inviteToken: token)
         }.value

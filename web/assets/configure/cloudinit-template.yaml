@@ -242,7 +242,7 @@ write_files:
           qrencode
 
       #REGION:NODE:BEGIN
-      # Node.js 26 — runtime for the bots (adminbot/testbot need >= 26).
+      # Node.js 26 -- runtime for the bots (adminbot/testbot need >= 26).
       curl -fsSL https://deb.nodesource.com/setup_26.x | bash -
       apt-get install -y -qq nodejs
       #REGION:NODE:END
@@ -292,7 +292,7 @@ write_files:
       chown root:avalanche /etc/avalanche/avalanche.env
       chmod 640 /etc/avalanche/avalanche.env
 
-      # Server binary (per-arch tarball → bare binary).
+      # Server binary (per-arch tarball -> bare binary).
       curl -fsSL -o /tmp/avalanche-server.tar.gz "$RELEASE_BASE_URL/av-server-$TARGET.tar.gz"
       tar xzf /tmp/avalanche-server.tar.gz -C /tmp
       install -m 755 /tmp/av-server/avalanche-server /usr/local/lib/avalanche/avalanche-server
@@ -306,7 +306,7 @@ write_files:
       systemctl enable --now avalanche
 
       #REGION:ADMINBOT:BEGIN
-      # adminbot — co-located here, reusing the avalanche user. Registers at the
+      # adminbot -- co-located here, reusing the avalanche user. Registers at the
       # reserved superuser Project slug with the same shared secret while
       # registration is closed (docs/22, docs/24). Its SQLCipher state key is
       # generated locally and never leaves the box.
@@ -329,7 +329,7 @@ write_files:
       #REGION:ADMINBOT:END
 
       #REGION:TESTBOT:BEGIN
-      # testbot — demo bot: echoes messages, or talks via Claude if you add
+      # testbot -- demo bot: echoes messages, or talks via Claude if you add
       # ANTHROPIC_API_KEY to /etc/avalanche/testbot.env and restart it. Bound to
       # localhost only (no public port; ufw blocks it regardless).
       install -d -o root -g root -m 755 /usr/local/lib/avalanche-testbot

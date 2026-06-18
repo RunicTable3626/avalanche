@@ -76,9 +76,17 @@
      injected here at build time. Kept out of the template literal so Hugo's
      html/template engine doesn't try to parse the YAML/shell as HTML.
      assets/configure/cloudinit-template.yaml is the canonical bootstrap. */}}
+{{ $cloudinit := (resources.Get "configure/cloudinit-template.yaml").Content }}
+{{/* Guard: cloud-init user-data must be pure ASCII. A stray em-dash, arrow, or
+     smart-quote becomes a multi-byte UTF-8 sequence whose 0x80 continuation
+     byte makes cloud-init's YAML parser reject the whole config. Fail the Hugo
+     build (hugo / hugo server) loudly if any non-ASCII sneaks into the template. */}}
+{{ with findRE `[^\x00-\x7F]` $cloudinit }}
+  {{ errorf "cloudinit-template.yaml contains a non-ASCII character (first match: %q). cloud-init requires pure ASCII — replace em-dashes/arrows/smart-quotes with ASCII (e.g. -- or ->)." (index . 0) }}
+{{ end }}
 <script>
 'use strict';
-const TEMPLATE = {{ (resources.Get "configure/cloudinit-template.yaml").Content | jsonify | safeJS }};
+const TEMPLATE = {{ $cloudinit | jsonify | safeJS }};
 {{ (resources.Get "configure/configure.js").Content | safeJS }}
 </script>
 {{ end }}

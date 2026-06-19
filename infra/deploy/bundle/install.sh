@@ -33,8 +33,11 @@ if [ ! -f /swapfile ]; then
 fi
 
 cat > /etc/sysctl.d/99-avalanche.conf <<EOF
-vm.overcommit_memory = 2
-vm.overcommit_ratio = 80
+# Heuristic overcommit (0), not strict (2): Go (Caddy) and Node reserve large
+# virtual regions at startup, and strict accounting refuses them even with RAM
+# free -- manufacturing OOMs (e.g. \`caddy validate\`). The swapfile cushions
+# genuine pressure.
+vm.overcommit_memory = 0
 vm.swappiness = 10
 EOF
 sysctl --system >/dev/null

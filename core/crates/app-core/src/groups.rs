@@ -734,14 +734,16 @@ async fn submit_actions(
                 // the copy other members derive when they pull `/changes`).
                 let now_ms = Timestamp::now().as_millis();
                 let events = derive_change_events(
-                    group_id_b64_s,
-                    resp.revision,
+                    &ChangeContext {
+                        group_id_b64: group_id_b64_s,
+                        new_revision: resp.revision,
+                        actor_did: did,
+                        group_key: &group_key,
+                        pre: &pre_state,
+                        post: &state,
+                        now_ms,
+                    },
                     &actions,
-                    did,
-                    &group_key,
-                    &pre_state,
-                    &state,
-                    now_ms,
                 );
                 for ev in &events {
                     persist_group_event(store, ev).await?;
@@ -1250,21 +1252,35 @@ fn expiry_label(seconds: u32) -> String {
     }
 }
 
-/// Reconstruct the timeline entries for a single change. `pre` is the state
-/// before the change applied (it still contains removed members, so "X was
-/// removed" resolves); `post` is the state after (it contains added/promoted
-/// members, so "X joined" resolves). `actor_did` comes from the sub-encrypted
+/// Inputs to [`derive_change_events`] for one change. `pre` is the state before
+/// the change (still contains removed members, so "X was removed" resolves);
+/// `post` is the state after (contains added/promoted members, so "X joined"
+/// resolves). `actor_did` is the change author from the sub-encrypted
 /// `change_meta`. `new_revision` is the revision this change produced.
-fn derive_change_events(
-    group_id_b64: &str,
+#[derive(Clone, Copy)]
+struct ChangeContext<'a> {
+    group_id_b64: &'a str,
     new_revision: i64,
-    actions: &GroupActionsWire,
-    actor_did: &str,
-    group_key: &GroupKey,
-    pre: &gproto::GroupState,
-    post: &gproto::GroupState,
+    actor_did: &'a str,
+    group_key: &'a GroupKey,
+    pre: &'a gproto::GroupState,
+    post: &'a gproto::GroupState,
     now_ms: i64,
-) -> Vec<GroupMetadataEvent> {
+}
+
+/// Reconstruct the timeline entries for a single change.
+fn derive_change_events(ctx: &ChangeContext, actions: &GroupActionsWire) -> Vec<GroupMetadataEvent> {
+    // Destructure into the same local names the body uses (all fields are Copy
+    // — references + i64), so the derivation logic below reads unchanged.
+    let ChangeContext {
+        group_id_b64,
+        new_revision,
+        actor_did,
+        group_key,
+        pre,
+        post,
+        now_ms,
+    } = *ctx;
     let mut out = Vec::new();
     let actor_emi_b64 = if actor_did.is_empty() {
         String::new()
@@ -1574,14 +1590,16 @@ pub async fn apply_pending_changes(
         // submit time (§3.6); read it back here for attribution.
         let actor_did = post.last_change_actor_did.clone();
         events.extend(derive_change_events(
-            group_id_b64_s,
-            ch.revision + 1,
+            &ChangeContext {
+                group_id_b64: group_id_b64_s,
+                new_revision: ch.revision + 1,
+                actor_did: &actor_did,
+                group_key: &group_key,
+                pre,
+                post,
+                now_ms,
+            },
             &actions,
-            &actor_did,
-            &group_key,
-            pre,
-            post,
-            now_ms,
         ));
     }
 
@@ -2643,7 +2661,18 @@ mod metadata_event_tests {
         pre: gproto::GroupState,
         post: gproto::GroupState,
     ) -> Vec<GroupMetadataEvent> {
-        derive_change_events("group-b64", 5, &actions, actor, gk, &pre, &post, 1_000)
+        derive_change_events(
+            &ChangeContext {
+                group_id_b64: "group-b64",
+                new_revision: 5,
+                actor_did: actor,
+                group_key: gk,
+                pre: &pre,
+                post: &post,
+                now_ms: 1_000,
+            },
+            &actions,
+        )
     }
 
     #[test]

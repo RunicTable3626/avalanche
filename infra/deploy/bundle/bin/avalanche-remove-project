@@ -16,4 +16,8 @@ rm -f "/etc/systemd/system/$u"
 systemctl daemon-reload
 rm -rf "${CURRENT:?}/$name"
 rm -f "$ETC/$name.env"
+# Refresh the client directory + Caddy routes (now without this Project).
+regenerate_projects
+systemctl reload caddy 2>/dev/null || true
+systemctl try-restart avalanche 2>/dev/null || true
 log "$name removed (state under $SHARED/$name left intact)"

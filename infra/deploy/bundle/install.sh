@@ -111,7 +111,10 @@ if has server; then
   HOST="$(echo "$SERVER_URL" | sed -E 's#^https?://##; s#/.*##')"
   cat > /etc/caddy/Caddyfile <<EOF
 $HOST {
-    reverse_proxy 127.0.0.1:3000
+    import /etc/caddy/avalanche-projects.caddy
+    handle {
+        reverse_proxy 127.0.0.1:3000
+    }
     encode gzip
     log {
         output stdout
@@ -119,6 +122,7 @@ $HOST {
     }
 }
 EOF
+  : > /etc/caddy/avalanche-projects.caddy   # import target; filled by regenerate_projects
   if [ ! -f "$ETC/avalanche.env" ]; then
     cat > "$ETC/avalanche.env" <<EOF
 SERVER_URL=$SERVER_URL
@@ -155,6 +159,7 @@ ln -sfn "$TAG" "$CURRENT"
 systemctl daemon-reload
 
 if has server; then
+  regenerate_projects       # PROJECTS env + Caddy /p/<slug>/ routes for installed web Projects
   systemctl enable caddy
   systemctl restart caddy   # apt already started it on the stock config
   sudo -u avalanche env DATABASE_URL='postgresql:///avalanche?host=/var/run/postgresql' \

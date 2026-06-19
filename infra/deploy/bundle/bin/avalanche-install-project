@@ -29,4 +29,9 @@ u="$(component_unit "$name")"
 install -m 644 "$CURRENT/deploy/systemd/$u" "/etc/systemd/system/$u"
 systemctl daemon-reload
 systemctl enable --now "avalanche-$name"
+# Refresh the client directory + Caddy routes, then pick them up (no-ops on a
+# bot-only host with no server/caddy).
+regenerate_projects
+systemctl reload caddy 2>/dev/null || true
+systemctl try-restart avalanche 2>/dev/null || true
 log "$name installed and started"

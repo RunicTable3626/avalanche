@@ -118,6 +118,7 @@ EOF
 HOMESERVER_URL=$SERVER_URL
 REGISTRATION_SHARED_SECRET=$REGISTRATION_SHARED_SECRET
 TESTBOT_BIND_ADDR=127.0.0.1:3001
+TESTBOT_BASE_PATH=/p/testbot/
 TESTBOT_LOG=info
 EOF
       ;;
@@ -125,4 +126,44 @@ EOF
   esac
   chown root:avalanche "$f"
   chmod 640 "$f"
+}
+
+# Web descriptor for Projects that serve a webview: "PORT|NAME|DESCRIPTION".
+# Empty for headless Projects (e.g. adminbot) and unknown names. This is the one
+# spot that knows a Project's public face; the updater stays Project-agnostic.
+project_web_meta() {
+  case "$1" in
+    testbot) echo "3001|Testbot|Chat with an AI bot" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Regenerate the managed PROJECTS directory + Caddy routes from the web Projects
+# installed in current/. Server host only (needs avalanche.env for SERVER_URL
+# and a Caddyfile that imports the snippet). Callers reload caddy + restart
+# avalanche afterward. The `projects` DB table is unrelated -- this only feeds
+# the client-facing directory at GET /v1/projects (docs/42, docs/02 backlog).
+regenerate_projects() {
+  [ -f "$ETC/avalanche.env" ] || return 0   # not a server host
+  local server_url snippet="/etc/caddy/avalanche-projects.caddy"
+  local c meta port name desc entries=() json
+  server_url="$(grep '^SERVER_URL=' "$ETC/avalanche.env" | cut -d= -f2-)"
+  server_url="${server_url%/}"
+  : > "$snippet"
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    meta="$(project_web_meta "$c")"
+    [ -n "$meta" ] || continue
+    IFS='|' read -r port name desc <<< "$meta"
+    entries+=("{\"name\":\"$name\",\"url\":\"$server_url/p/$c/\",\"description\":\"$desc\"}")
+    cat >> "$snippet" <<EOF
+handle_path /p/$c/* {
+    reverse_proxy 127.0.0.1:$port
+}
+EOF
+  done < <(deployment_components "$CURRENT")
+  if [ "${#entries[@]}" -eq 0 ]; then json="[]"; else json="[$(IFS=,; echo "${entries[*]}")]"; fi
+  printf 'PROJECTS=%s\n' "$json" > "$ETC/projects.env"
+  chown root:avalanche "$ETC/projects.env"
+  chmod 640 "$ETC/projects.env"
 }

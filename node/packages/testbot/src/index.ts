@@ -35,6 +35,7 @@ interface Env {
   bindPort: number;
   logLevel: string;
   sharedSecret?: string;
+  basePath: string;
 }
 
 function readEnv(): Env {
@@ -47,11 +48,18 @@ function readEnv(): Env {
   if (!Number.isInteger(bindPort)) {
     throw new Error(`invalid TESTBOT_BIND_ADDR: ${bindAddr}`);
   }
+  // Path prefix this Project is served under (e.g. "/p/testbot/" behind Caddy).
+  // Used only to render <base href> so the page's relative URLs resolve under
+  // the prefix. Defaults to "/" (dev hits the port directly, no prefix).
+  let basePath = process.env.TESTBOT_BASE_PATH ?? "/";
+  if (!basePath.startsWith("/")) basePath = `/${basePath}`;
+  if (!basePath.endsWith("/")) basePath = `${basePath}/`;
   return {
     homeserverUrl: process.env.HOMESERVER_URL ?? "http://localhost:3000",
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || undefined,
     bindHost,
     bindPort,
+    basePath,
     logLevel: process.env.TESTBOT_LOG ?? "info",
     // Bootstrap secret for closed-registration servers (docs/24). Unset on an
     // open server, where it isn't needed.
@@ -116,11 +124,12 @@ async function verifyToken(env: Env, authHeader: string | undefined): Promise<st
 
 // ── Web UI ───────────────────────────────────────────────────────────────────
 
-const INDEX_HTML = `<!DOCTYPE html>
+const indexHtml = (basePath: string) => `<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <base href="${basePath}">
     <title>Testbot</title>
     <style>
         body { font-family: -apple-system, system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 20px; }
@@ -146,7 +155,7 @@ const INDEX_HTML = `<!DOCTYPE html>
             status.textContent = 'Creating bot...';
 
             try {
-                const resp = await fetch('/api/text-me', {
+                const resp = await fetch('api/text-me', {
                     method: 'POST',
                     headers: {
                         'Authorization': 'Bearer ' + token,
@@ -336,7 +345,7 @@ async function handleRequest(env: Env, req: IncomingMessage, res: ServerResponse
 
   if (req.method === "GET" && url.pathname === "/") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(INDEX_HTML);
+    res.end(indexHtml(env.basePath));
     return;
   }
 

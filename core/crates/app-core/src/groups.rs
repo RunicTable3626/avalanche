@@ -793,6 +793,7 @@ pub async fn invite_member(
                 role: role_from_i16(role) as i32,
                 inviter_did: did.to_string(),
                 invited_at_ms: Timestamp::now().as_millis(),
+                invited_did: recipient_did.to_string(),
             });
             Ok(GroupActionsWire {
                 invite_members: vec![InviteMemberWire {
@@ -1168,6 +1169,37 @@ fn emi_b64_to_did(state: &gproto::GroupState, emi_b64: &str) -> String {
         .unwrap_or_default()
 }
 
+/// DID of a pending invitee carrying `emi_b64`, from the cleartext `invited_did`
+/// the inviter stamped (§3.6). Empty if not found / not known.
+fn pending_invited_did(state: &gproto::GroupState, emi_b64: &str) -> String {
+    state
+        .pending_invites
+        .iter()
+        .find(|p| b64(&p.encrypted_member_id) == emi_b64)
+        .map(|p| p.invited_did.clone())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_default()
+}
+
+/// The member present in `post` but not `pre` (by encrypted_member_id) — i.e.
+/// the one a join/promote added. Returns its `(did, emi_b64)`. Used to attribute
+/// "X joined" robustly from the membership diff, independent of whether the
+/// joiner's client stamped `last_change_actor_did`.
+fn newly_added_member(
+    pre: &gproto::GroupState,
+    post: &gproto::GroupState,
+) -> Option<(String, String)> {
+    let pre_emis: std::collections::HashSet<Vec<u8>> = pre
+        .members
+        .iter()
+        .map(|m| m.encrypted_member_id.clone())
+        .collect();
+    post.members
+        .iter()
+        .find(|m| !pre_emis.contains(&m.encrypted_member_id))
+        .map(|m| (m.did.clone(), b64(&m.encrypted_member_id)))
+}
+
 fn member_joined_at(state: &gproto::GroupState, emi_b64: &str) -> Option<i64> {
     state
         .members
@@ -1190,13 +1222,6 @@ fn pending_requested_at(state: &gproto::GroupState, emi_b64: &str) -> Option<i64
         .iter()
         .find(|p| b64(&p.encrypted_member_id) == emi_b64)
         .map(|p| p.requested_at_ms)
-}
-
-fn is_pending_approval(state: &gproto::GroupState, emi_b64: &str) -> bool {
-    state
-        .pending_approvals
-        .iter()
-        .any(|p| b64(&p.encrypted_member_id) == emi_b64)
 }
 
 fn actor_label(actor_did: &str) -> &str {
@@ -1260,6 +1285,22 @@ fn derive_change_events(
             summary,
         }
     };
+    // For a self-action (join/promote) the actor and target are the same member,
+    // identified from the membership diff rather than the captured `actor_did`.
+    let make_self = |kind, joiner_did: String, joiner_emi: String, occurred_at_ms: i64, summary: String| {
+        GroupMetadataEvent {
+            group_id: group_id_b64.to_string(),
+            revision: new_revision,
+            kind,
+            actor_did: joiner_did.clone(),
+            target_did: joiner_did,
+            target_emi: joiner_emi,
+            occurred_at_ms,
+            expiry_seconds: 0,
+            new_title: String::new(),
+            summary,
+        }
+    };
     let resolve = |emi: &str| {
         let d = emi_b64_to_did(post, emi);
         if d.is_empty() {
@@ -1278,25 +1319,48 @@ fn derive_change_events(
 
     for inv in &actions.invite_members {
         let emi = inv.encrypted_member_id.clone();
-        let tdid = resolve(&emi);
+        // The invitee isn't a member yet, so resolve from the stamped
+        // `invited_did` (the inviter knows the DID), then fall back to the
+        // members list.
+        let tdid = {
+            let d = pending_invited_did(post, &emi);
+            if d.is_empty() { resolve(&emi) } else { d }
+        };
         let ts = pending_invited_at(post, &emi).unwrap_or(now_ms);
         let summary = format!("{} invited {}", actor_label(actor_did), who(&tdid, "a new member"));
         out.push(make(GroupEventKind::MemberInvited, tdid, emi, ts, summary));
     }
+    // The membership diff is authoritative for self-joins, but only when we
+    // actually have the pre-change state — an empty `pre` (a decode gap) would
+    // make every post member look "new", so fall back to the change-actor stamp.
+    let joiner = if pre.members.is_empty() {
+        None
+    } else {
+        newly_added_member(pre, post)
+    };
     if actions.promote_pending_members.is_some() {
-        let ts = member_joined_at(post, &actor_emi_b64).unwrap_or(now_ms);
-        let summary = format!("{} joined the group", actor_label(actor_did));
-        out.push(make(GroupEventKind::MemberJoined, actor_did.to_string(), actor_emi_b64.clone(), ts, summary));
+        // A promote is a self-action: the joiner is the member it added, which
+        // we read from the membership diff (robust even if the joiner's client
+        // didn't stamp `last_change_actor_did`).
+        let (jd, je) = joiner
+            .clone()
+            .unwrap_or_else(|| (actor_did.to_string(), actor_emi_b64.clone()));
+        let ts = member_joined_at(post, &je).unwrap_or(now_ms);
+        let summary = format!("{} joined the group", actor_label(&jd));
+        out.push(make_self(GroupEventKind::MemberJoined, jd, je, ts, summary));
     }
     if actions.join_via_link.is_some() {
-        if is_pending_approval(post, &actor_emi_b64) {
+        if let Some((jd, je)) = joiner.clone() {
+            // Landed directly as a member.
+            let ts = member_joined_at(post, &je).unwrap_or(now_ms);
+            let summary = format!("{} joined via invite link", actor_label(&jd));
+            out.push(make_self(GroupEventKind::MemberJoinedViaLink, jd, je, ts, summary));
+        } else {
+            // Landed in the pending-approval queue (request-to-join). The
+            // requester isn't a member, so fall back to the change actor.
             let ts = pending_requested_at(post, &actor_emi_b64).unwrap_or(now_ms);
             let summary = format!("{} requested to join", actor_label(actor_did));
             out.push(make(GroupEventKind::MemberRequestedToJoin, actor_did.to_string(), actor_emi_b64.clone(), ts, summary));
-        } else {
-            let ts = member_joined_at(post, &actor_emi_b64).unwrap_or(now_ms);
-            let summary = format!("{} joined via invite link", actor_label(actor_did));
-            out.push(make(GroupEventKind::MemberJoinedViaLink, actor_did.to_string(), actor_emi_b64.clone(), ts, summary));
         }
     }
     if let Some(emi) = &actions.decline_invite {
@@ -2561,6 +2625,7 @@ mod metadata_event_tests {
             role: gproto::Role::Member as i32,
             inviter_did: ALICE.to_string(),
             invited_at_ms,
+            invited_did: did.to_string(),
         }
     }
 
@@ -2623,9 +2688,38 @@ mod metadata_event_tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].kind, GroupEventKind::MemberInvited);
         assert_eq!(evs[0].actor_did, ALICE);
+        // Resolved from the stamped `invited_did`, not just the EMI.
+        assert_eq!(evs[0].target_did, BOB);
         assert_eq!(evs[0].target_emi, emi(&gk, BOB));
         assert_eq!(evs[0].occurred_at_ms, 7_777);
         assert!(evs[0].summary.contains("invited"));
+    }
+
+    #[test]
+    fn join_attributed_from_membership_diff_without_actor_stamp() {
+        // Even when the joiner's client didn't stamp `last_change_actor_did`
+        // (empty actor), the joiner is identified from the membership diff.
+        let gk = GroupKey::generate();
+        let actions = GroupActionsWire {
+            promote_pending_members: Some(PromoteSelfWire {
+                encrypted_profile_key: b64(b""),
+                group_push_pseudonym: b64(b"x"),
+            }),
+            ..Default::default()
+        };
+        let pre = gproto::GroupState {
+            members: vec![member(&gk, ALICE, 1)],
+            ..Default::default()
+        };
+        let post = gproto::GroupState {
+            members: vec![member(&gk, ALICE, 1), member(&gk, BOB, 2)],
+            // No last_change_actor_did — simulates a joiner on an older build.
+            ..Default::default()
+        };
+        let evs = derive(&gk, actions, "", pre, post);
+        assert_eq!(evs[0].kind, GroupEventKind::MemberJoined);
+        assert_eq!(evs[0].actor_did, BOB, "joiner resolved from the diff");
+        assert!(evs[0].summary.contains(BOB));
     }
 
     #[test]
@@ -2660,20 +2754,27 @@ mod metadata_event_tests {
             }),
             ..Default::default()
         };
-        // Landed directly as a member → joined via link.
-        let post_member = gproto::GroupState {
-            members: vec![member(&gk, CAROL, 11)],
+        // A join happens into an existing group, so `pre` always has a member.
+        let pre = || gproto::GroupState {
+            members: vec![member(&gk, ALICE, 1)],
             ..Default::default()
         };
-        let evs = derive(&gk, actions(), CAROL, gproto::GroupState::default(), post_member);
+        // Landed directly as a member → joined via link (resolved from the diff).
+        let post_member = gproto::GroupState {
+            members: vec![member(&gk, ALICE, 1), member(&gk, CAROL, 11)],
+            ..Default::default()
+        };
+        let evs = derive(&gk, actions(), CAROL, pre(), post_member);
         assert_eq!(evs[0].kind, GroupEventKind::MemberJoinedViaLink);
+        assert_eq!(evs[0].actor_did, CAROL);
 
-        // Landed in pending approval → requested to join.
+        // Landed in pending approval → requested to join (not a new member).
         let post_pending = gproto::GroupState {
+            members: vec![member(&gk, ALICE, 1)],
             pending_approvals: vec![pending_approval(&gk, CAROL, 22)],
             ..Default::default()
         };
-        let evs = derive(&gk, actions(), CAROL, gproto::GroupState::default(), post_pending);
+        let evs = derive(&gk, actions(), CAROL, pre(), post_pending);
         assert_eq!(evs[0].kind, GroupEventKind::MemberRequestedToJoin);
         assert_eq!(evs[0].occurred_at_ms, 22);
     }

@@ -1222,6 +1222,15 @@ impl AppCore {
     }
 
     #[napi]
+    pub async fn set_group_expiry(&self, group_id: String, expiry_seconds: u32) -> napi::Result<()> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.set_group_expiry(group_id, expiry_seconds))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    #[napi]
     pub async fn apply_pending_group_changes(&self, group_id: String) -> napi::Result<i64> {
         let core = self.inner.clone();
         tokio::task::spawn_blocking(move || core.apply_pending_group_changes(group_id))

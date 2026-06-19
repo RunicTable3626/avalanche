@@ -64,14 +64,16 @@ message Member {
 }
 
 message PendingInvite {
-  // Full DID is unknown to the inviter — they only had the
-  // encrypted_member_id from the directory. Carry the EMI; clients with
-  // the master key can map it back to a DID for display via the local
-  // contact graph.
   bytes encrypted_member_id = 1;
   Role role = 2;
   string inviter_did = 3;
   int64 invited_at_ms = 4;
+  // DID of the invitee, when the inviter knows it (the app-core invite flow
+  // always invites by DID). Cleartext inside the encrypted blob like
+  // `creator_did`/member DIDs, so any member can render "Alice invited Bob"
+  // and the invitee appears named in the pending list. Empty for a future
+  // directory flow where the inviter only holds the encrypted_member_id.
+  string invited_did = 5;
 }
 
 message PendingApproval {

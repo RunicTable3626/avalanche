@@ -145,6 +145,14 @@ pub struct StoredMessageFfi {
     pub edit_count: u32,
     /// True = FOR_EVERYONE tombstone (render "This message was deleted").
     pub deleted: bool,
+    /// 0 = normal chat bubble; >0 = a system/metadata timeline entry
+    /// (docs/03 §3.6 group event). Render kind>0 as a centered grey line.
+    /// The numeric values match `GroupEventKind` order; `metadata` carries the
+    /// structured actor/target for localization.
+    pub kind: i64,
+    /// JSON for system rows (`{ "event": <kind>, "actor_did": .., "target_did": ..,
+    /// "target_emi": .. }`); `None` for normal chat messages.
+    pub metadata: Option<String>,
 }
 
 /// A reaction on a message (docs/33-reactions.md), keyed by the target's wire
@@ -200,6 +208,8 @@ fn stored_to_ffi(m: store::messages::HistoryMessage) -> StoredMessageFfi {
         delivery_status: m.delivery_status,
         edit_count: m.edit_count,
         deleted: m.deleted_at.is_some(),
+        kind: m.kind,
+        metadata: m.metadata,
     }
 }
 
@@ -414,6 +424,14 @@ pub enum IncomingEvent {
     /// appear without an app restart. Same "refresh the list" contract as
     /// `GroupInvite`, but driven by the storage service rather than a DM.
     StorageSynced,
+    /// A group membership/metadata change was derived from the change log
+    /// (docs/03 §3.6) while applying pending changes — e.g. "Alice added Bob",
+    /// "Bob left", "Carol was made an admin". The store already holds the
+    /// matching system row in `message_history`; the UI should refresh the
+    /// conversation timeline. Emitted once per derived entry.
+    GroupMetadataChanged {
+        event: crate::groups::GroupMetadataEvent,
+    },
 }
 
 /// Admin-only events surfaced to a separate queue, drained by
@@ -1713,6 +1731,10 @@ impl AppCore {
                 // placeholders that are never written for an existing row.
                 edit_count: 0,
                 deleted_at: None,
+                // Normal chat message. System/metadata rows are written by
+                // the group-event path, never through this FFI.
+                kind: 0,
+                metadata: None,
             }).await.map_err(AppError::from)
         }).map_err(AppErrorFfi::from)
     }

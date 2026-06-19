@@ -53,24 +53,33 @@ struct ConversationView: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(messages) { message in
-                        MessageBubble(
-                            message: message,
-                            isMe: message.senderAccountId == conversation.accountId,
-                            isBot: isBotSender(message),
-                            reactions: appState.reactions(for: message),
-                            myDid: conversation.accountId,
-                            actionsEnabled: actionsEnabled,
-                            canEdit: canEdit(message),
-                            onToggleReaction: { emoji in
-                                appState.toggleReaction(message: message, emoji: emoji, conversation: conversation)
-                            },
-                            onEdit: { startEditing(message) },
-                            onDelete: { forEveryone in
-                                appState.deleteMessage(message: message, forEveryone: forEveryone, conversation: conversation)
-                            },
-                            onShowHistory: { showHistory(message) }
-                        )
-                        .id(message.sentAtMs)
+                        if message.isSystemEvent {
+                            // Group membership/metadata event (docs/03 §3.6) —
+                            // a centered grey line, not a chat bubble.
+                            GroupSystemEventRow(
+                                text: appState.groupEventText(message, accountId: conversation.accountId)
+                            )
+                            .id(message.sentAtMs)
+                        } else {
+                            MessageBubble(
+                                message: message,
+                                isMe: message.senderAccountId == conversation.accountId,
+                                isBot: isBotSender(message),
+                                reactions: appState.reactions(for: message),
+                                myDid: conversation.accountId,
+                                actionsEnabled: actionsEnabled,
+                                canEdit: canEdit(message),
+                                onToggleReaction: { emoji in
+                                    appState.toggleReaction(message: message, emoji: emoji, conversation: conversation)
+                                },
+                                onEdit: { startEditing(message) },
+                                onDelete: { forEveryone in
+                                    appState.deleteMessage(message: message, forEveryone: forEveryone, conversation: conversation)
+                                },
+                                onShowHistory: { showHistory(message) }
+                            )
+                            .id(message.sentAtMs)
+                        }
                     }
                 }
                 .padding()
@@ -460,3 +469,19 @@ private func conversationPreview(_ conversation: Conversation, _ messages: [Mess
     ])
 }
 #endif
+
+/// A centered grey system line in the conversation timeline for a group
+/// membership/metadata event (docs/03 §3.6) — "Alice added Bob", "Bob left", etc.
+struct GroupSystemEventRow: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+            .accessibilityAddTraits(.isStaticText)
+    }
+}

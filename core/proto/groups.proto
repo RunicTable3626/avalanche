@@ -18,6 +18,13 @@ message GroupState {
   // Monotonically increasing revision. Equals the server's
   // `current_revision`.
   uint64 revision = 4;
+  // DID of the member whose change produced *this* state (docs/03 §3.6). Set
+  // by the submitting client when it builds the new state, so other clients can
+  // attribute the change ("Alice added Bob") when rendering the timeline.
+  // Carried inside the encrypted blob — the server stores the blob opaquely and
+  // never re-serializes it, so attribution survives any server version (unlike
+  // a field in the server-parsed actions). Empty for the founder's revision 0.
+  string last_change_actor_did = 5;
 
   // Group metadata.
   string title = 10;

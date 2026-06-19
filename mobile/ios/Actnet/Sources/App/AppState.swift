@@ -542,6 +542,48 @@ final class AppState: ObservableObject {
         return name == did ? "Unknown" : name
     }
 
+    /// Human-readable line for a group system/metadata event (docs/03 §3.6),
+    /// resolving actor/target DIDs to display names ("You" for self). Falls
+    /// back to the stored English summary if the structured metadata is
+    /// missing or unparseable.
+    func groupEventText(_ message: Message, accountId: String) -> String {
+        guard let ev = message.groupEvent else { return message.body }
+        let actor = eventName(ev.actorDid, accountId: accountId, capitalized: true)
+        let target = eventName(ev.targetDid, accountId: accountId, capitalized: false)
+        switch ev.event {
+        case .memberJoined: return "\(actor) joined"
+        case .memberJoinedViaLink: return "\(actor) joined via invite link"
+        case .memberRequestedToJoin: return "\(actor) requested to join"
+        case .memberInvited: return "\(actor) invited \(target)"
+        case .memberLeft: return "\(actor) left"
+        case .memberRemoved: return "\(actor) removed \(target)"
+        case .joinRequestApproved: return "\(actor) approved \(target)'s request to join"
+        case .joinRequestDenied: return "\(actor) declined a join request"
+        case .inviteDeclined: return "\(actor) declined the invitation"
+        case .joinRequestCancelled: return "\(actor) cancelled their request to join"
+        case .roleChangedToAdmin: return "\(actor) made \(target) an admin"
+        case .roleChangedToMember: return "\(actor) removed \(target) as an admin"
+        case .titleChanged:
+            // Group names are never empty; the empty arm is a defensive fallback.
+            return ev.newTitle.isEmpty
+                ? "\(actor) changed the group name"
+                : "\(actor) changed the group name to \u{201C}\(ev.newTitle)\u{201D}"
+        case .descriptionChanged: return "\(actor) changed the group description"
+        case .expiryChanged:
+            if ev.expirySeconds == 0 {
+                return "\(actor) turned off disappearing messages"
+            }
+            return "\(actor) set disappearing messages to \(DisappearingMessagesPicker.label(for: ev.expirySeconds))"
+        case .policyChanged: return "\(actor) changed the group settings"
+        }
+    }
+
+    private func eventName(_ did: String, accountId: String, capitalized: Bool) -> String {
+        if did.isEmpty { return capitalized ? "Someone" : "someone" }
+        if did == accountId { return capitalized ? "You" : "you" }
+        return resolvedName(for: did, accountId: accountId)
+    }
+
     /// Whether a DID is a bot account, for avatar/badge presentation
     /// (docs/54-bot-presentation.md). Sourced from the same server account
     /// record `resolveDisplayName` consults, cached alongside the name, so it
@@ -700,7 +742,9 @@ final class AppState: ObservableObject {
             readAtMs: nowMs,
             deliveryStatus: UInt8(DeliveryStatus.sending.rawValue),
             editCount: 0,
-            deleted: false
+            deleted: false,
+            kind: 0,
+            metadata: nil
         )
         try await Task.detached { try core.saveMessage(msg: pending) }.value
 
@@ -712,7 +756,7 @@ final class AppState: ObservableObject {
             let sent = StoredMessageFfi(
                 id: messageId, conversationId: conversationId, senderDid: senderAccountId,
                 body: text, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
-                deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false
+                deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil
             )
             Task.detached { try? core.saveMessage(msg: sent) }
         } catch {
@@ -721,7 +765,7 @@ final class AppState: ObservableObject {
             let failed = StoredMessageFfi(
                 id: messageId, conversationId: conversationId, senderDid: senderAccountId,
                 body: text, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
-                deliveryStatus: UInt8(DeliveryStatus.failed.rawValue), editCount: 0, deleted: false
+                deliveryStatus: UInt8(DeliveryStatus.failed.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil
             )
             Task.detached { try? core.saveMessage(msg: failed) }
             throw error
@@ -832,7 +876,14 @@ final class AppState: ObservableObject {
                 let date = s.lastMessage.map {
                     Date(timeIntervalSince1970: TimeInterval($0.sentAtMs) / 1000.0)
                 }
+                // Carry the body + (for system events) the structured kind /
+                // metadata so the row renders the preview reactively, resolving
+                // DIDs to names at display time. Freezing groupEventText here
+                // would bake in "Unknown" before names are cached.
                 let preview = s.lastMessage?.body
+                let lastKind = Int(s.lastMessage?.kind ?? 0)
+                let lastMeta = s.lastMessage?.metadata
+                let lastSender = s.lastMessage?.senderDid
                 if let groupId = Self.groupId(from: s.conversationId) {
                     // `group_title` comes resolved from local state in
                     // `loadConversations`; cache it so later rebuilds and
@@ -855,6 +906,9 @@ final class AppState: ObservableObject {
                         groupId: groupId,
                         lastMessage: preview,
                         lastMessageDate: date,
+                        lastMessageKind: lastKind,
+                        lastMessageMetadata: lastMeta,
+                        lastMessageSenderDid: lastSender,
                         isGroup: true
                     ))
                     continue
@@ -909,6 +963,42 @@ final class AppState: ObservableObject {
         return String(conversationId.dropFirst(prefix.count))
     }
 
+    /// Re-read a group's timeline from the store, but only if it's already
+    /// loaded in memory — used after `groupMetadataChanged` so a freshly
+    /// persisted system row shows in the open conversation. (If the
+    /// conversation isn't loaded yet, the next `loadMessagesFromStore` picks up
+    /// the row anyway; we must not seed a partial array here, or the load-once
+    /// guard would then hide the rest of the history.)
+    func reloadGroupTimelineIfLoaded(groupId: String, accountId: String) {
+        guard let core = cores[accountId] else { return }
+        let convId = groupConversationId(groupId)
+        guard messagesByConversation[convId] != nil else { return }
+        Task.detached { [weak self] in
+            guard let msgs = try? core.loadMessages(conversationId: convId) else { return }
+            let messages = msgs.map(Self.message(from:))
+            await MainActor.run { self?.messagesByConversation[convId] = messages }
+        }
+    }
+
+    /// Map a stored FFI message row to the view `Message` model. `nonisolated`
+    /// so it can run inside the detached store-read tasks.
+    nonisolated static func message(from m: StoredMessageFfi) -> Message {
+        Message(
+            id: m.id,
+            conversationId: m.conversationId,
+            senderAccountId: m.senderDid,
+            body: m.body,
+            sentAtMs: m.sentAtMs,
+            editedAtMs: m.editedAtMs,
+            readAtMs: m.readAtMs,
+            deliveryStatus: DeliveryStatus(rawValue: Int(m.deliveryStatus)) ?? .sent,
+            editCount: Int(m.editCount),
+            isDeleted: m.deleted,
+            kind: Int(m.kind),
+            metadata: m.metadata
+        )
+    }
+
     func loadMessagesFromStore(conversationId: String, accountId: String) {
         guard let core = cores[accountId] else { return }
         // Only load if we haven't already loaded for this conversation.
@@ -916,20 +1006,7 @@ final class AppState: ObservableObject {
         let convId = conversationId
         Task.detached { [weak self] in
             guard let msgs = try? core.loadMessages(conversationId: convId) else { return }
-            let messages = msgs.map { m in
-                Message(
-                    id: m.id,
-                    conversationId: m.conversationId,
-                    senderAccountId: m.senderDid,
-                    body: m.body,
-                    sentAtMs: m.sentAtMs,
-                    editedAtMs: m.editedAtMs,
-                    readAtMs: m.readAtMs,
-                    deliveryStatus: DeliveryStatus(rawValue: Int(m.deliveryStatus)) ?? .sent,
-                    editCount: Int(m.editCount),
-                    isDeleted: m.deleted
-                )
-            }
+            let messages = msgs.map(Self.message(from:))
             await MainActor.run {
                 if self?.messagesByConversation[convId] == nil {
                     self?.messagesByConversation[convId] = messages
@@ -992,6 +1069,11 @@ final class AppState: ObservableObject {
     func refreshGroupTitle(groupId: String, accountId: String) {
         guard let core = cores[accountId] else { return }
         Task.detached { [weak self] in
+            // Pull any pending membership/metadata changes first (docs/03 §3.6):
+            // this derives + persists the group system-event timeline rows and
+            // emits `groupMetadataChanged` for each (handled by the event loop),
+            // and fast-forwards the cached state so the title below is current.
+            _ = try? core.applyPendingGroupChanges(groupId: groupId)
             guard let summary = try? core.fetchGroupState(groupId: groupId) else { return }
             let title = summary.title.isEmpty ? "Group" : summary.title
             await MainActor.run {
@@ -1093,7 +1175,9 @@ final class AppState: ObservableObject {
             readAtMs: sentAtMs,
             deliveryStatus: UInt8(DeliveryStatus.sending.rawValue),
             editCount: 0,
-            deleted: false
+            deleted: false,
+            kind: 0,
+            metadata: nil
         )
         try await Task.detached { try core.saveMessage(msg: pending) }.value
 
@@ -1105,7 +1189,7 @@ final class AppState: ObservableObject {
             let sent = StoredMessageFfi(
                 id: messageId, conversationId: conversation.id, senderDid: conversation.accountId,
                 body: text, sentAtMs: sentAtMs, editedAtMs: nil, readAtMs: sentAtMs,
-                deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false
+                deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil
             )
             Task.detached { try? core.saveMessage(msg: sent) }
         } catch {
@@ -1114,7 +1198,7 @@ final class AppState: ObservableObject {
             let failed = StoredMessageFfi(
                 id: messageId, conversationId: conversation.id, senderDid: conversation.accountId,
                 body: text, sentAtMs: sentAtMs, editedAtMs: nil, readAtMs: sentAtMs,
-                deliveryStatus: UInt8(DeliveryStatus.failed.rawValue), editCount: 0, deleted: false
+                deliveryStatus: UInt8(DeliveryStatus.failed.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil
             )
             Task.detached { try? core.saveMessage(msg: failed) }
             throw error
@@ -1280,6 +1364,7 @@ final class AppState: ObservableObject {
             var messages: [DecryptedMessage] = []
             var receiptUpdates: [DeliveryStatusUpdate] = []
             var needsConversationReload = false
+            var groupsWithNewEvents: Set<String> = []
             for ev in events {
                 switch ev {
                 case .message(let msg): messages.append(msg)
@@ -1287,6 +1372,13 @@ final class AppState: ObservableObject {
                 case .groupInvite:
                     // Master key already persisted by app-core; just refresh
                     // the chat list so the new group becomes visible.
+                    needsConversationReload = true
+                case .groupMetadataChanged(let event):
+                    // A membership/metadata change was derived from the change
+                    // log (docs/03 §3.6). app-core has already persisted the
+                    // matching system row; refresh the group's open timeline and
+                    // the chat list so the line appears.
+                    groupsWithNewEvents.insert(event.groupId)
                     needsConversationReload = true
                 case .storageSynced:
                     // A background storage sync applied remote durable state
@@ -1307,6 +1399,9 @@ final class AppState: ObservableObject {
             }
             if !receiptUpdates.isEmpty {
                 applyDeliveryStatusUpdates(receiptUpdates)
+            }
+            for groupId in groupsWithNewEvents {
+                reloadGroupTimelineIfLoaded(groupId: groupId, accountId: accountId)
             }
             if needsConversationReload {
                 await loadConversationsFromStore()
@@ -1484,6 +1579,7 @@ final class AppState: ObservableObject {
             if let idx = conversations.firstIndex(where: { $0.id == convId }) {
                 conversations[idx].lastMessage = text
                 conversations[idx].lastMessageDate = Date()
+                conversations[idx].clearLastMessageEvent()
             }
             // Ensure we render the right title once state has been fetched.
             refreshGroupTitle(groupId: groupId, accountId: accountId)
@@ -1493,6 +1589,7 @@ final class AppState: ObservableObject {
             convId = conversations[idx].id
             conversations[idx].lastMessage = text
             conversations[idx].lastMessageDate = Date()
+            conversations[idx].clearLastMessageEvent()
         } else {
             // Auto-create a new conversation for this DID.
             let serverUrl = accounts.first(where: { $0.id == accountId })?.servers.first?.id ?? ""
@@ -1538,7 +1635,9 @@ final class AppState: ObservableObject {
                 readAtMs: nil,  // unread
                 deliveryStatus: 1,  // sent
                 editCount: 0,
-                deleted: false
+                deleted: false,
+                kind: 0,
+                metadata: nil
             )
             Task.detached { try? core.saveMessage(msg: stored) }
         }

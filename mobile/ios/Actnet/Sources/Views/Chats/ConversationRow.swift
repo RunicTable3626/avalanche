@@ -18,6 +18,27 @@ struct ConversationRow: View {
         return appState.isBot(did, accountId: conversation.accountId)
     }
 
+    /// Preview text for the latest message. For a group system event we render
+    /// it reactively (resolving DIDs to names at display time), so it updates
+    /// from "You made Unknown an admin" to the real name once profiles resolve —
+    /// the same path the conversation view uses. Normal messages show the body.
+    private var previewText: String? {
+        guard conversation.lastMessageKind > 0 else { return conversation.lastMessage }
+        let m = Message(
+            id: conversation.id,
+            conversationId: conversation.id,
+            senderAccountId: conversation.lastMessageSenderDid ?? "",
+            body: conversation.lastMessage ?? "",
+            sentAtMs: 0,
+            editedAtMs: nil,
+            readAtMs: nil,
+            deliveryStatus: .sent,
+            kind: conversation.lastMessageKind,
+            metadata: conversation.lastMessageMetadata
+        )
+        return appState.groupEventText(m, accountId: conversation.accountId)
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             // Group/DM avatar placeholder. Hexagon + badge when the DM partner
@@ -55,7 +76,7 @@ struct ConversationRow: View {
                             .fontWeight(.medium)
                             .foregroundStyle(Color.avBrand)
                             .lineLimit(1)
-                    } else if let lastMessage = conversation.lastMessage {
+                    } else if let lastMessage = previewText {
                         Text(lastMessage)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)

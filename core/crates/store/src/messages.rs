@@ -129,10 +129,15 @@ impl IdentityStore {
                 // row (e.g. an outgoing message's status transitions). Those
                 // columns are owned by apply_edit / tombstone_message, never by
                 // the caller of save_message.
+                // Normal chat messages are kind=0 with no metadata; system
+                // timeline entries go through `save_group_event` instead. We
+                // don't touch kind/metadata in the conflict clause so a re-save
+                // of an existing row (status transitions) can't downgrade a
+                // system row to kind 0.
                 conn.execute(
                     "INSERT INTO message_history
-                     (id, conversation_id, sender_did, body, sent_at, edited_at, read_at, delivery_status)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     (id, conversation_id, sender_did, body, sent_at, edited_at, read_at, delivery_status, kind, metadata)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL)
                      ON CONFLICT(id) DO UPDATE SET
                          conversation_id = excluded.conversation_id,
                          sender_did      = excluded.sender_did,
@@ -149,6 +154,35 @@ impl IdentityStore {
             .map_err(StoreError::Db)
     }
 
+    /// Persist a system/metadata timeline entry (docs/03 §3.6 group events).
+    /// Idempotent: re-applying the same `/changes` page is a no-op because the
+    /// deterministic `id` (`grpevt-<group>-<revision>-<seq>`) collides and we
+    /// `DO NOTHING`. System rows are written read (`read_at = sent_at`) so they
+    /// never inflate the unread count, and carry `kind`/`metadata`.
+    pub async fn save_group_event(&self, msg: &HistoryMessage) -> Result<(), StoreError> {
+        let id = msg.id.clone();
+        let conversation_id = msg.conversation_id.clone();
+        let sender_did = msg.sender_did.clone();
+        let body = msg.body.clone();
+        let sent_at = msg.sent_at.as_millis();
+        let kind = msg.kind;
+        let metadata = msg.metadata.clone();
+
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO message_history
+                     (id, conversation_id, sender_did, body, sent_at, read_at, delivery_status, kind, metadata)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1, ?6, ?7)
+                     ON CONFLICT(id) DO NOTHING",
+                    rusqlite::params![id, conversation_id, sender_did, body, sent_at, kind, metadata],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(StoreError::Db)
+    }
+
     /// Load messages for a conversation, ordered by sent_at ascending.
     pub async fn load_messages(
         &self,
@@ -158,7 +192,7 @@ impl IdentityStore {
         self.conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, conversation_id, sender_did, body, sent_at, edited_at, read_at, delivery_status, edit_count, deleted_at
+                    "SELECT id, conversation_id, sender_did, body, sent_at, edited_at, read_at, delivery_status, edit_count, deleted_at, kind, metadata
                      FROM message_history
                      WHERE conversation_id = ?1
                      ORDER BY sent_at ASC",
@@ -175,6 +209,8 @@ impl IdentityStore {
                         delivery_status: row.get::<_, i64>(7)? as u8,
                         edit_count: row.get::<_, i64>(8)? as u32,
                         deleted_at: row.get::<_, Option<i64>>(9)?.map(Timestamp),
+                        kind: row.get::<_, i64>(10)?,
+                        metadata: row.get::<_, Option<String>>(11)?,
                     })
                 })?;
                 rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -201,7 +237,7 @@ impl IdentityStore {
                 // 1. Latest message per conversation that has any messages.
                 let mut stmt = conn.prepare(
                     "SELECT m.conversation_id, m.id, m.sender_did, m.body, m.sent_at,
-                            m.edited_at, m.read_at, m.delivery_status, m.edit_count, m.deleted_at
+                            m.edited_at, m.read_at, m.delivery_status, m.edit_count, m.deleted_at, m.kind, m.metadata
                      FROM message_history m
                      JOIN (
                          SELECT conversation_id, MAX(sent_at) AS max_sent
@@ -227,6 +263,8 @@ impl IdentityStore {
                                 delivery_status: row.get::<_, i64>(7)? as u8,
                                 edit_count: row.get::<_, i64>(8)? as u32,
                                 deleted_at: row.get::<_, Option<i64>>(9)?.map(Timestamp),
+                                kind: row.get::<_, i64>(10)?,
+                                metadata: row.get::<_, Option<String>>(11)?,
                             }),
                         })
                     })?
@@ -275,7 +313,7 @@ impl IdentityStore {
         self.conn
             .call(move |conn| {
                 conn.query_row(
-                    "SELECT id, conversation_id, sender_did, body, sent_at, edited_at, read_at, delivery_status, edit_count, deleted_at
+                    "SELECT id, conversation_id, sender_did, body, sent_at, edited_at, read_at, delivery_status, edit_count, deleted_at, kind, metadata
                      FROM message_history
                      WHERE conversation_id = ?1
                      ORDER BY sent_at DESC
@@ -293,6 +331,8 @@ impl IdentityStore {
                             delivery_status: row.get::<_, i64>(7)? as u8,
                             edit_count: row.get::<_, i64>(8)? as u32,
                             deleted_at: row.get::<_, Option<i64>>(9)?.map(Timestamp),
+                            kind: row.get::<_, i64>(10)?,
+                            metadata: row.get::<_, Option<String>>(11)?,
                         })
                     },
                 )
@@ -399,7 +439,7 @@ impl IdentityStore {
         self.conn
             .call(move |conn| {
                 conn.query_row(
-                    "SELECT id, conversation_id, sender_did, body, sent_at, edited_at, read_at, delivery_status, edit_count, deleted_at
+                    "SELECT id, conversation_id, sender_did, body, sent_at, edited_at, read_at, delivery_status, edit_count, deleted_at, kind, metadata
                      FROM message_history
                      WHERE conversation_id = ?1 AND sender_did = ?2 AND sent_at = ?3",
                     rusqlite::params![conv, author, sent],
@@ -415,6 +455,8 @@ impl IdentityStore {
                             delivery_status: row.get::<_, i64>(7)? as u8,
                             edit_count: row.get::<_, i64>(8)? as u32,
                             deleted_at: row.get::<_, Option<i64>>(9)?.map(Timestamp),
+                            kind: row.get::<_, i64>(10)?,
+                            metadata: row.get::<_, Option<String>>(11)?,
                         })
                     },
                 )
@@ -736,6 +778,14 @@ pub struct HistoryMessage {
     /// Some = FOR_EVERYONE tombstone (body cleared, reactions dropped),
     /// carrying the unix-millis deletion time. None = live message.
     pub deleted_at: Option<Timestamp>,
+    /// 0 = normal chat message; >0 = a system/metadata timeline entry
+    /// (docs/03 §3.6 group events). Renderers show kind>0 rows as a centered
+    /// grey line rather than a chat bubble.
+    pub kind: i64,
+    /// JSON blob for system rows (event kind + actor/target DIDs), letting the
+    /// UI re-render localized text from structured data after a restart. NULL
+    /// for normal chat messages.
+    pub metadata: Option<String>,
 }
 
 /// A reaction on a message, keyed by the target's wire identity.

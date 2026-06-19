@@ -158,7 +158,9 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
                 readAtMs: now,
                 deliveryStatus: msgs[i].deliveryStatus,
                 editCount: msgs[i].editCount,
-                deleted: msgs[i].deleted
+                deleted: msgs[i].deleted,
+                kind: msgs[i].kind,
+                metadata: msgs[i].metadata
             )
             count += 1
         }

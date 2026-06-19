@@ -173,6 +173,104 @@ pub enum JoinResult {
     Pending,
 }
 
+/// Kind of a derived group timeline entry (docs/03 §3.6), reconstructed from a
+/// `GroupChange`'s actions plus the surrounding state snapshots. Keep this list
+/// **append-only** — the numeric `kind_code` is persisted in
+/// `message_history.kind`.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupEventKind {
+    /// A pending invitee accepted (promoted themselves into the group).
+    MemberJoined,
+    /// Someone joined directly via an open invite link.
+    MemberJoinedViaLink,
+    /// Someone requested to join via a request-to-join link (awaits approval).
+    MemberRequestedToJoin,
+    /// An admin invited someone (they're now pending).
+    MemberInvited,
+    /// A member removed themselves.
+    MemberLeft,
+    /// An admin removed another member.
+    MemberRemoved,
+    /// An admin approved a pending join request.
+    JoinRequestApproved,
+    /// An admin denied a pending join request.
+    JoinRequestDenied,
+    /// An invitee declined an invitation.
+    InviteDeclined,
+    /// A requester cancelled their own join request.
+    JoinRequestCancelled,
+    /// A member was promoted to admin.
+    RoleChangedToAdmin,
+    /// A member's admin role was removed.
+    RoleChangedToMember,
+    /// The group title changed.
+    TitleChanged,
+    /// The group description changed.
+    DescriptionChanged,
+    /// The disappearing-message timer changed.
+    ExpiryChanged,
+    /// The group policy (join policy / announcement-only / link password) changed.
+    PolicyChanged,
+}
+
+/// Stable numeric code for a [`GroupEventKind`], persisted in
+/// `message_history.kind` (offset by +1 so 0 stays "normal chat message").
+pub fn kind_code(kind: GroupEventKind) -> i64 {
+    match kind {
+        GroupEventKind::MemberJoined => 1,
+        GroupEventKind::MemberJoinedViaLink => 2,
+        GroupEventKind::MemberRequestedToJoin => 3,
+        GroupEventKind::MemberInvited => 4,
+        GroupEventKind::MemberLeft => 5,
+        GroupEventKind::MemberRemoved => 6,
+        GroupEventKind::JoinRequestApproved => 7,
+        GroupEventKind::JoinRequestDenied => 8,
+        GroupEventKind::InviteDeclined => 9,
+        GroupEventKind::JoinRequestCancelled => 10,
+        GroupEventKind::RoleChangedToAdmin => 11,
+        GroupEventKind::RoleChangedToMember => 12,
+        GroupEventKind::TitleChanged => 13,
+        GroupEventKind::DescriptionChanged => 14,
+        GroupEventKind::ExpiryChanged => 15,
+        GroupEventKind::PolicyChanged => 16,
+    }
+}
+
+/// One derived chat-timeline entry describing a membership/metadata change
+/// (docs/03 §3.6). Persisted as a system row in `message_history` and surfaced
+/// to the UI via `IncomingEvent::GroupMetadataChanged`.
+#[derive(uniffi::Record, Debug, Clone, PartialEq)]
+pub struct GroupMetadataEvent {
+    /// URL-safe-no-pad base64 group_id this entry belongs to.
+    pub group_id: String,
+    /// Revision this change produced (the post-change revision).
+    pub revision: i64,
+    pub kind: GroupEventKind,
+    /// DID of the member who performed the change, from the sub-encrypted
+    /// `change_meta`. Empty when attribution was unavailable (pre-§3.6 change).
+    pub actor_did: String,
+    /// DID of the member the change is about, when resolvable from the
+    /// surrounding state. Empty when the target's DID isn't known to us (e.g. a
+    /// still-pending invitee whose DID we never learned).
+    pub target_did: String,
+    /// base64 encrypted_member_id of the target, when the action names one.
+    pub target_emi: String,
+    /// Best-effort millis the change occurred — pulled from a relevant state
+    /// timestamp (join/invite/request) where available, else fill time.
+    pub occurred_at_ms: i64,
+    /// For `ExpiryChanged`, the new disappearing-message timer in seconds
+    /// (`0` = off). Lets the UI render "set disappearing messages to 4 weeks"
+    /// without a separate state lookup. `0` for all other kinds.
+    pub expiry_seconds: u32,
+    /// For `TitleChanged`, the new group name, so the UI can render
+    /// "changed the group name to 'X'". Empty for all other kinds.
+    pub new_title: String,
+    /// Pre-rendered English one-liner (using DIDs, not display names) for
+    /// headless consumers / logging. UIs should render from the structured
+    /// fields instead, resolving DIDs to display names.
+    pub summary: String,
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────
 
 /// Fetch and cache the server's zkgroup public params + sender-cert trust
@@ -413,6 +511,8 @@ pub async fn create_group(
         created_at_ms: now_ms,
         creator_did: founder_did.to_string(),
         revision: 0,
+        // No prior change produced revision 0 — it's the founder's creation.
+        last_change_actor_did: String::new(),
         title: title.to_string(),
         description: description.to_string(),
         expiry_seconds,
@@ -563,7 +663,7 @@ async fn submit_actions(
     did: &str,
     group_id_b64_s: &str,
     apply_to_state: impl Fn(&mut gproto::GroupState, &GroupKey) -> Result<GroupActionsWire, AppError>,
-) -> Result<net::groups::SubmitChangeResponse, AppError> {
+) -> Result<(net::groups::SubmitChangeResponse, Vec<GroupMetadataEvent>), AppError> {
     // We retry once on stale-revision (HTTP 409). The cached revision can
     // lag the server's whenever another party submits a change (e.g. a
     // new member accepts an invite while we're inviting somebody else).
@@ -596,7 +696,16 @@ async fn submit_actions(
             gproto::GroupState::decode(row.encrypted_state_plaintext.as_slice())
                 .map_err(|e| AppError::Protocol(format!("decode cached GroupState: {e}")))?
         };
+        // Snapshot the pre-change state so we can derive the actor's own
+        // timeline entry below (the actor never re-pulls their own change via
+        // `/changes`, so without this they'd never see "You made Bob an admin").
+        let pre_state = state.clone();
         let actions = apply_to_state(&mut state, &group_key)?;
+        // Attribute this change to the submitter (§3.6) so other clients can
+        // render "Alice added Bob" / "Bob was removed by Carol". Carried inside
+        // the encrypted state blob (stored opaquely + never re-serialized by the
+        // server), so it survives regardless of server version.
+        state.last_change_actor_did = did.to_string();
         state.revision = (row.revision as u64) + 1;
         let new_plaintext = state.encode_to_vec();
         let new_encrypted_state = group_key.encrypt_state(&new_plaintext);
@@ -604,7 +713,7 @@ async fn submit_actions(
         let req = SubmitChangeRequest {
             revision: row.revision + 1,
             new_encrypted_state: b64(&new_encrypted_state),
-            actions,
+            actions: actions.clone(),
         };
         let resp = client
             .submit_group_changes(group_id_b64_s, &req, &presentation)
@@ -620,7 +729,24 @@ async fn submit_actions(
                         row.policy,
                     )
                     .await?;
-                return Ok(resp);
+                // Derive + persist the actor's own change as a system timeline
+                // entry so it shows immediately on their device (idempotent with
+                // the copy other members derive when they pull `/changes`).
+                let now_ms = Timestamp::now().as_millis();
+                let events = derive_change_events(
+                    group_id_b64_s,
+                    resp.revision,
+                    &actions,
+                    did,
+                    &group_key,
+                    &pre_state,
+                    &state,
+                    now_ms,
+                );
+                for ev in &events {
+                    persist_group_event(store, ev).await?;
+                }
+                return Ok((resp, events));
             }
             Err(net::error::NetError::Server(409, ref body)) if attempt == 0 => {
                 attempt += 1;
@@ -780,7 +906,7 @@ pub async fn join_via_link(
         .unwrap_or_default();
     let pw_b64 = b64(password_bytes);
 
-    let resp = submit_actions(
+    let (resp, _events) = submit_actions(
         store,
         client,
         did,
@@ -929,9 +1055,9 @@ pub async fn change_role(
     group_id_b64_s: &str,
     encrypted_member_id_b64: &str,
     new_role: i16,
-) -> Result<(), AppError> {
+) -> Result<Vec<GroupMetadataEvent>, AppError> {
     let emi = b64d(encrypted_member_id_b64)?;
-    submit_actions(
+    let (_, events) = submit_actions(
         store,
         client,
         did,
@@ -952,19 +1078,362 @@ pub async fn change_role(
         },
     )
     .await?;
-    Ok(())
+    Ok(events)
+}
+
+/// Rename the group (§3.3 `modify_title`). Updates `title` in the encrypted
+/// state and emits the sub-encrypted action (opaque to the server — only the
+/// fact that the title changed is server-visible, gated by `modify_title_role`).
+/// Returns the derived timeline entries.
+pub async fn set_title(
+    store: &store::DeviceStore,
+    client: &net::Client,
+    did: &str,
+    group_id_b64_s: &str,
+    new_title: &str,
+) -> Result<Vec<GroupMetadataEvent>, AppError> {
+    // Group names must not be empty.
+    let new_title = new_title.trim();
+    if new_title.is_empty() {
+        return Err(AppError::Protocol("group name cannot be empty".into()));
+    }
+    let (_, events) = submit_actions(
+        store,
+        client,
+        did,
+        group_id_b64_s,
+        |state, group_key| {
+            state.title = new_title.to_string();
+            let sub = gproto::ModifyTitle {
+                new_title: new_title.to_string(),
+            };
+            Ok(GroupActionsWire {
+                modify_title: Some(b64(&group_key.encrypt_state(&sub.encode_to_vec()))),
+                ..Default::default()
+            })
+        },
+    )
+    .await?;
+    Ok(events)
+}
+
+/// Set the group's disappearing-message timer (§3.3 `modify_expiry`). Updates
+/// `expiry_seconds` in the encrypted state and emits the sub-encrypted action
+/// (opaque to the server — only the fact that expiry changed is server-visible,
+/// gated by `modify_expiry_role`). Returns the derived timeline entries.
+pub async fn set_expiry(
+    store: &store::DeviceStore,
+    client: &net::Client,
+    did: &str,
+    group_id_b64_s: &str,
+    expiry_seconds: u32,
+) -> Result<Vec<GroupMetadataEvent>, AppError> {
+    let (_, events) = submit_actions(
+        store,
+        client,
+        did,
+        group_id_b64_s,
+        |state, group_key| {
+            state.expiry_seconds = expiry_seconds;
+            // Carry the new value sub-encrypted under the group key so the
+            // server stores it opaquely (it doesn't enforce expiry); the
+            // authoritative value also rides in the new state blob.
+            let sub = gproto::ModifyExpiry {
+                new_expiry_seconds: expiry_seconds,
+            };
+            Ok(GroupActionsWire {
+                modify_expiry: Some(b64(&group_key.encrypt_state(&sub.encode_to_vec()))),
+                ..Default::default()
+            })
+        },
+    )
+    .await?;
+    Ok(events)
 }
 
 // ── apply_pending_changes / rotate ───────────────────────────────────────
 
-/// Pull `/changes` since the last applied revision, decrypt each blob, and
-/// fast-forward the local cache.
+// ── change → timeline-entry derivation (docs/03 §3.6) ────────────────────
+
+/// DID of the member carrying `emi_b64` in `state`, or empty if not present /
+/// not yet known (a roster entry can carry an empty DID, e.g. an approved
+/// link-joiner before they DM us).
+fn emi_b64_to_did(state: &gproto::GroupState, emi_b64: &str) -> String {
+    state
+        .members
+        .iter()
+        .find(|m| b64(&m.encrypted_member_id) == emi_b64)
+        .map(|m| m.did.clone())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_default()
+}
+
+fn member_joined_at(state: &gproto::GroupState, emi_b64: &str) -> Option<i64> {
+    state
+        .members
+        .iter()
+        .find(|m| b64(&m.encrypted_member_id) == emi_b64)
+        .map(|m| m.joined_at_ms)
+}
+
+fn pending_invited_at(state: &gproto::GroupState, emi_b64: &str) -> Option<i64> {
+    state
+        .pending_invites
+        .iter()
+        .find(|p| b64(&p.encrypted_member_id) == emi_b64)
+        .map(|p| p.invited_at_ms)
+}
+
+fn pending_requested_at(state: &gproto::GroupState, emi_b64: &str) -> Option<i64> {
+    state
+        .pending_approvals
+        .iter()
+        .find(|p| b64(&p.encrypted_member_id) == emi_b64)
+        .map(|p| p.requested_at_ms)
+}
+
+fn is_pending_approval(state: &gproto::GroupState, emi_b64: &str) -> bool {
+    state
+        .pending_approvals
+        .iter()
+        .any(|p| b64(&p.encrypted_member_id) == emi_b64)
+}
+
+fn actor_label(actor_did: &str) -> &str {
+    if actor_did.is_empty() {
+        "Someone"
+    } else {
+        actor_did
+    }
+}
+
+/// Human label for a disappearing-message duration, for the headless `summary`
+/// string. Mirrors the canonical options the iOS picker offers; falls back to a
+/// raw seconds count for any off-grid value. (The UI does its own localized
+/// rendering from `expiry_seconds`.)
+fn expiry_label(seconds: u32) -> String {
+    match seconds {
+        0 => "off".to_string(),
+        30 => "30 seconds".to_string(),
+        300 => "5 minutes".to_string(),
+        3_600 => "1 hour".to_string(),
+        28_800 => "8 hours".to_string(),
+        86_400 => "1 day".to_string(),
+        604_800 => "1 week".to_string(),
+        2_419_200 => "4 weeks".to_string(),
+        s => format!("{s} seconds"),
+    }
+}
+
+/// Reconstruct the timeline entries for a single change. `pre` is the state
+/// before the change applied (it still contains removed members, so "X was
+/// removed" resolves); `post` is the state after (it contains added/promoted
+/// members, so "X joined" resolves). `actor_did` comes from the sub-encrypted
+/// `change_meta`. `new_revision` is the revision this change produced.
+fn derive_change_events(
+    group_id_b64: &str,
+    new_revision: i64,
+    actions: &GroupActionsWire,
+    actor_did: &str,
+    group_key: &GroupKey,
+    pre: &gproto::GroupState,
+    post: &gproto::GroupState,
+    now_ms: i64,
+) -> Vec<GroupMetadataEvent> {
+    let mut out = Vec::new();
+    let actor_emi_b64 = if actor_did.is_empty() {
+        String::new()
+    } else {
+        b64(&zkgroup::serialize(&group_key.encrypt_member_id(actor_did)))
+    };
+    let make = |kind, target_did: String, target_emi: String, occurred_at_ms: i64, summary: String| {
+        GroupMetadataEvent {
+            group_id: group_id_b64.to_string(),
+            revision: new_revision,
+            kind,
+            actor_did: actor_did.to_string(),
+            target_did,
+            target_emi,
+            occurred_at_ms,
+            expiry_seconds: 0,
+            new_title: String::new(),
+            summary,
+        }
+    };
+    let resolve = |emi: &str| {
+        let d = emi_b64_to_did(post, emi);
+        if d.is_empty() {
+            emi_b64_to_did(pre, emi)
+        } else {
+            d
+        }
+    };
+    let who = |did: &str, fallback: &str| {
+        if did.is_empty() {
+            fallback.to_string()
+        } else {
+            did.to_string()
+        }
+    };
+
+    for inv in &actions.invite_members {
+        let emi = inv.encrypted_member_id.clone();
+        let tdid = resolve(&emi);
+        let ts = pending_invited_at(post, &emi).unwrap_or(now_ms);
+        let summary = format!("{} invited {}", actor_label(actor_did), who(&tdid, "a new member"));
+        out.push(make(GroupEventKind::MemberInvited, tdid, emi, ts, summary));
+    }
+    if actions.promote_pending_members.is_some() {
+        let ts = member_joined_at(post, &actor_emi_b64).unwrap_or(now_ms);
+        let summary = format!("{} joined the group", actor_label(actor_did));
+        out.push(make(GroupEventKind::MemberJoined, actor_did.to_string(), actor_emi_b64.clone(), ts, summary));
+    }
+    if actions.join_via_link.is_some() {
+        if is_pending_approval(post, &actor_emi_b64) {
+            let ts = pending_requested_at(post, &actor_emi_b64).unwrap_or(now_ms);
+            let summary = format!("{} requested to join", actor_label(actor_did));
+            out.push(make(GroupEventKind::MemberRequestedToJoin, actor_did.to_string(), actor_emi_b64.clone(), ts, summary));
+        } else {
+            let ts = member_joined_at(post, &actor_emi_b64).unwrap_or(now_ms);
+            let summary = format!("{} joined via invite link", actor_label(actor_did));
+            out.push(make(GroupEventKind::MemberJoinedViaLink, actor_did.to_string(), actor_emi_b64.clone(), ts, summary));
+        }
+    }
+    if let Some(emi) = &actions.decline_invite {
+        let summary = format!("{} declined the invitation", actor_label(actor_did));
+        out.push(make(GroupEventKind::InviteDeclined, actor_did.to_string(), emi.clone(), now_ms, summary));
+    }
+    if let Some(emi) = &actions.cancel_join_request {
+        let summary = format!("{} cancelled their join request", actor_label(actor_did));
+        out.push(make(GroupEventKind::JoinRequestCancelled, actor_did.to_string(), emi.clone(), now_ms, summary));
+    }
+    for emi in &actions.approve_join_request {
+        let tdid = emi_b64_to_did(post, emi);
+        let ts = member_joined_at(post, emi).unwrap_or(now_ms);
+        let summary = format!("{} approved {}'s join request", actor_label(actor_did), who(&tdid, "a member"));
+        out.push(make(GroupEventKind::JoinRequestApproved, tdid, emi.clone(), ts, summary));
+    }
+    for emi in &actions.deny_join_request {
+        let summary = format!("{} declined a join request", actor_label(actor_did));
+        out.push(make(GroupEventKind::JoinRequestDenied, String::new(), emi.clone(), now_ms, summary));
+    }
+    for emi in &actions.remove_members {
+        if !actor_emi_b64.is_empty() && *emi == actor_emi_b64 {
+            let summary = format!("{} left the group", actor_label(actor_did));
+            out.push(make(GroupEventKind::MemberLeft, actor_did.to_string(), emi.clone(), now_ms, summary));
+        } else {
+            let tdid = emi_b64_to_did(pre, emi);
+            let summary = format!("{} removed {}", actor_label(actor_did), who(&tdid, "a member"));
+            out.push(make(GroupEventKind::MemberRemoved, tdid, emi.clone(), now_ms, summary));
+        }
+    }
+    for ra in &actions.modify_member_role {
+        let emi = ra.encrypted_member_id.clone();
+        let tdid = resolve(&emi);
+        if ra.role == ROLE_ADMIN {
+            let summary = format!("{} made {} an admin", actor_label(actor_did), who(&tdid, "a member"));
+            out.push(make(GroupEventKind::RoleChangedToAdmin, tdid, emi, now_ms, summary));
+        } else {
+            let summary = format!("{} removed admin from {}", actor_label(actor_did), who(&tdid, "a member"));
+            out.push(make(GroupEventKind::RoleChangedToMember, tdid, emi, now_ms, summary));
+        }
+    }
+    if actions.modify_title.is_some() {
+        // Group names are never empty (enforced in `set_title`); the empty
+        // arm is only a defensive fallback for any legacy/foreign change.
+        let summary = if post.title.is_empty() {
+            format!("{} changed the group name", actor_label(actor_did))
+        } else {
+            format!("{} changed the group name to '{}'", actor_label(actor_did), post.title)
+        };
+        let mut ev = make(GroupEventKind::TitleChanged, String::new(), String::new(), now_ms, summary);
+        ev.new_title = post.title.clone();
+        out.push(ev);
+    }
+    if actions.modify_description.is_some() {
+        let summary = format!("{} changed the group description", actor_label(actor_did));
+        out.push(make(GroupEventKind::DescriptionChanged, String::new(), String::new(), now_ms, summary));
+    }
+    if actions.modify_expiry.is_some() {
+        let seconds = post.expiry_seconds;
+        let summary = if seconds == 0 {
+            format!("{} turned off disappearing messages", actor_label(actor_did))
+        } else {
+            format!(
+                "{} set disappearing messages to {}",
+                actor_label(actor_did),
+                expiry_label(seconds)
+            )
+        };
+        let mut ev = make(GroupEventKind::ExpiryChanged, String::new(), String::new(), now_ms, summary);
+        ev.expiry_seconds = seconds;
+        out.push(ev);
+    }
+    if actions.modify_policy.is_some() {
+        let summary = format!("{} changed the group settings", actor_label(actor_did));
+        out.push(make(GroupEventKind::PolicyChanged, String::new(), String::new(), now_ms, summary));
+    }
+    out
+}
+
+/// Persist a derived event as a system row in `message_history`. Idempotent on
+/// a deterministic id so re-applying the same `/changes` page is a no-op.
+async fn persist_group_event(
+    store: &store::DeviceStore,
+    ev: &GroupMetadataEvent,
+) -> Result<(), AppError> {
+    let conversation_id = format!("group-{}", ev.group_id);
+    let id = format!(
+        "grpevt-{}-{}-{}-{}",
+        ev.group_id,
+        ev.revision,
+        kind_code(ev.kind),
+        ev.target_emi
+    );
+    let metadata = serde_json::json!({
+        "event": kind_code(ev.kind),
+        "actor_did": ev.actor_did,
+        "target_did": ev.target_did,
+        "target_emi": ev.target_emi,
+        "expiry_seconds": ev.expiry_seconds,
+        "new_title": ev.new_title,
+    })
+    .to_string();
+    store
+        .save_group_event(&store::messages::HistoryMessage {
+            id,
+            conversation_id,
+            sender_did: ev.actor_did.clone(),
+            body: ev.summary.clone(),
+            sent_at: Timestamp(ev.occurred_at_ms),
+            // save_group_event marks the row read at sent_at; these are ignored.
+            edited_at: None,
+            read_at: Some(Timestamp(ev.occurred_at_ms)),
+            delivery_status: 1,
+            edit_count: 0,
+            deleted_at: None,
+            kind: kind_code(ev.kind),
+            metadata: Some(metadata),
+        })
+        .await?;
+    Ok(())
+}
+
+/// Pull `/changes` since the last applied revision, derive the membership /
+/// metadata timeline entries (§3.6), persist them as system rows, fast-forward
+/// the local cached state, and return `(new_revision, derived_events)`.
+///
+/// The newest state (revision == server's current) lives only in the `groups`
+/// table, never in the `/changes` history (each history row stores the state
+/// *before* its actions). So after reading the deltas we call
+/// `fetch_group_state` once to (a) resolve members added by the final change
+/// and (b) re-sync the cached state + policy mirror to the authoritative copy.
 pub async fn apply_pending_changes(
     store: &store::DeviceStore,
     client: &net::Client,
     did: &str,
     group_id_b64_s: &str,
-) -> Result<i64, AppError> {
+) -> Result<(i64, Vec<GroupMetadataEvent>), AppError> {
     let row = store
         .load_group(group_id_b64_s)
         .await?
@@ -985,19 +1454,74 @@ pub async fn apply_pending_changes(
         .get_group_changes(group_id_b64_s, row.revision, &presentation)
         .await?;
 
-    let Some(last) = resp.changes.last() else {
-        return Ok(row.revision);
-    };
-    let plaintext = group_key.decrypt_state(&last.encrypted_state)?;
-    // We don't re-fetch the policy on a /changes pull — the server
-    // includes policy changes in actions; a follow-up fetch_group_state
-    // call is the simplest way to re-sync the policy mirror. For now we
-    // keep the cached policy as-is. (The server still enforces against its
-    // authoritative copy.)
-    store
-        .update_group_state(group_id_b64_s, last.revision, plaintext, row.policy)
-        .await?;
-    Ok(last.revision)
+    if resp.changes.is_empty() {
+        return Ok((row.revision, Vec::new()));
+    }
+
+    // Decrypt each history row's pre-change state: row revision R carries the
+    // state S_R that existed *before* its actions transformed it to S_{R+1}.
+    let mut states: std::collections::BTreeMap<i64, gproto::GroupState> =
+        std::collections::BTreeMap::new();
+    for ch in &resp.changes {
+        if let Ok(pt) = group_key.decrypt_state(&ch.encrypted_state) {
+            if let Ok(st) = gproto::GroupState::decode(pt.as_slice()) {
+                states.insert(ch.revision, st);
+            }
+        }
+    }
+
+    // Fast-forward the cached state + policy to the authoritative current
+    // revision, and pick up the post-state for the final change.
+    let summary = fetch_group_state(
+        store,
+        client,
+        &row.hosting_server_url,
+        did,
+        group_id_b64_s,
+    )
+    .await?;
+    if let Some(cur) = store.load_group(group_id_b64_s).await? {
+        if let Ok(st) = gproto::GroupState::decode(cur.encrypted_state_plaintext.as_slice()) {
+            states.insert(summary.revision, st);
+        }
+    }
+
+    let empty = gproto::GroupState::default();
+    let now_ms = Timestamp::now().as_millis();
+    let mut events = Vec::new();
+    for ch in &resp.changes {
+        let actions: GroupActionsWire = match serde_json::from_slice(&ch.actions) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(
+                    "[groups] skipping undecodable change actions at revision {}: {e}",
+                    ch.revision
+                );
+                continue;
+            }
+        };
+        let pre = states.get(&ch.revision).unwrap_or(&empty);
+        let post = states.get(&(ch.revision + 1)).unwrap_or(&empty);
+        // The actor who produced the post-state stamped their DID into it at
+        // submit time (§3.6); read it back here for attribution.
+        let actor_did = post.last_change_actor_did.clone();
+        events.extend(derive_change_events(
+            group_id_b64_s,
+            ch.revision + 1,
+            &actions,
+            &actor_did,
+            &group_key,
+            pre,
+            post,
+            now_ms,
+        ));
+    }
+
+    for ev in &events {
+        persist_group_event(store, ev).await?;
+    }
+
+    Ok((summary.revision, events))
 }
 
 /// Generate a fresh `group_push_pseudonym` and rotate it on the server.
@@ -1525,6 +2049,19 @@ pub async fn store_inbound_group_context(
 // thin shim around the `async` business logic above; keep new logic out
 // of this section.
 
+impl AppCore {
+    /// Surface derived group timeline entries (§3.6) on the event channel so a
+    /// foregrounded conversation refreshes live. The rows are already persisted
+    /// by the action/apply path; this is the "refresh now" signal.
+    fn emit_group_events(&self, events: Vec<GroupMetadataEvent>) {
+        for event in events {
+            let _ = self
+                .event_tx
+                .send(crate::IncomingEvent::GroupMetadataChanged { event });
+        }
+    }
+}
+
 #[uniffi::export]
 impl AppCore {
     /// Create a new action-bound group. Returns the server-visible
@@ -1603,6 +2140,22 @@ impl AppCore {
                 fetch_group_state(&inner.store, &inner.client, &server_url, &did, &group_id)
                     .await?;
             Ok::<_, AppError>(summary_to_ffi(summary))
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// Group ids (URL-safe-no-pad base64) of every group held locally —
+    /// i.e. every group we have the master key for, including ones we were
+    /// invited to (app-core auto-accepts invites). Reads the local group
+    /// store directly, so it is independent of message history (unlike
+    /// `load_conversations`, which only surfaces groups that have messages).
+    /// Bots use this to enumerate their memberships; pair with
+    /// `fetch_group_state` to inspect roles.
+    pub fn list_groups(&self) -> Result<Vec<String>, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            let rows = inner.store.list_groups().await.map_err(AppError::from)?;
+            Ok::<_, AppError>(rows.into_iter().map(|g| g.group_id).collect())
         })
         .map_err(AppErrorFfi::from)
     }
@@ -1836,31 +2389,79 @@ impl AppCore {
         encrypted_member_id: String,
         new_role: i16,
     ) -> Result<(), AppErrorFfi> {
-        ffi_runtime().block_on(async {
-            let inner = self.inner.lock().await;
-            let did = inner.did.clone();
-            change_role(
-                &inner.store,
-                &inner.client,
-                &did,
-                &group_id,
-                &encrypted_member_id,
-                new_role,
-            )
-            .await
-        })
-        .map_err(AppErrorFfi::from)
+        ffi_runtime()
+            .block_on(async {
+                let events = {
+                    let inner = self.inner.lock().await;
+                    let did = inner.did.clone();
+                    change_role(
+                        &inner.store,
+                        &inner.client,
+                        &did,
+                        &group_id,
+                        &encrypted_member_id,
+                        new_role,
+                    )
+                    .await?
+                };
+                self.emit_group_events(events);
+                Ok::<_, AppError>(())
+            })
+            .map_err(AppErrorFfi::from)
+    }
+
+    /// Rename the group. Admin-gated by `modify_title_role`. Emits a
+    /// `GroupMetadataChanged` timeline entry ("… changed the group name to X").
+    pub fn set_group_title(&self, group_id: String, new_title: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime()
+            .block_on(async {
+                let events = {
+                    let inner = self.inner.lock().await;
+                    let did = inner.did.clone();
+                    set_title(&inner.store, &inner.client, &did, &group_id, &new_title).await?
+                };
+                self.emit_group_events(events);
+                Ok::<_, AppError>(())
+            })
+            .map_err(AppErrorFfi::from)
+    }
+
+    /// Set the group's disappearing-message timer (`0` = off). Admin-gated by
+    /// `modify_expiry_role`. Emits a `GroupMetadataChanged` timeline entry.
+    pub fn set_group_expiry(
+        &self,
+        group_id: String,
+        expiry_seconds: u32,
+    ) -> Result<(), AppErrorFfi> {
+        ffi_runtime()
+            .block_on(async {
+                let events = {
+                    let inner = self.inner.lock().await;
+                    let did = inner.did.clone();
+                    set_expiry(&inner.store, &inner.client, &did, &group_id, expiry_seconds).await?
+                };
+                self.emit_group_events(events);
+                Ok::<_, AppError>(())
+            })
+            .map_err(AppErrorFfi::from)
     }
 
     /// Pull `/changes` since the last applied revision. Returns the new
-    /// revision (== previous if nothing was pending).
+    /// revision (== previous if nothing was pending). Any derived membership /
+    /// metadata timeline entries (§3.6) are persisted as system rows and
+    /// surfaced individually as `IncomingEvent::GroupMetadataChanged`.
     pub fn apply_pending_group_changes(&self, group_id: String) -> Result<i64, AppErrorFfi> {
-        ffi_runtime().block_on(async {
-            let inner = self.inner.lock().await;
-            let did = inner.did.clone();
-            apply_pending_changes(&inner.store, &inner.client, &did, &group_id).await
-        })
-        .map_err(AppErrorFfi::from)
+        ffi_runtime()
+            .block_on(async {
+                let (revision, events) = {
+                    let inner = self.inner.lock().await;
+                    let did = inner.did.clone();
+                    apply_pending_changes(&inner.store, &inner.client, &did, &group_id).await?
+                };
+                self.emit_group_events(events);
+                Ok::<_, AppError>(revision)
+            })
+            .map_err(AppErrorFfi::from)
     }
 
     /// Send a group text message to every other current member. The text is
@@ -1895,5 +2496,261 @@ impl AppCore {
             rotate_group_pseudonym(&inner.store, &inner.client, &did, &group_id).await
         })
         .map_err(AppErrorFfi::from)
+    }
+}
+
+#[cfg(test)]
+mod metadata_event_tests {
+    use super::*;
+
+    const ALICE: &str = "did:plc:alice";
+    const BOB: &str = "did:plc:bob";
+    const CAROL: &str = "did:plc:carol";
+
+    /// base64 encrypted_member_id for `did` under `gk`.
+    fn emi(gk: &GroupKey, did: &str) -> String {
+        b64(&zkgroup::serialize(&gk.encrypt_member_id(did)))
+    }
+
+    fn member(gk: &GroupKey, did: &str, joined_at_ms: i64) -> gproto::Member {
+        gproto::Member {
+            did: did.to_string(),
+            encrypted_member_id: zkgroup::serialize(&gk.encrypt_member_id(did)),
+            role: gproto::Role::Member as i32,
+            joined_at_ms,
+            profile_key: Vec::new(),
+        }
+    }
+
+    fn pending_invite(gk: &GroupKey, did: &str, invited_at_ms: i64) -> gproto::PendingInvite {
+        gproto::PendingInvite {
+            encrypted_member_id: zkgroup::serialize(&gk.encrypt_member_id(did)),
+            role: gproto::Role::Member as i32,
+            inviter_did: ALICE.to_string(),
+            invited_at_ms,
+        }
+    }
+
+    fn pending_approval(gk: &GroupKey, did: &str, requested_at_ms: i64) -> gproto::PendingApproval {
+        gproto::PendingApproval {
+            encrypted_member_id: zkgroup::serialize(&gk.encrypt_member_id(did)),
+            requested_at_ms,
+        }
+    }
+
+    fn derive(
+        gk: &GroupKey,
+        actions: GroupActionsWire,
+        actor: &str,
+        pre: gproto::GroupState,
+        post: gproto::GroupState,
+    ) -> Vec<GroupMetadataEvent> {
+        derive_change_events("group-b64", 5, &actions, actor, gk, &pre, &post, 1_000)
+    }
+
+    #[test]
+    fn actor_is_read_from_post_state() {
+        // End-to-end of the attribution path: the submitter stamps its DID into
+        // the post-state, and apply_pending_changes reads it back from there.
+        let gk = GroupKey::generate();
+        let actions = GroupActionsWire {
+            promote_pending_members: Some(PromoteSelfWire {
+                encrypted_profile_key: b64(b""),
+                group_push_pseudonym: b64(b"x"),
+            }),
+            ..Default::default()
+        };
+        let post = gproto::GroupState {
+            members: vec![member(&gk, BOB, 1234)],
+            last_change_actor_did: BOB.to_string(),
+            ..Default::default()
+        };
+        // Caller derives `actor` from `post.last_change_actor_did`.
+        let actor = post.last_change_actor_did.clone();
+        let evs = derive(&gk, actions, &actor, gproto::GroupState::default(), post);
+        assert_eq!(evs[0].kind, GroupEventKind::MemberJoined);
+        assert_eq!(evs[0].actor_did, BOB);
+    }
+
+    #[test]
+    fn invite_attributes_actor_and_target() {
+        let gk = GroupKey::generate();
+        let actions = GroupActionsWire {
+            invite_members: vec![InviteMemberWire {
+                encrypted_member_id: emi(&gk, BOB),
+                role: ROLE_MEMBER,
+            }],
+            ..Default::default()
+        };
+        let post = gproto::GroupState {
+            pending_invites: vec![pending_invite(&gk, BOB, 7_777)],
+            ..Default::default()
+        };
+        let evs = derive(&gk, actions, ALICE, gproto::GroupState::default(), post);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, GroupEventKind::MemberInvited);
+        assert_eq!(evs[0].actor_did, ALICE);
+        assert_eq!(evs[0].target_emi, emi(&gk, BOB));
+        assert_eq!(evs[0].occurred_at_ms, 7_777);
+        assert!(evs[0].summary.contains("invited"));
+    }
+
+    #[test]
+    fn promote_renders_as_join() {
+        let gk = GroupKey::generate();
+        let actions = GroupActionsWire {
+            promote_pending_members: Some(PromoteSelfWire {
+                encrypted_profile_key: b64(b""),
+                group_push_pseudonym: b64(b"x"),
+            }),
+            ..Default::default()
+        };
+        let post = gproto::GroupState {
+            members: vec![member(&gk, BOB, 1234)],
+            ..Default::default()
+        };
+        let evs = derive(&gk, actions, BOB, gproto::GroupState::default(), post);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].kind, GroupEventKind::MemberJoined);
+        assert_eq!(evs[0].actor_did, BOB);
+        assert_eq!(evs[0].occurred_at_ms, 1234);
+    }
+
+    #[test]
+    fn join_via_link_open_vs_request() {
+        let gk = GroupKey::generate();
+        let actions = || GroupActionsWire {
+            join_via_link: Some(JoinViaLinkWire {
+                encrypted_profile_key: b64(b""),
+                group_push_pseudonym: b64(b"x"),
+                invite_link_password: b64(b""),
+            }),
+            ..Default::default()
+        };
+        // Landed directly as a member → joined via link.
+        let post_member = gproto::GroupState {
+            members: vec![member(&gk, CAROL, 11)],
+            ..Default::default()
+        };
+        let evs = derive(&gk, actions(), CAROL, gproto::GroupState::default(), post_member);
+        assert_eq!(evs[0].kind, GroupEventKind::MemberJoinedViaLink);
+
+        // Landed in pending approval → requested to join.
+        let post_pending = gproto::GroupState {
+            pending_approvals: vec![pending_approval(&gk, CAROL, 22)],
+            ..Default::default()
+        };
+        let evs = derive(&gk, actions(), CAROL, gproto::GroupState::default(), post_pending);
+        assert_eq!(evs[0].kind, GroupEventKind::MemberRequestedToJoin);
+        assert_eq!(evs[0].occurred_at_ms, 22);
+    }
+
+    #[test]
+    fn remove_distinguishes_left_from_kicked() {
+        let gk = GroupKey::generate();
+        let pre = gproto::GroupState {
+            members: vec![member(&gk, ALICE, 1), member(&gk, BOB, 2)],
+            ..Default::default()
+        };
+
+        // Alice removes Bob → kicked, target resolved to Bob's DID.
+        let kick = GroupActionsWire {
+            remove_members: vec![emi(&gk, BOB)],
+            ..Default::default()
+        };
+        let evs = derive(&gk, kick, ALICE, pre.clone(), gproto::GroupState::default());
+        assert_eq!(evs[0].kind, GroupEventKind::MemberRemoved);
+        assert_eq!(evs[0].target_did, BOB);
+        assert!(evs[0].summary.contains("removed"));
+
+        // Bob removes Bob → left.
+        let leave = GroupActionsWire {
+            remove_members: vec![emi(&gk, BOB)],
+            ..Default::default()
+        };
+        let evs = derive(&gk, leave, BOB, pre, gproto::GroupState::default());
+        assert_eq!(evs[0].kind, GroupEventKind::MemberLeft);
+        assert_eq!(evs[0].actor_did, BOB);
+        assert!(evs[0].summary.contains("left"));
+    }
+
+    #[test]
+    fn expiry_change_names_the_duration() {
+        let gk = GroupKey::generate();
+        let actions = GroupActionsWire {
+            modify_expiry: Some(b64(b"x")),
+            ..Default::default()
+        };
+        let post = gproto::GroupState {
+            expiry_seconds: 2_419_200,
+            ..Default::default()
+        };
+        let evs = derive(&gk, actions, ALICE, gproto::GroupState::default(), post);
+        assert_eq!(evs[0].kind, GroupEventKind::ExpiryChanged);
+        assert_eq!(evs[0].expiry_seconds, 2_419_200);
+        assert!(evs[0].summary.contains("4 weeks"), "{}", evs[0].summary);
+
+        // Turning it off reads differently.
+        let off_actions = GroupActionsWire {
+            modify_expiry: Some(b64(b"x")),
+            ..Default::default()
+        };
+        let off = derive(&gk, off_actions, ALICE, gproto::GroupState::default(), gproto::GroupState::default());
+        assert_eq!(off[0].expiry_seconds, 0);
+        assert!(off[0].summary.contains("turned off"), "{}", off[0].summary);
+    }
+
+    #[test]
+    fn title_change_names_the_new_title() {
+        let gk = GroupKey::generate();
+        let actions = GroupActionsWire {
+            modify_title: Some(b64(b"x")),
+            ..Default::default()
+        };
+        let post = gproto::GroupState {
+            title: "March Logistics".to_string(),
+            ..Default::default()
+        };
+        let evs = derive(&gk, actions, ALICE, gproto::GroupState::default(), post);
+        assert_eq!(evs[0].kind, GroupEventKind::TitleChanged);
+        assert_eq!(evs[0].new_title, "March Logistics");
+        assert!(evs[0].summary.contains("'March Logistics'"), "{}", evs[0].summary);
+    }
+
+    #[test]
+    fn role_change_to_admin() {
+        let gk = GroupKey::generate();
+        let actions = GroupActionsWire {
+            modify_member_role: vec![RoleAssignmentWire {
+                encrypted_member_id: emi(&gk, BOB),
+                role: ROLE_ADMIN,
+            }],
+            ..Default::default()
+        };
+        let post = gproto::GroupState {
+            members: vec![member(&gk, BOB, 1)],
+            ..Default::default()
+        };
+        let evs = derive(&gk, actions, ALICE, gproto::GroupState::default(), post);
+        assert_eq!(evs[0].kind, GroupEventKind::RoleChangedToAdmin);
+        assert_eq!(evs[0].target_did, BOB);
+    }
+
+    #[test]
+    fn missing_change_meta_yields_unattributed_entry() {
+        let gk = GroupKey::generate();
+        let actions = GroupActionsWire {
+            remove_members: vec![emi(&gk, BOB)],
+            ..Default::default()
+        };
+        let pre = gproto::GroupState {
+            members: vec![member(&gk, BOB, 2)],
+            ..Default::default()
+        };
+        // Empty actor (no change_meta) still produces an entry, just unattributed.
+        let evs = derive(&gk, actions, "", pre, gproto::GroupState::default());
+        assert_eq!(evs[0].kind, GroupEventKind::MemberRemoved);
+        assert_eq!(evs[0].actor_did, "");
+        assert!(evs[0].summary.starts_with("Someone"));
     }
 }

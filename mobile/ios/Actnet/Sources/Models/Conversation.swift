@@ -16,6 +16,14 @@ struct Conversation: Identifiable, Hashable {
     var groupId: String?
     var lastMessage: String?
     var lastMessageDate: Date?
+    /// When the last message is a group system/metadata event (docs/03 §3.6),
+    /// these let the row render the resolved preview ("You made Bob an admin")
+    /// reactively — resolving DIDs to names at display time rather than freezing
+    /// a string at load time (when names may not be cached yet). `0`/`nil` for a
+    /// normal chat message, in which case `lastMessage` (the body) is shown.
+    var lastMessageKind: Int = 0
+    var lastMessageMetadata: String?
+    var lastMessageSenderDid: String?
     var isGroup: Bool = false
     /// True for a DM from an un-curated, un-blocked sender — an unaccepted
     /// message request (docs/12 §1). Drives the "Message request" label and
@@ -23,6 +31,14 @@ struct Conversation: Identifiable, Hashable {
     var isRequest: Bool = false
     /// True for a DM with a blocked contact (docs/12 §2).
     var isBlocked: Bool = false
+
+    /// Reset the system-event fields when the latest message becomes a normal
+    /// chat message, so the preview stops rendering a stale event line.
+    mutating func clearLastMessageEvent() {
+        lastMessageKind = 0
+        lastMessageMetadata = nil
+        lastMessageSenderDid = nil
+    }
 }
 
 /// Build a stable conversation id from a server-visible group id (URL-safe

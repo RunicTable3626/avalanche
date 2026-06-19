@@ -147,6 +147,8 @@ async fn load_conversations_one_row_per_convo_newest_first() {
             delivery_status: 1,
             edit_count: 0,
             deleted_at: None,
+            kind: 0,
+            metadata: None,
         }).await.unwrap();
     }
 
@@ -576,6 +578,8 @@ mod edit_delete_react {
                 delivery_status: 1,
                 edit_count: 0,
                 deleted_at: None,
+                kind: 0,
+                metadata: None,
             })
             .await
             .unwrap();

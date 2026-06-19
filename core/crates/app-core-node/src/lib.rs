@@ -79,6 +79,10 @@ pub struct StoredMessageJs {
     pub edited_at_ms: Option<i64>,
     pub read_at_ms: Option<i64>,
     pub delivery_status: u32,
+    /// 0 = normal chat; >0 = system/metadata timeline entry (docs/03 §3.6).
+    pub kind: i64,
+    /// JSON for system rows (event kind + actor/target DIDs); `None` otherwise.
+    pub metadata: Option<String>,
 }
 
 impl From<StoredMessageFfi> for StoredMessageJs {
@@ -92,6 +96,8 @@ impl From<StoredMessageFfi> for StoredMessageJs {
             edited_at_ms: m.edited_at_ms,
             read_at_ms: m.read_at_ms,
             delivery_status: m.delivery_status as u32,
+            kind: m.kind,
+            metadata: m.metadata,
         }
     }
 }
@@ -110,6 +116,10 @@ impl From<StoredMessageJs> for StoredMessageFfi {
             // Edit/delete state is managed by app-core, not the JS layer.
             edit_count: 0,
             deleted: false,
+            // The JS layer only ever saves normal chat messages; system rows
+            // are produced by app-core's group-event path.
+            kind: 0,
+            metadata: None,
         }
     }
 }
@@ -352,6 +362,46 @@ pub struct IncomingEventJs {
     pub message: Option<DecryptedMessageJs>,
     pub receipt: Option<DeliveryStatusUpdateJs>,
     pub group_invite: Option<GroupInviteJs>,
+    pub group_metadata: Option<GroupMetadataChangedJs>,
+}
+
+/// A `groupMetadataChanged` payload: a membership/metadata change derived from
+/// the group change log (docs/03 §3.6). Lets a bot (e.g. adminbot) observe who
+/// joined/left/was-added without rendering a UI; `summary` is a ready-to-log
+/// English line, the structured fields drive any custom handling.
+#[napi(object)]
+pub struct GroupMetadataChangedJs {
+    pub group_id: String,
+    pub revision: i64,
+    /// camelCase kind name, e.g. "memberJoined", "memberRemoved".
+    pub kind: String,
+    pub actor_did: String,
+    pub target_did: String,
+    pub target_emi: String,
+    pub occurred_at_ms: i64,
+    pub summary: String,
+}
+
+fn group_event_kind_name(kind: app_core::groups::GroupEventKind) -> &'static str {
+    use app_core::groups::GroupEventKind as K;
+    match kind {
+        K::MemberJoined => "memberJoined",
+        K::MemberJoinedViaLink => "memberJoinedViaLink",
+        K::MemberRequestedToJoin => "memberRequestedToJoin",
+        K::MemberInvited => "memberInvited",
+        K::MemberLeft => "memberLeft",
+        K::MemberRemoved => "memberRemoved",
+        K::JoinRequestApproved => "joinRequestApproved",
+        K::JoinRequestDenied => "joinRequestDenied",
+        K::InviteDeclined => "inviteDeclined",
+        K::JoinRequestCancelled => "joinRequestCancelled",
+        K::RoleChangedToAdmin => "roleChangedToAdmin",
+        K::RoleChangedToMember => "roleChangedToMember",
+        K::TitleChanged => "titleChanged",
+        K::DescriptionChanged => "descriptionChanged",
+        K::ExpiryChanged => "expiryChanged",
+        K::PolicyChanged => "policyChanged",
+    }
 }
 
 /// A `groupInvite` payload: we received a `GroupContext` DM for `group_id`
@@ -378,12 +428,14 @@ impl From<IncomingEvent> for IncomingEventJs {
                 message: Some(msg.into()),
                 receipt: None,
                 group_invite: None,
+                group_metadata: None,
             },
             IncomingEvent::ReceiptUpdate { update } => Self {
                 kind: "receipt".into(),
                 message: None,
                 receipt: Some(update.into()),
                 group_invite: None,
+                group_metadata: None,
             },
             IncomingEvent::GroupInvite {
                 group_id,
@@ -398,6 +450,7 @@ impl From<IncomingEvent> for IncomingEventJs {
                     hosting_server_url,
                     inviter_did,
                 }),
+                group_metadata: None,
             },
             // Editing/deletion/reactions (docs/33, docs/36): the store is
             // already updated by app-core. JS admin consumers don't act on
@@ -407,18 +460,21 @@ impl From<IncomingEvent> for IncomingEventJs {
                 message: None,
                 receipt: None,
                 group_invite: None,
+                group_metadata: None,
             },
             IncomingEvent::MessageDeleted { .. } => Self {
                 kind: "messageDeleted".into(),
                 message: None,
                 receipt: None,
                 group_invite: None,
+                group_metadata: None,
             },
             IncomingEvent::ReactionUpdated { .. } => Self {
                 kind: "reactionUpdated".into(),
                 message: None,
                 receipt: None,
                 group_invite: None,
+                group_metadata: None,
             },
             // A background storage sync applied remote records. Bots don't
             // render conversation lists (and opt out of storage sync), so this
@@ -428,6 +484,26 @@ impl From<IncomingEvent> for IncomingEventJs {
                 message: None,
                 receipt: None,
                 group_invite: None,
+                group_metadata: None,
+            },
+            // A membership/metadata change derived from the group change log
+            // (docs/03 §3.6). Carries the full structured payload so bots can
+            // act on who-did-what without a DB read.
+            IncomingEvent::GroupMetadataChanged { event } => Self {
+                kind: "groupMetadataChanged".into(),
+                message: None,
+                receipt: None,
+                group_invite: None,
+                group_metadata: Some(GroupMetadataChangedJs {
+                    group_id: event.group_id,
+                    revision: event.revision,
+                    kind: group_event_kind_name(event.kind).into(),
+                    actor_did: event.actor_did,
+                    target_did: event.target_did,
+                    target_emi: event.target_emi,
+                    occurred_at_ms: event.occurred_at_ms,
+                    summary: event.summary,
+                }),
             },
         }
     }
@@ -1006,6 +1082,15 @@ impl AppCore {
             .map_err(join_err)?
             .map_err(to_napi)?;
         Ok(s.into())
+    }
+
+    #[napi]
+    pub async fn list_groups(&self) -> napi::Result<Vec<String>> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.list_groups())
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
     }
 
     #[napi]

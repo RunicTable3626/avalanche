@@ -118,7 +118,10 @@ extension AppCoreProtocol {
     func denyJoinRequest(groupId: String, encryptedMemberId: String) throws {}
     func removeMember(groupId: String, encryptedMemberId: String) throws {}
     func changeMemberRole(groupId: String, encryptedMemberId: String, newRole: Int16) throws {}
+    func setGroupExpiry(groupId: String, expirySeconds: UInt32) throws {}
+    func setGroupTitle(groupId: String, newTitle: String) throws {}
     func applyPendingGroupChanges(groupId: String) throws -> Int64 { 0 }
+    func listGroups() throws -> [String] { [] }
     func rotateGroupPseudonym(groupId: String) throws -> Data { Data(count: 24) }
     func sendGroupMessage(groupId: String, plaintext: Data, sentAtMs: Int64) throws {}
 }

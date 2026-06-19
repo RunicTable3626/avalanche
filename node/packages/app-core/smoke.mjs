@@ -15,6 +15,14 @@ try {
   console.log("login error (expected):", e.message);
 }
 
+// Surface check for the listGroups() API (full exercise needs a server +
+// account, which this offline smoke can't set up).
+if (typeof AppCore.prototype.listGroups !== "function") {
+  console.error("unexpected: AppCore.prototype.listGroups is not a function");
+  process.exit(1);
+}
+console.log("listGroups present on AppCore");
+
 if (typeof globalThis.Temporal === "undefined") {
   console.warn(
     "warning: globalThis.Temporal is undefined. The wrapper expects native " +

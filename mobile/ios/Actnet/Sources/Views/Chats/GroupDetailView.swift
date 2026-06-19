@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// Minimal group detail screen (docs/03-groups.md step 8): member list and
-/// leave-group action. Roles, expiry timer, invite-link, and admin actions
-/// are deferred per the "Create + thread + member list" scope.
+/// Group detail screen (docs/03-groups.md): member list, admin role changes,
+/// disappearing-message timer, and leave-group. Admin-only controls are shown
+/// only when the current user is an admin; the server enforces the same.
 struct GroupDetailView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -13,6 +13,17 @@ struct GroupDetailView: View {
     @State private var summary: GroupSummaryFfi?
     @State private var loading: Bool = true
     @State private var errorMessage: String?
+    /// Bound to the timer picker; seeded from the loaded state so the initial
+    /// assignment doesn't fire a spurious change (we guard on the loaded value).
+    @State private var expirySeconds: UInt32 = 0
+    @State private var showRename = false
+    @State private var renameText = ""
+
+    /// True when the current user is an admin of this group — gates the
+    /// role/timer controls.
+    private var amAdmin: Bool {
+        summary?.members.first(where: { $0.did == accountId })?.role == 1
+    }
 
     var body: some View {
         Group {
@@ -20,11 +31,39 @@ struct GroupDetailView: View {
                 List {
                     Section {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(s.title.isEmpty ? "Group" : s.title).font(.headline)
+                            HStack {
+                                Text(s.title.isEmpty ? "Group" : s.title).font(.headline)
+                                if amAdmin {
+                                    Spacer()
+                                    Button("Rename") {
+                                        renameText = s.title
+                                        showRename = true
+                                    }
+                                    .font(.subheadline)
+                                }
+                            }
                             if !s.description.isEmpty {
                                 Text(s.description).font(.subheadline).foregroundStyle(.secondary)
                             }
                             Text("Revision \(s.revision)").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Section("Disappearing messages") {
+                        if amAdmin {
+                            DisappearingMessagesPicker(seconds: $expirySeconds)
+                                .onChange(of: expirySeconds) { _, newValue in
+                                    // Ignore the initial seeding assignment; only
+                                    // act on a real user change away from the
+                                    // loaded value.
+                                    if newValue != s.expirySeconds { setExpiry(newValue) }
+                                }
+                        } else {
+                            HStack {
+                                Text("Timer")
+                                Spacer()
+                                Text(DisappearingMessagesPicker.label(for: s.expirySeconds))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     Section("Members (\(s.members.count))") {
@@ -39,6 +78,28 @@ struct GroupDetailView: View {
                                         .padding(.horizontal, 6).padding(.vertical, 2)
                                         .background(Color.accentColor.opacity(0.15))
                                         .clipShape(Capsule())
+                                }
+                                // Admins get a visible per-member menu to
+                                // promote/demote anyone but themselves.
+                                if amAdmin && member.did != accountId {
+                                    Menu {
+                                        if member.role == 1 {
+                                            Button {
+                                                changeRole(member, toAdmin: false)
+                                            } label: {
+                                                Label("Remove admin", systemImage: "person.badge.minus")
+                                            }
+                                        } else {
+                                            Button {
+                                                changeRole(member, toAdmin: true)
+                                            } label: {
+                                                Label("Make admin", systemImage: "person.badge.shield.checkmark")
+                                            }
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis.circle")
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
@@ -73,7 +134,35 @@ struct GroupDetailView: View {
         .background(Color.avPaper)
         .navigationTitle("Group info")
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Rename group", isPresented: $showRename) {
+            TextField("Group name", text: $renameText)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { renameGroup(renameText) }
+                .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
         .task { await load() }
+    }
+
+    /// Rename the group (admin-only; server-enforced). app-core emits the
+    /// "changed the group name to X" timeline entry, so the conversation updates.
+    private func renameGroup(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Group names must not be empty, and skip a no-op rename.
+        guard let core = appState.core(accountId: accountId),
+              !trimmed.isEmpty,
+              trimmed != (summary?.title ?? "")
+        else { return }
+        let gid = groupId
+        Task {
+            do {
+                try await Task.detached {
+                    try core.setGroupTitle(groupId: gid, newTitle: trimmed)
+                }.value
+                await load()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     /// The current user sorts first; everyone else keeps server order.
@@ -107,8 +196,45 @@ struct GroupDetailView: View {
                 try core.fetchGroupState(groupId: gid)
             }.value
             self.summary = s
+            self.expirySeconds = s.expirySeconds
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Promote or demote a member (admin-only; server-enforced). The system
+    /// timeline entry is emitted by app-core, so the conversation updates too.
+    private func changeRole(_ member: GroupMemberFfi, toAdmin: Bool) {
+        guard let core = appState.core(accountId: accountId) else { return }
+        let gid = groupId
+        let emi = member.encryptedMemberId
+        let newRole: Int16 = toAdmin ? 1 : 0
+        Task {
+            do {
+                try await Task.detached {
+                    try core.changeMemberRole(groupId: gid, encryptedMemberId: emi, newRole: newRole)
+                }.value
+                await load()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Change the disappearing-message timer (admin-only; server-enforced).
+    private func setExpiry(_ seconds: UInt32) {
+        guard let core = appState.core(accountId: accountId) else { return }
+        let gid = groupId
+        Task {
+            do {
+                try await Task.detached {
+                    try core.setGroupExpiry(groupId: gid, expirySeconds: seconds)
+                }.value
+                await load()
+            } catch {
+                errorMessage = error.localizedDescription
+                await load()  // revert the picker to the server's value on failure
+            }
         }
     }
 

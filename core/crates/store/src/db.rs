@@ -181,6 +181,14 @@ impl IdentityStore {
                     "has_pending_request",
                     "INTEGER NOT NULL DEFAULT 0",
                 )?;
+                // docs/03 §3.6 group metadata/system timeline entries.
+                add_column_if_missing(
+                    conn,
+                    "message_history",
+                    "kind",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )?;
+                add_column_if_missing(conn, "message_history", "metadata", "TEXT")?;
                 Ok(())
             })
             .await

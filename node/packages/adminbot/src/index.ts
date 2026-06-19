@@ -5,8 +5,9 @@
 //     (server-side default; override via ADMINBOT_DID on the server).
 //   - Create the `#admins @ {hostname}` group, invite the DIDs listed in
 //     ADMINBOT_INITIAL_ADMINS at bootstrap.
-//   - Auto-invite every new account (AccountJoinedEvent WS push) to
-//     `#admins`.
+//   - Auto-invite every new human account (AccountJoinedEvent WS push) to
+//     every group adminbot is currently an admin of — `#admins` and any
+//     other group it's been added to as admin.
 //   - Respond to `/whoami` and `/help` in `#admins`.
 //
 // Persistent state:
@@ -170,6 +171,15 @@ async function handleMessage(
   groupId: string,
   event: IncomingEvent,
 ): Promise<void> {
+  // Being added to a group is interesting on its own: app-core auto-accepts
+  // the invite (so we're already a full member by the time this fires), and
+  // any group we're an admin of becomes an auto-invite target for new
+  // server-joiners (see handleAdminEvent). Just log it — no accept needed.
+  if (event.kind === "groupInvite") {
+    const { groupId: gid, inviterDid } = event.groupInvite;
+    console.log(`adminbot: added to group ${gid} by ${inviterDid}`);
+    return;
+  }
   if (event.kind !== "message") return;
   const msg = event.message;
   if (msg.senderDid === ADMINBOT_DID) return;
@@ -189,16 +199,15 @@ async function handleMessage(
 
 async function handleAdminEvent(
   core: AppCore,
-  groupId: string,
   event: AdminEvent,
 ): Promise<void> {
   if (event.kind !== "accountJoined") return;
   const { did } = event.accountJoined;
   if (did === ADMINBOT_DID) return;
 
-  // Only humans belong in #admins. Every account registration fires this
+  // Only humans get auto-invited. Every account registration fires this
   // event — including bots (e.g. testbot spins up a fresh bot account on each
-  // "Text Me"). Inviting them would fill #admins with bots and fan a Sender
+  // "Text Me"). Inviting them would fill groups with bots and fan a Sender
   // Key out to every member on each invite, so skip any bot account.
   let isBot: boolean;
   try {
@@ -208,28 +217,56 @@ async function handleAdminEvent(
     return;
   }
   if (isBot) {
-    console.log(`adminbot: new account ${did} is a bot — not inviting to #admins`);
+    console.log(`adminbot: new account ${did} is a bot — not auto-inviting`);
     return;
   }
 
-  console.log(`adminbot: new account ${did} — inviting to #admins`);
-  try {
-    await core.inviteMember(groupId, did, "member");
-  } catch (e) {
-    console.error(`adminbot: invite of ${did} failed: ${(e as Error).message}`);
-    return;
-  }
+  await inviteToAdminGroups(core, did);
+
   // Send a 1:1 welcome DM. Goes over the same sealed-sender channel the
-  // GroupContext invite already opened, so it works regardless of whether
-  // the recipient has accepted the group invite yet.
+  // GroupContext invite opens, so it works regardless of whether the
+  // recipient has accepted any group invite yet.
   try {
     await core.sendDm(
       did,
-      "Welcome! You've been added to #admins. Type /help to see what I can do.",
+      "Welcome! You've been added to this server's groups. Type /help to see what I can do.",
     );
     console.log(`adminbot: sent welcome DM to ${did}`);
   } catch (e) {
     console.error(`adminbot: welcome DM to ${did} failed: ${(e as Error).message}`);
+  }
+}
+
+// Invite a new server-joiner into every group adminbot is currently an admin
+// of. The admin check is live (a group's invite policy defaults to admin-only,
+// and the bot may only have been added as a plain member) — non-admin groups
+// are skipped. #admins is just one such group: adminbot founded it, so it's
+// always admin there. Per-group failures are logged and don't abort the rest.
+async function inviteToAdminGroups(core: AppCore, did: string): Promise<void> {
+  let groupIds: string[];
+  try {
+    groupIds = await core.listGroups();
+  } catch (e) {
+    console.error(`adminbot: listGroups failed: ${(e as Error).message}; skipping invites`);
+    return;
+  }
+  for (const gid of groupIds) {
+    let summary;
+    try {
+      summary = await core.fetchGroupState(gid);
+    } catch (e) {
+      console.error(`adminbot: fetchGroupState(${gid}) failed: ${(e as Error).message}; skipping`);
+      continue;
+    }
+    const me = summary.members.find((m) => m.did === ADMINBOT_DID);
+    if (me?.role !== "admin") continue; // not an admin here — leave it alone
+    if (summary.members.some((m) => m.did === did)) continue; // already a member
+    try {
+      console.log(`adminbot: inviting ${did} to ${gid} ("${summary.title}")`);
+      await core.inviteMember(gid, did, "member");
+    } catch (e) {
+      console.error(`adminbot: invite of ${did} to ${gid} failed: ${(e as Error).message}`);
+    }
   }
 }
 
@@ -281,7 +318,7 @@ async function run(): Promise<void> {
 
   const adminLoop = (async () => {
     for await (const event of core.adminEvents()) {
-      handleAdminEvent(core, groupId, event).catch((e) => {
+      handleAdminEvent(core, event).catch((e) => {
         console.error(`adminbot: admin handler error: ${(e as Error).message}`);
       });
     }

@@ -242,7 +242,9 @@ CREATE TABLE IF NOT EXISTS message_history (
     read_at           INTEGER,                         -- NULL = unread
     delivery_status   INTEGER NOT NULL DEFAULT 1,      -- 0=sending..3=read
     edit_count        INTEGER NOT NULL DEFAULT 0,
-    deleted_at        INTEGER                          -- non-NULL = tombstone
+    deleted_at        INTEGER,                         -- non-NULL = tombstone
+    kind              INTEGER NOT NULL DEFAULT 0,      -- 0 = normal chat, >0 = system/metadata event (docs/03 §3.6)
+    metadata          TEXT                             -- JSON for system rows (actor/target dids, event kind); NULL for normal chat
 );
 CREATE INDEX IF NOT EXISTS idx_message_history_conv
     ON message_history (conversation_id, sent_at);

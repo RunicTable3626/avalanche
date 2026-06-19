@@ -113,7 +113,8 @@ export type ConnectionState =
 export type IncomingEvent =
   | { kind: "message"; message: DecryptedMessage }
   | { kind: "receipt"; receipt: DeliveryStatusUpdate }
-  | { kind: "groupInvite"; groupInvite: GroupInvite };
+  | { kind: "groupInvite"; groupInvite: GroupInvite }
+  | { kind: "groupMetadataChanged"; groupMetadata: GroupMetadataChanged };
 
 /**
  * A `GroupContext` DM was received for `groupId` — the master key has been
@@ -126,6 +127,31 @@ export interface GroupInvite {
   groupId: string;
   hostingServerUrl: string;
   inviterDid: string;
+}
+
+/**
+ * A membership/metadata change derived from a group's change log (docs/03
+ * §3.6) — e.g. someone joined, left, was added/removed, or a role changed.
+ * app-core has already persisted the matching system row; bots can act on the
+ * structured fields (e.g. adminbot noting it was added to a group) or log
+ * {@link summary} directly.
+ *
+ * @category Types
+ */
+export interface GroupMetadataChanged {
+  groupId: string;
+  revision: number;
+  /** e.g. `"memberJoined"`, `"memberRemoved"`, `"roleChangedToAdmin"`. */
+  kind: string;
+  /** DID of the actor who performed the change (empty if unattributed). */
+  actorDid: string;
+  /** DID of the member the change is about (empty if not yet known). */
+  targetDid: string;
+  /** base64 encrypted_member_id of the target, when the action names one. */
+  targetEmi: string;
+  occurredAt: Temporal.Instant;
+  /** Ready-to-log English one-liner (uses DIDs, not display names). */
+  summary: string;
 }
 
 /**
@@ -231,6 +257,16 @@ export interface StoredMessage {
   readAt?: Temporal.Instant;
   /** Outbound delivery status (incoming messages stay at `"delivered"`). */
   deliveryStatus: DeliveryStatus;
+  /**
+   * 0 = normal chat message; >0 = a system/metadata timeline entry (docs/03
+   * §3.6 group event). Renderers show kind>0 rows as a centered line.
+   */
+  kind: number;
+  /**
+   * JSON for system rows (event kind + actor/target DIDs); `undefined` for
+   * normal chat messages.
+   */
+  metadata?: string;
 }
 
 /**
@@ -475,6 +511,8 @@ const storedMessageFromNative = (m: native.StoredMessageJs): StoredMessage => ({
   editedAt: instantFromMsOpt(m.editedAtMs),
   readAt: instantFromMsOpt(m.readAtMs),
   deliveryStatus: deliveryFromNum(m.deliveryStatus),
+  kind: m.kind,
+  metadata: m.metadata ?? undefined,
 });
 
 const storedMessageToNative = (m: StoredMessage): native.StoredMessageJs => ({
@@ -486,6 +524,9 @@ const storedMessageToNative = (m: StoredMessage): native.StoredMessageJs => ({
   editedAtMs: m.editedAt ? instantToMs(m.editedAt) : undefined,
   readAtMs: m.readAt ? instantToMs(m.readAt) : undefined,
   deliveryStatus: deliveryToNum(m.deliveryStatus),
+  // The JS layer only saves normal chat messages; app-core writes system rows.
+  kind: m.kind ?? 0,
+  metadata: m.metadata ?? undefined,
 });
 
 const conversationSummaryFromNative = (c: native.ConversationSummaryJs): ConversationSummary => ({
@@ -518,6 +559,21 @@ const incomingEventFromNative = (e: native.IncomingEventJs): IncomingEvent | nul
         groupId: e.groupInvite.groupId,
         hostingServerUrl: e.groupInvite.hostingServerUrl,
         inviterDid: e.groupInvite.inviterDid,
+      },
+    };
+  }
+  if (e.kind === "groupMetadataChanged" && e.groupMetadata) {
+    return {
+      kind: "groupMetadataChanged",
+      groupMetadata: {
+        groupId: e.groupMetadata.groupId,
+        revision: e.groupMetadata.revision,
+        kind: e.groupMetadata.kind,
+        actorDid: e.groupMetadata.actorDid,
+        targetDid: e.groupMetadata.targetDid,
+        targetEmi: e.groupMetadata.targetEmi,
+        occurredAt: instantFromMs(e.groupMetadata.occurredAtMs),
+        summary: e.groupMetadata.summary,
       },
     };
   }
@@ -1272,6 +1328,19 @@ export class AppCore {
    */
   async fetchGroupState(groupId: string): Promise<GroupSummary> {
     return groupSummaryFromNative(await this._native.fetchGroupState(groupId));
+  }
+
+  /**
+   * Group ids of every group held locally — every group we have the master
+   * key for, including ones we were invited to (invites are auto-accepted).
+   * Reads the local group store directly, so it surfaces groups with no
+   * messages yet (unlike {@link AppCore.loadConversations}). Pair with
+   * {@link AppCore.fetchGroupState} to inspect membership and roles.
+   *
+   * @category Groups
+   */
+  async listGroups(): Promise<string[]> {
+    return await this._native.listGroups();
   }
 
   /**

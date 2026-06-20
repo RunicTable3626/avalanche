@@ -273,7 +273,9 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
             plaintext: Data(text.utf8),
             sentAtMs: now,
             groupId: nil,
-            expireTimerSecs: 0
+            expireTimerSecs: 0,
+            profileKey: nil,
+            isRequest: false
         )
         nextMessageId += 1
         pendingMessages.append(msg)

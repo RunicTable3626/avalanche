@@ -36,6 +36,8 @@ extension AppCoreProtocol {
     func listBlocked() throws -> [ContactRowFfi] { [] }
     func acceptRequest(did: String) throws {}
     func deleteRequest(did: String) throws {}
+    func setPendingRequest(did: String, pending: Bool) throws {}
+    func fetchAndCacheProfile(did: String, profileKey: Data) throws {}
     func reportAndBlock(did: String, reason: String) throws {}
 
     func hasRecovery() -> Bool { false }

@@ -484,3 +484,80 @@ impl signal::SenderKeyStore for DeviceStore {
 // ── crypto::Store blanket impl ────────────────────────────────────────────────
 
 impl crypto::Store for DeviceStore {}
+
+// ── sender-key distribution bookkeeping ───────────────────────────────────────
+
+impl DeviceStore {
+    /// Record that `recipient_did` has received our current sender key for
+    /// `group_id` (Signal-style lazy distribution). Idempotent.
+    pub async fn mark_sender_key_shared(
+        &self,
+        group_id: &str,
+        recipient_did: &str,
+    ) -> Result<(), StoreError> {
+        let group_id = group_id.to_string();
+        let recipient_did = recipient_did.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO sender_key_shared (group_id, recipient_did) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![group_id, recipient_did],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(StoreError::Db)
+    }
+
+    /// Of `members`, return those that have NOT yet received our current sender
+    /// key for `group_id` — i.e. the recipients the send path still owes an
+    /// SKDM. Order follows `members`.
+    pub async fn sender_key_unshared_members(
+        &self,
+        group_id: &str,
+        members: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        if members.is_empty() {
+            return Ok(Vec::new());
+        }
+        let group_id = group_id.to_string();
+        let members = members.to_vec();
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT 1 FROM sender_key_shared WHERE group_id = ?1 AND recipient_did = ?2",
+                )?;
+                let mut out = Vec::new();
+                for did in members {
+                    let shared = stmt
+                        .query_row(rusqlite::params![group_id, did], |_| Ok(()))
+                        .optional()?
+                        .is_some();
+                    if !shared {
+                        out.push(did);
+                    }
+                }
+                Ok(out)
+            })
+            .await
+            .map_err(StoreError::Db)
+    }
+
+    /// Forget every shared-with record for `group_id`. Call when our sender key
+    /// for the group is re-seeded (recovery / rotation) so all members
+    /// re-receive the fresh key on the next send.
+    pub async fn clear_sender_key_shared(&self, group_id: &str) -> Result<(), StoreError> {
+        let group_id = group_id.to_string();
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "DELETE FROM sender_key_shared WHERE group_id = ?1",
+                    rusqlite::params![group_id],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(StoreError::Db)
+    }
+}

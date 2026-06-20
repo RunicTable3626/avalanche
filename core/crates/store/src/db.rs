@@ -310,6 +310,7 @@ impl DeviceStore {
             .await
             .map_err(StoreError::Db)
     }
+
 }
 
 /// Derive the device-database path that sits beside the identity database path.

@@ -129,6 +129,20 @@ pub struct DecryptedMessage {
     /// Disappearing-messages timer stamped on the envelope (docs/03 §5);
     /// seconds, `0` = no expiry. The client persists it via `save_message`.
     pub expire_timer_secs: u32,
+    /// The sender's profile key carried on the envelope, if any (any variant
+    /// may carry one). app-core no longer fetches/caches the sender's profile
+    /// automatically; a consumer that wants display names calls
+    /// `fetch_and_cache_profile(sender_did, profile_key)` with this. `None`
+    /// when the envelope carried no key.
+    pub profile_key: Option<Vec<u8>>,
+    /// True when this is an inbound DM from a sender that does not auto-pass the
+    /// message-request gate (docs/12 §1) — i.e. the consumer should treat it as
+    /// a *message request* and, if it tracks requests, call
+    /// `set_pending_request(sender_did, true)`. Always `false` for group
+    /// deliveries and for senders that pass the gate (curated or known bot).
+    /// app-core no longer sets the pending-request flag itself; it only reports
+    /// the verdict so the consumer can decide whether to persist it.
+    pub is_request: bool,
 }
 
 /// A message from local history (persisted in SQLCipher).
@@ -573,6 +587,9 @@ async fn restore_group(
     //    anything we send until they install a fresh SKDM from us.
     let did = inner.did.clone();
     let device_id = inner.device_id;
+    // Re-seeding produces a fresh sender-key chain, so every member must
+    // re-receive it: drop any stale shared-with records for this group first.
+    let _ = inner.store.clear_sender_key_shared(&group_id_b64).await;
     let skdm = groups::seed_own_sender_key(&mut inner.store, &did, device_id, &mk).await?;
     let group_id_bytes = groups::b64d(&group_id_b64)?;
     let recipients = groups::other_member_dids(&inner.store, &group_id_b64, &did).await?;
@@ -594,6 +611,8 @@ async fn restore_group(
             .await
         {
             tracing::warn!("[recovery] SKDM to {rdid} for restored group failed: {e}");
+        } else {
+            let _ = inner.store.mark_sender_key_shared(&group_id_b64, &rdid).await;
         }
     }
     Ok(())
@@ -2336,6 +2355,44 @@ impl AppCore {
         .map_err(AppErrorFfi::from)
     }
 
+    /// Set (or clear) the local pending-message-request flag on a contact row,
+    /// creating the row if absent. Local-only (not multi-device synced). app-core
+    /// no longer sets this automatically on inbound; a consumer that surfaces a
+    /// message-request inbox calls this when it receives a `DecryptedMessage`
+    /// with `is_request == true` (docs/12 §1). `accept_request` / `delete_request`
+    /// / `block_contact` clear it.
+    pub fn set_pending_request(&self, did: String, pending: bool) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner
+                .store
+                .set_pending_request(&did, pending)
+                .await
+                .map_err(AppError::from)
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
+    /// Fetch the sender's encrypted profile blob using the `profile_key` carried
+    /// on an inbound `DecryptedMessage`, decrypt it, and cache the display name
+    /// locally. app-core no longer does this automatically on inbound (it would
+    /// block on the network and persist a name a bot never needs); a consumer
+    /// that shows display names opts in by calling this with
+    /// `DecryptedMessage.profile_key`. Best-effort and idempotent: a no-op when
+    /// the key already matches the cache, and errors are swallowed. Blocks on the
+    /// network — call from a background thread.
+    pub fn fetch_and_cache_profile(
+        &self,
+        did: String,
+        profile_key: Vec<u8>,
+    ) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            inner.handle_inbound_profile_key(&did, &profile_key).await;
+        });
+        Ok(())
+    }
+
     /// Block a DID (docs/12 §2). Creates a bare contact row if none exists,
     /// sets `is_blocked`, and clears any pending message request. Local + LWW
     /// multi-device synced via the contact storage adapter. Incoming messages
@@ -3158,6 +3215,19 @@ impl AppCore {
         Ok(())
     }
 
+    /// Async set/clear of the pending-request flag for tests and bots. Mirrors
+    /// the consumer's opt-in on receiving a `DecryptedMessage` with
+    /// `is_request == true`: record a non-curating interaction and flag the
+    /// request so a later Accept/Delete can act on it (docs/12 §1).
+    pub async fn set_pending_request_async(&self, did: &str, pending: bool) -> Result<(), AppError> {
+        let inner = self.inner.lock().await;
+        if pending {
+            inner.store.touch_contact(did, false, Timestamp::now()).await?;
+        }
+        inner.store.set_pending_request(did, pending).await?;
+        Ok(())
+    }
+
     /// Test/bot accessor for a contact's `(is_curated, is_blocked,
     /// has_pending_request)` gate state.
     pub async fn contact_state_async(&self, did: &str) -> Option<(bool, bool, bool)> {
@@ -3422,6 +3492,7 @@ impl AppCore {
         inner
             .send_dm(None, recipient_did, &skdm_msg.encode_to_vec(), None)
             .await?;
+        let _ = inner.store.mark_sender_key_shared(group_id, recipient_did).await;
         Ok(())
     }
 
@@ -3454,6 +3525,7 @@ impl AppCore {
             inner
                 .send_dm(None, &rdid, &skdm_msg.encode_to_vec(), None)
                 .await?;
+            let _ = inner.store.mark_sender_key_shared(group_id, &rdid).await;
         }
         inner.refresh_recovery_blob_best_effort().await;
         Ok(())
@@ -3491,6 +3563,9 @@ impl AppCore {
         plaintext: &[u8],
     ) -> Result<(), AppError> {
         let mut inner = self.inner.lock().await;
+        // Mirror the production send path (`send_group_content`): ensure every
+        // current member has our sender key before sending under it.
+        inner.distribute_sender_key_if_needed(group_id).await?;
         let did = inner.did.clone();
         let device_id = inner.device_id;
         let server_url = inner.client.server_url().to_string();

@@ -54,6 +54,14 @@ pub struct DecryptedMessageJs {
     pub plaintext: Buffer,
     pub sent_at_ms: Option<i64>,
     pub group_id: Option<String>,
+    /// Sender's profile key from the envelope, if any. app-core does not cache
+    /// the profile automatically; a bot that wants the display name passes this
+    /// to `fetchAndCacheProfile`.
+    pub profile_key: Option<Buffer>,
+    /// True for an inbound DM that the message-request gate treats as a request
+    /// (docs/12 §1). Bots typically ignore this; a bot that tracks requests
+    /// calls `setPendingRequest`.
+    pub is_request: bool,
 }
 
 impl From<DecryptedMessage> for DecryptedMessageJs {
@@ -65,6 +73,8 @@ impl From<DecryptedMessage> for DecryptedMessageJs {
             plaintext: m.plaintext.into(),
             sent_at_ms: m.sent_at_ms,
             group_id: m.group_id,
+            profile_key: m.profile_key.map(Into::into),
+            is_request: m.is_request,
         }
     }
 }
@@ -1040,6 +1050,29 @@ impl AppCore {
     pub async fn touch_contact(&self, did: String, curated: bool) -> napi::Result<()> {
         let core = self.inner.clone();
         tokio::task::spawn_blocking(move || core.touch_contact(did, curated))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    #[napi]
+    pub async fn set_pending_request(&self, did: String, pending: bool) -> napi::Result<()> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.set_pending_request(did, pending))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    #[napi]
+    pub async fn fetch_and_cache_profile(
+        &self,
+        did: String,
+        profile_key: Buffer,
+    ) -> napi::Result<()> {
+        let core = self.inner.clone();
+        let pk = profile_key.to_vec();
+        tokio::task::spawn_blocking(move || core.fetch_and_cache_profile(did, pk))
             .await
             .map_err(join_err)?
             .map_err(to_napi)

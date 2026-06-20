@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS sender_keys (
     PRIMARY KEY (address, distribution_id)
 );
 
+-- Which members have received *our* current sender key for a group, so the
+-- send path (Signal-style lazy distribution) only ships an SKDM to members
+-- that don't have it yet — e.g. someone who joined after us. Cleared when we
+-- re-seed our sender key (recovery / rotation) so everyone re-receives it.
+CREATE TABLE IF NOT EXISTS sender_key_shared (
+    group_id      TEXT NOT NULL,
+    recipient_did TEXT NOT NULL,
+    PRIMARY KEY (group_id, recipient_did)
+);
+
 -- Push notification pseudonym + device token for this device.
 CREATE TABLE IF NOT EXISTS push_state (
     id            INTEGER PRIMARY KEY CHECK (id = 1),
@@ -315,6 +325,7 @@ pub const DEVICE_TABLES: &[&str] = &[
     "kyber_prekeys",
     "prekey_counters",
     "sender_keys",
+    "sender_key_shared",
     "push_state",
     "group_credentials",
     "group_server_params",

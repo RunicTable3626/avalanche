@@ -389,6 +389,10 @@ impl AppCoreInner {
             // Base value; the real timer is read from the inner envelope when
             // `process_decrypted` unwraps the text body.
             expire_timer_secs: 0,
+            // Group deliveries are never message requests and carry no
+            // DM-style profile_key handling here.
+            profile_key: None,
+            is_request: false,
         })
     }
 
@@ -460,6 +464,9 @@ impl AppCoreInner {
                 .await
             {
                 tracing::warn!("[groups] SKDM DM to {rdid} failed: {e}");
+            } else {
+                // Record so the lazy distribution path doesn't resend.
+                let _ = self.store.mark_sender_key_shared(group_id_b64, &rdid).await;
             }
         }
 
@@ -735,12 +742,67 @@ impl AppCoreInner {
             .unwrap_or(0)
     }
 
+    /// Signal-style lazy sender-key distribution: before sending under our
+    /// group sender key, ship our SKDM to every current member that hasn't
+    /// received it yet. A member who joined after us only announced *their* key
+    /// to us at join time; nobody re-sends *our* key to them, so without this
+    /// they'd fail to decrypt our messages with "missing sender key state".
+    /// `create_skdm` reuses our existing chain (see crypto::sender_keys), so
+    /// this never rotates the key — it only fills distribution gaps.
+    pub(crate) async fn distribute_sender_key_if_needed(
+        &mut self,
+        group_id: &str,
+    ) -> Result<(), AppError> {
+        let did = self.did.clone();
+        let members = groups::other_member_dids(&self.store, group_id, &did).await?;
+        let unshared = self
+            .store
+            .sender_key_unshared_members(group_id, &members)
+            .await?;
+        if unshared.is_empty() {
+            return Ok(());
+        }
+        let device_id = self.device_id;
+        let mk = groups::master_key_for(&self.store, group_id).await?;
+        let skdm = groups::seed_own_sender_key(&mut self.store, &did, device_id, &mk).await?;
+        let group_id_bytes = groups::b64d(group_id)?;
+        let dist = groups::distribution_id_for(&mk).as_bytes().to_vec();
+        for rdid in unshared {
+            let skdm_msg = ContentMessage {
+                body: Some(Body::SenderKeyDistribution(proto::SenderKeyDistribution {
+                    group_id: group_id_bytes.clone(),
+                    distribution_id: dist.clone(),
+                    skdm: skdm.clone(),
+                })),
+                timestamp_ms: Timestamp::now().as_millis() as u64,
+                profile_key: Vec::new(),
+                expire_timer_secs: 0,
+            };
+            // Best-effort per member: a transient failure to one recipient must
+            // not block the group send. We only mark a member shared once their
+            // SKDM actually went out, so the next send retries the stragglers.
+            if let Err(e) = self
+                .send_dm(None, &rdid, &skdm_msg.encode_to_vec(), None)
+                .await
+            {
+                tracing::warn!("[groups] lazy SKDM to {rdid} for {group_id} failed: {e}");
+                continue;
+            }
+            self.store.mark_sender_key_shared(group_id, &rdid).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn send_group_content(
         &mut self,
         group_id: &str,
         body: Body,
         sent_at_ms: u64,
     ) -> Result<(), AppError> {
+        // Ensure every current member has our sender key before we encrypt
+        // under it (Signal-style lazy distribution).
+        self.distribute_sender_key_if_needed(group_id).await?;
+
         let did = self.did.clone();
         let device_id = self.device_id;
         let server_url = self.client.server_url().to_string();
@@ -853,10 +915,12 @@ impl AppCoreInner {
             // Parse envelope: unwrap content, skip receipts (handled internally).
             match ContentMessage::decode(raw.plaintext.as_slice()) {
                 Ok(content) => {
-                    if !content.profile_key.is_empty() {
-                        // Note that this will block on network if we have not already downloaded the contact's profile blob
-                        self.handle_inbound_profile_key(&raw.sender_did, &content.profile_key).await;
-                    }
+                    // Capture the sender's profile_key to attach to the surfaced
+                    // message. app-core no longer fetches/caches the profile
+                    // automatically (and no longer blocks on the network here) —
+                    // the consumer opts in via `fetch_and_cache_profile`.
+                    let profile_key =
+                        (!content.profile_key.is_empty()).then(|| content.profile_key.clone());
                     match content.body {
                         Some(Body::Receipt(receipt)) => {
                             let status: u8 = if receipt.r#type == receipt_message::Type::Read as i32 {
@@ -884,35 +948,26 @@ impl AppCoreInner {
                             // Message-request gate (DM only — /v1/messages
                             // carries DMs). A blocked sender's message was
                             // decrypted to advance the ratchet, then dropped:
-                            // no event, no delivery receipt (docs/12 §2).
+                            // no event, no delivery receipt (docs/12 §2). The
+                            // blocking drop and the request verdict stay in
+                            // app-core; persisting the verdict (recency bump,
+                            // pending-request flag) is the consumer's opt-in.
                             let gate = self.sender_gate(&raw.sender_did).await;
                             if gate.is_blocked {
                                 continue;
                             }
-                            // Recency bump (non-curating). An un-curated human
-                            // is a pending request; the flag lets Delete dismiss
-                            // it without curating (docs/52).
-                            let _ = self
-                                .store
-                                .touch_contact(&raw.sender_did, false, Timestamp::now())
-                                .await;
-                            if gate.is_request() {
-                                let _ = self
-                                    .store
-                                    .set_pending_request(&raw.sender_did, true)
-                                    .await;
-                            }
+                            let is_request = gate.is_request();
                             // Auto-send delivery receipt — allowed even for an
                             // un-accepted request (docs/12 §1), DM only.
                             if let Some(ts) = sent_at {
-                                let profile_key = self.own_profile_key().await;
+                                let own_profile_key = self.own_profile_key().await;
                                 let delivery = ContentMessage {
                                     body: Some(Body::Receipt(ReceiptMessage {
                                         r#type: receipt_message::Type::Delivery as i32,
                                         timestamps: vec![ts as u64],
                                     })),
                                     timestamp_ms: 0,
-                                    profile_key,
+                                    profile_key: own_profile_key,
                                     expire_timer_secs: 0,
                                 };
                                 let _ = self
@@ -923,6 +978,8 @@ impl AppCoreInner {
                                 plaintext: body.into_bytes(),
                                 sent_at_ms: sent_at,
                                 expire_timer_secs: content.expire_timer_secs,
+                                profile_key,
+                                is_request,
                                 ..raw
                             });
                         }
@@ -970,6 +1027,7 @@ impl AppCoreInner {
                                     decrypted.push(DecryptedMessage {
                                         plaintext,
                                         group_id: Some(groups::b64(&gm.group_id)),
+                                        profile_key,
                                         ..raw
                                     });
                                 }
@@ -1086,6 +1144,10 @@ impl AppCoreInner {
             // Base value; the real timer is read from the envelope when
             // `process_decrypted` unwraps the text body.
             expire_timer_secs: 0,
+            // Base values; populated from the envelope / gate verdict when the
+            // content body is unwrapped.
+            profile_key: None,
+            is_request: false,
         })
     }
 }
@@ -1104,13 +1166,11 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
         }
     };
 
-    // Process inbound profile_key (any variant may carry one).
-    if !msg.profile_key.is_empty() {
-        let inner = core.inner.lock().await;
-        inner
-            .handle_inbound_profile_key(&decrypted.sender_did, &msg.profile_key)
-            .await;
-    }
+    // Capture the sender's profile_key (any variant may carry one) so it can be
+    // attached to the surfaced message. app-core no longer fetches/caches the
+    // sender's profile automatically — the consumer opts in by calling
+    // `fetch_and_cache_profile(sender_did, profile_key)`.
+    let profile_key = (!msg.profile_key.is_empty()).then(|| msg.profile_key.clone());
 
     // The conversation this content belongs to: the group thread for group
     // deliveries, otherwise the DM with the sender. Edit/delete/reaction and
@@ -1158,7 +1218,12 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
             };
 
             // Message-request gate (docs/12 §1) — DMs only; group text arrives
-            // as `GroupMessage`, not here.
+            // as `GroupMessage`, not here. The blocking *drop* and the
+            // request/curated *verdict* stay in app-core (single source of
+            // truth, docs/12); persisting the verdict (recency bump,
+            // pending-request flag) is now the consumer's opt-in via
+            // `touch_contact` / `set_pending_request`.
+            let mut is_request = false;
             if decrypted.group_id.is_none() {
                 let inner = core.inner.lock().await;
                 let gate = inner.sender_gate(&decrypted.sender_did).await;
@@ -1167,24 +1232,7 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
                     // no notification, no delivery receipt (docs/12 §2).
                     return;
                 }
-                // Recency bump (non-curating). Un-curated human → pending
-                // request flag so Delete can dismiss without curating.
-                let _ = inner
-                    .store
-                    .touch_contact(&decrypted.sender_did, false, Timestamp::now())
-                    .await;
-                if gate.is_request() {
-                    let _ = inner
-                        .store
-                        .set_pending_request(&decrypted.sender_did, true)
-                        .await;
-                }
-            } else {
-                let inner = core.inner.lock().await;
-                let _ = inner
-                    .store
-                    .touch_contact(&decrypted.sender_did, false, Timestamp::now())
-                    .await;
+                is_request = gate.is_request();
             }
 
             // Auto-send delivery receipt to the sender — DM only. Group
@@ -1193,14 +1241,14 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
             if let (Some(ts), None) = (sent_at, decrypted.group_id.as_deref()) {
                 let ws = core.ws.lock().expect("ws mutex poisoned").clone();
                 let mut inner = core.inner.lock().await;
-                let profile_key = inner.own_profile_key().await;
+                let own_profile_key = inner.own_profile_key().await;
                 let delivery = ContentMessage {
                     body: Some(Body::Receipt(ReceiptMessage {
                         r#type: receipt_message::Type::Delivery as i32,
                         timestamps: vec![ts as u64],
                     })),
                     timestamp_ms: 0,
-                    profile_key,
+                    profile_key: own_profile_key,
                     expire_timer_secs: 0,
                 };
                 let _ = inner
@@ -1212,6 +1260,8 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
                 plaintext: body.into_bytes(),
                 sent_at_ms: sent_at,
                 expire_timer_secs: msg.expire_timer_secs,
+                profile_key,
+                is_request,
                 ..decrypted
             };
             let _ = core.event_tx.send(IncomingEvent::Message { msg: out });
@@ -1291,14 +1341,13 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
             .await
             {
                 Ok(plaintext) => {
-                    // Group co-member traffic is a non-curating contact touch.
-                    let _ = inner
-                        .store
-                        .touch_contact(&decrypted.sender_did, false, Timestamp::now())
-                        .await;
+                    // Recency bump for group co-member traffic is now the
+                    // consumer's opt-in via `touch_contact`; surface the
+                    // profile_key so it can refresh the sender's name too.
                     let out = DecryptedMessage {
                         plaintext,
                         group_id: Some(groups::b64(&gm.group_id)),
+                        profile_key,
                         ..decrypted
                     };
                     let _ = core.event_tx.send(IncomingEvent::Message { msg: out });

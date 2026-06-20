@@ -1690,6 +1690,26 @@ final class AppState: ObservableObject {
                 expireAtMs: nil
             )
             Task.detached { try? core.saveMessage(msg: stored) }
+
+            // Contact/profile metadata is now an explicit client opt-in:
+            // app-core decrypts and surfaces the message but no longer writes
+            // these on receive (keeps non-UI clients like bots from persisting
+            // metadata they don't need). Mirror the old behavior here.
+            //  - recency bump (non-curating) so the People list / sort updates,
+            //  - pending-request flag when the gate flagged this as a request,
+            //  - fetch + cache the sender's display name if a profile_key rode
+            //    along (blocks on the network, hence detached).
+            let profileKey = msg.profileKey
+            let isRequest = msg.isRequest
+            Task.detached {
+                try? core.touchContact(did: senderDid, curated: false)
+                if isRequest {
+                    try? core.setPendingRequest(did: senderDid, pending: true)
+                }
+                if let pk = profileKey {
+                    try? core.fetchAndCacheProfile(did: senderDid, profileKey: pk)
+                }
+            }
         }
 
         // Fire a local notification (respects scene phase + currently-viewed

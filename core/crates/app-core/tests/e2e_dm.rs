@@ -218,11 +218,20 @@ async fn message_request_block_and_report() {
     let bob_did = bob.did_async().await;
 
     // 1. Alice, a stranger to Bob, makes first contact. A request is still
-    //    delivered (the gate surfaces it; it doesn't drop), and Bob now has a
-    //    pending, un-curated, un-blocked row for Alice.
+    //    delivered (the gate surfaces it; it doesn't drop). app-core no longer
+    //    persists the request itself — it reports the verdict via
+    //    `is_request`, and the consumer opts in by flagging it.
     alice.send_dm_async(&bob_did, b"hi, buy my coins", now_ms()).await.unwrap();
     let msgs = only_from(&bob.receive_messages_async().await.unwrap(), &alice_did);
     assert_eq!(msgs.len(), 1, "a first-contact request is still delivered");
+    assert!(msgs[0].is_request, "a stranger's first contact is surfaced as a request");
+    // Before the consumer opts in, no contact row was written on receive.
+    assert!(
+        bob.contact_state_async(&alice_did).await.is_none(),
+        "receive no longer auto-persists a contact row"
+    );
+    // Consumer opts in to tracking the request (what iOS does on the event).
+    bob.set_pending_request_async(&alice_did, true).await.unwrap();
     let (curated, blocked, pending) = bob.contact_state_async(&alice_did).await.unwrap();
     assert!(!curated && !blocked && pending, "stranger's first contact is a pending request");
 

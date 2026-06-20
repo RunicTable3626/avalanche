@@ -228,6 +228,102 @@ async fn three_member_fanout_roundtrip() {
     assert_eq!(bob_msgs2[0].sender_did, carol_did);
 }
 
+/// A later joiner can decrypt an earlier member's group messages, even though
+/// that earlier member's join-time SKDM never reached them.
+///
+/// Topology: alice invites bob and carol. Bob accepts *first* — his accept-time
+/// SKDM fans out only to the members present then (alice), not carol. Carol
+/// accepts *second*. So carol has alice's key (from the invite) but never
+/// received bob's. Before Signal-style lazy distribution, bob's group message
+/// was undecryptable for carol ("missing sender key state"). Now bob's send
+/// first ships his SKDM to any member that lacks it (carol), so she decrypts.
+#[tokio::test]
+async fn later_joiner_decrypts_earlier_members_messages() {
+    let url = server_url();
+
+    let alice = AppCore::create_account_with_store(&url, test_store().await, None, true, common::invite_token())
+        .await
+        .unwrap();
+    let bob = AppCore::create_account_with_store(&url, test_store().await, None, true, common::invite_token())
+        .await
+        .unwrap();
+    let carol = AppCore::create_account_with_store(&url, test_store().await, None, true, common::invite_token())
+        .await
+        .unwrap();
+
+    let bob_did = bob.did_async().await;
+    let carol_did = carol.did_async().await;
+
+    let created = alice
+        .create_group_async("Trio", "lazy-skdm e2e", 0)
+        .await
+        .unwrap();
+    alice
+        .invite_member_async(&created.group_id, &bob_did, 0)
+        .await
+        .unwrap();
+    alice
+        .invite_member_async(&created.group_id, &carol_did, 0)
+        .await
+        .unwrap();
+
+    // Bob accepts first (his SKDM reaches only alice), carol accepts second.
+    let _ = bob.receive_messages_async().await.unwrap();
+    let _ = bob.fetch_group_state_async(&created.group_id).await.unwrap();
+    bob.accept_invite_async(&created.group_id).await.unwrap();
+    let _ = carol.receive_messages_async().await.unwrap();
+    let _ = carol
+        .fetch_group_state_async(&created.group_id)
+        .await
+        .unwrap();
+    carol.accept_invite_async(&created.group_id).await.unwrap();
+
+    // Alice drains both accept-time SKDMs. Carol deliberately does NOT receive
+    // bob's key here — bob accepted before carol was a member, so it was never
+    // sent to her.
+    let _ = alice.receive_messages_async().await.unwrap();
+
+    // Bob refreshes group state so his cached membership includes carol (who
+    // joined after him); the send + distribution work off this cache.
+    let bob_state = bob.fetch_group_state_async(&created.group_id).await.unwrap();
+    assert_eq!(bob_state.members.len(), 3);
+
+    // Bob sends to the group. The send path must first distribute bob's sender
+    // key to carol (the member who lacks it).
+    let plaintext = b"bob speaking to a group carol joined late";
+    bob.send_group_message_async(&created.group_id, plaintext)
+        .await
+        .unwrap();
+
+    // Carol drains the lazily-distributed SKDM DM, then the group message.
+    let _ = carol.receive_messages_async().await.unwrap();
+    let carol_msgs = carol
+        .fetch_group_messages_async(&created.group_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        carol_msgs.len(),
+        1,
+        "carol must decrypt bob's message via the lazily-distributed sender key"
+    );
+    assert_eq!(carol_msgs[0].plaintext, plaintext);
+    assert_eq!(carol_msgs[0].sender_did, bob_did);
+
+    // And a second message from bob needs no further distribution (carol is now
+    // marked shared) — it still decrypts.
+    let plaintext2 = b"second message, no resend needed";
+    bob.send_group_message_async(&created.group_id, plaintext2)
+        .await
+        .unwrap();
+    let _ = carol.receive_messages_async().await.unwrap();
+    let carol_msgs2 = carol
+        .fetch_group_messages_async(&created.group_id)
+        .await
+        .unwrap();
+    assert_eq!(carol_msgs2.len(), 1);
+    assert_eq!(carol_msgs2[0].plaintext, plaintext2);
+}
+
 /// A member can group-send even to a peer it has never exchanged a DM with:
 /// the send path establishes the missing Double Ratchet session on the fly
 /// (X3DH from a fetched prekey bundle) instead of aborting with `NoSession`.

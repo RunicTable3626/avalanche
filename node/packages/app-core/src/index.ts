@@ -227,6 +227,21 @@ export interface DecryptedMessage {
    * group message. Absent for plain DMs.
    */
   groupId?: string;
+  /**
+   * The sender's profile key carried on the envelope, if any. app-core does
+   * NOT fetch or cache the sender's display name automatically — pass this to
+   * {@link AppCore.fetchAndCacheProfile} if your bot wants the name. Absent
+   * when the envelope carried no key. Most bots ignore this.
+   */
+  profileKey?: Uint8Array;
+  /**
+   * True when this is an inbound DM that the message-request gate treats as a
+   * request (the sender is not curated and is not a known bot). app-core does
+   * NOT persist a pending-request flag itself; a bot that tracks requests
+   * calls {@link AppCore.setPendingRequest}. Always false for group messages.
+   * Most bots ignore this.
+   */
+  isRequest: boolean;
 }
 
 /**
@@ -499,6 +514,8 @@ const decryptedMessageFromNative = (m: native.DecryptedMessageJs): DecryptedMess
     plaintext,
     sentAt: instantFromMsOpt(m.sentAtMs),
     groupId: m.groupId,
+    profileKey: m.profileKey ? asU8(m.profileKey) : undefined,
+    isRequest: m.isRequest,
   };
 };
 
@@ -1303,6 +1320,32 @@ export class AppCore {
    */
   async touchContact(did: string, curated: boolean): Promise<void> {
     await this._native.touchContact(did, curated);
+  }
+
+  /**
+   * Set or clear the local pending-message-request flag on a contact. app-core
+   * no longer sets this automatically on receive; a bot that surfaces a
+   * message-request inbox calls this when it receives a {@link DecryptedMessage}
+   * with `isRequest === true`. Most bots don't track requests and can ignore
+   * this entirely.
+   *
+   * @category Contacts
+   */
+  async setPendingRequest(did: string, pending: boolean): Promise<void> {
+    await this._native.setPendingRequest(did, pending);
+  }
+
+  /**
+   * Fetch the sender's encrypted profile blob using the `profileKey` from an
+   * inbound {@link DecryptedMessage}, decrypt it, and cache the display name
+   * locally. app-core does NOT do this automatically on receive (it would
+   * block on the network and persist a name most bots never need). Best-effort
+   * and idempotent. Blocks on the network.
+   *
+   * @category Profile
+   */
+  async fetchAndCacheProfile(did: string, profileKey: Uint8Array): Promise<void> {
+    await this._native.fetchAndCacheProfile(did, asBuf(profileKey));
   }
 
   // ── groups ──────────────────────────────────────────────────────────────

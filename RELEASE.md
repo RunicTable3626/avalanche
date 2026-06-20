@@ -40,8 +40,10 @@ Then:
 
 1. Watch the run: `gh run watch` (or the Actions tab on GitHub).
 2. When it finishes, open the **draft release** on GitHub, add release notes.
-3. **Publish** the draft to make the asset download URLs live, e.g.
-   `https://github.com/lincolnq/avalanche/releases/download/v0.2.0/av-server-x86_64-unknown-linux-gnu.tar.gz` and mark it pre-release.
+3. **Publish** the draft: 
+```bash
+gh release edit v0.2.0 --prerelease --draft=false
+```
 
 
 ## 3. Mobile app (manual, from your Mac)

@@ -99,7 +99,7 @@ The app has three UI platforms sharing one Rust core:
 
 - **iOS** — Swift/SwiftUI, UniFFI bindings. Reference implementation.
 - **Android** — Kotlin/Jetpack Compose, UniFFI bindings. See `docs/60-android-implementation.md`.
-- **Desktop** — Electron/React/TypeScript, napi-rs bindings. See `docs/61-desktop-implementation.md`.
+- **Desktop** — Tauri/React/TypeScript, Tauri commands. See `docs/61-desktop-implementation.md`.
 
 **Any feature added or changed on one platform must be implemented on all three
 in the same session.** iOS is the reference — when behavior is ambiguous, check
@@ -110,7 +110,7 @@ workflows and per-platform checklists.
 
 Each subsystem has its own CLAUDE.md with workflow and conventions specific to that layer:
 
-- `desktop/CLAUDE.md` — Electron app workflow, napi-rs bridge, Desktop parity rule
+- `desktop/CLAUDE.md` — Tauri app workflow, Tauri commands bridge, Desktop parity rule
 - `mobile/CLAUDE.md` — iOS + Android workflows, FFI constraints, parity rule
 - `core/CLAUDE.md` — server endpoint workflow, error handling conventions
 
@@ -129,7 +129,7 @@ The full cycle for adding a new feature that involves Rust + all platforms:
 3. `make xcode` — rebuilds XCFramework + regenerates Xcode project
 4. **iOS:** add to `AppCoreProtocol` in `ActnetService.swift`, stub in `MockActnetService.swift`, call from `AppState.swift` via `Task.detached { try core.methodName() }.value`
 5. **Android:** add to `ActnetService.kt` interface, stub in `MockActnetService.kt`, call from `AppViewModel.kt` via `withContext(Dispatchers.IO)`
-6. **Desktop:** add IPC handler in `desktop/src/main/ipc.ts`, add typed wrapper in `DevServerActnetService.ts`, stub in `MockActnetService.ts`
+6. **Desktop:** add Tauri command in `desktop/src-tauri/src/lib.rs`, add typed wrapper in `DevServerActnetService.ts`, stub in `MockActnetService.ts`
 
 Use `/new-ffi-method <name>` to scaffold steps 1, 4, 5, 6 as a single command.
 

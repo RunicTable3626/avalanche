@@ -2,7 +2,7 @@
 
 ## Platform Parity Rule
 
-**Any feature added or changed on iOS must be implemented on Desktop (Electron)
+**Any feature added or changed on iOS must be implemented on Desktop (Tauri)
 in the same session. Any feature added or changed on Desktop must be implemented
 on iOS.**
 
@@ -20,50 +20,46 @@ the `[ ]` / `[x]` checkboxes as each component is completed.
 ## Repository layout
 
 ```
-desktop/                         # Electron app (this directory)
-core/crates/app-core-node/       # napi-rs Rust bindings for Node.js/Electron
-projects/adminbot/               # Admin bot (separate Project, uses same bindings)
+desktop/                         # Tauri app (this directory)
+├── src/                         # React frontend
+└── src-tauri/                   # Rust backend (Tauri commands, app config)
 ```
 
-The napi-rs bindings (`core/crates/app-core-node/`) are the Desktop equivalent
-of the UniFFI bindings in `core/crates/app-core/` — a bridge layer, not an app.
-The desktop app depends on them the same way the mobile apps depend on UniFFI.
+The Tauri Rust backend (`src-tauri/`) is the Desktop equivalent of UniFFI
+bindings in `core/crates/app-core/` — a bridge layer, not an app. It links
+directly against the `app-core` crate and exposes its methods as Tauri commands.
 
 ---
 
-## Electron Architecture
+## Tauri Architecture
 
-Electron has two JavaScript contexts:
+There is no main/renderer process split. The app has two layers:
 
-**Main process** (`src/main/`, runs in Node.js):
-- Calls napi-rs Rust bindings directly
-- Manages BrowserWindow, IPC handlers, WebSocket loops
-- Persists metadata via `electron-store`
+**Rust backend** (`src-tauri/src/lib.rs`):
+- Links against `app-core` directly — no Node.js intermediary
+- Exposes methods as Tauri commands (`#[tauri::command]`)
+- Manages WebSocket loops, metadata persistence via `tauri-plugin-store`
 
-**Renderer process** (`src/renderer/`, runs in a browser sandbox):
+**React frontend** (`src/`, runs in a WebView sandbox):
 - Runs React — no direct native access
-- Calls Rust indirectly: `ipcRenderer.invoke('method-name', ...args)`
-- Main process handles the call and returns the result
+- Calls Rust via `invoke('command_name', args)`
+- Receives push events via Tauri event system
 
-All Rust core calls flow: `React → ipcRenderer.invoke() → ipc.ts → napi-rs → Rust`.
+All Rust core calls flow: `React → invoke() → src-tauri/src/lib.rs → app-core → Rust`.
 
 ---
 
 ## Desktop Workflow
 
 ```bash
-make desktop-bindings   # build napi-rs .node file from core/crates/app-core-node/
-cd desktop && npm run dev        # start Electron in dev mode (hot reload)
-cd desktop && npm run build      # package for current platform
-cd desktop && npm run build:all  # package for Win + Mac + Linux
+cd desktop && cargo tauri dev    # dev mode with hot reload
+cd desktop && cargo tauri build  # package for current platform
 ```
 
 FFI constraints:
-- napi-rs calls must run in the **main process** (Node.js), never in the renderer
-- WebSocket loops run in the main process and push events to the renderer via
-  `mainWindow.webContents.send()`
-- All blocking Rust calls should use async napi-rs exports to avoid blocking
-  the main process event loop
+- Tauri commands are async-capable — use `async fn` for Rust calls that block
+- WebSocket loops run in the Rust backend via Tauri's async runtime
+- Push events to the frontend via `app_handle.emit('event-name', payload)`
 
 ---
 
@@ -94,8 +90,8 @@ Windows or Linux skip this step entirely.
 Before closing any branch that adds or changes Desktop UI:
 
 - [ ] iOS SwiftUI view created/updated in `mobile/ios/`
-- [ ] Desktop React component created/updated in `desktop/src/renderer/views/`
-- [ ] IPC handler added to `desktop/src/main/ipc.ts` if new Rust calls needed
+- [ ] Desktop React component created/updated in `desktop/src/views/`
+- [ ] Tauri command added to `desktop/src-tauri/src/lib.rs` if new Rust calls needed
 - [ ] AppContext updated to match AppState changes
 - [ ] New model fields added to both `.swift` and `.ts` types
 - [ ] `docs/61-desktop-implementation.md` parity table updated
@@ -104,10 +100,9 @@ Before closing any branch that adds or changes Desktop UI:
 ## Adding a New FFI Method (checklist)
 
 1. Add Rust method to `core/crates/app-core/src/lib.rs` (`#[uniffi::export]`, sync)
-2. Add napi-rs export to `core/crates/app-core-node/src/lib.rs`
-3. `make bindings` — regenerates Swift + Kotlin UniFFI glue
-4. `make desktop-bindings` — rebuilds napi-rs `.node` file
-5. Add IPC handler in `desktop/src/main/ipc.ts`
-6. Add typed wrapper in `desktop/src/renderer/services/DevServerActnetService.ts`
-7. Stub in `MockActnetService.ts`
-8. Update iOS and Android simultaneously (see `mobile/CLAUDE.md`)
+2. `make bindings` — regenerates Swift + Kotlin UniFFI glue
+3. Add to `AppCoreProtocol` in `ActnetService.swift` and stub in `MockActnetService.swift`
+4. Add to `ActnetService` interface in Kotlin and stub in `MockActnetService.kt`
+5. Call from `AppState.swift` via `Task.detached`
+6. Call from `AppViewModel.kt` via `withContext(Dispatchers.IO)`
+7. Add Tauri command in `desktop/src-tauri/src/lib.rs`, typed wrapper in `DevServerActnetService.ts`, stub in `MockActnetService.ts`

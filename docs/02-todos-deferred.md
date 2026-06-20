@@ -13,6 +13,7 @@
 - Read receipt user preference toggle (send_read_receipts setting)
 - Scroll position: remove invisible "bottom" anchor hack in ConversationView (Color.clear spacer) when scroll position saving is implemented
 - Account switcher UI for multi-account support
+- "My QR Code" / invite link generation screen: display the user's personal invite link as a QR code and copyable URL (token payload: `{"server_url":"<user's server>","inviter_did":"<user's DID>"}`). Pure client-side — no server call needed. Implement on all three platforms: iOS (Settings), Android (Settings), Desktop (Settings sidebar). See `docs/51-invite-tokens.md` §"My QR Code screen" for the full spec.
 - My QR Code screen uses `accounts.first` — should use the active/selected account once multi-account is implemented
 - Consider whether we should hit `validateInvite` endpoint during 'compose recipient' scan/paste for a server invite token.
 - Coalesce/throttle `fetchGroupState`: opening a group conversation, then group-info, then returning each triggers a full `GET /v1/groups/{id}` (ConversationView's `refreshGroupTitle` on every `onAppear` + GroupDetailView on open). Add a short freshness TTL (skip the network refetch if the local group state was refreshed within ~N seconds) and have the conversation view read the cached group title rather than always fetching. Best paired with server-side group-state change push (Server) so the cache can be trusted between changes.

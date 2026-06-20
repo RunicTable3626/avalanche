@@ -250,6 +250,53 @@ Mesh (§7): action-bound groups work on bitchat in steady state (Sender-Key cont
 auth via signed SKDMs); state mutations / credential refresh / endorsements / sealed-sender don't (need
 server) — queued for reconnect. Use **per-sender** tag derivation, not per-group master key (avoids leak).
 
+### Supergroups (📐 `08`, design-only, deferred) — large broadcast channels
+Distinct primitive for **200+ → thousands+** one-directional channels; **not** the same as a normal group's
+`announcement_only` flag (that stays the right tool ≤~200). Three guiding principles: (1) **UX-transparent** —
+feels like an announcement-only group; all divergences stay *below the UX surface*; this is the tie-breaker
+when a scaling choice would leak into the UI. (2) **Promotion is the path** — born normal, promoted past the
+~200 gate (a *trigger*, not a create-time fork); promotion is explicit, member-visible, **one-way**, and
+keeps `group_id`+membership. (3) **Harmonize with `03` infra, diverge only where it doesn't scale.**
+*Why separate:* normal-group send already encrypts payload once (Sender Keys), but 3 costs stay O(N) —
+per-recipient sealing, per-recipient storage dup, O(N²) SKDM — and reply-to-all = spam megaphone. Large E2E
+broadcast ≈ MLS's problem; WhatsApp/Telegram channels aren't E2E (a deliberate, documented confidentiality
+tradeoff). **Organizing insight: cost is in _delivery_, not _readability_** — push-to-all-N = the wall;
+*pull* (announcements, reply threads) or *server-count* (reactions, reply counts) sidesteps it; supergroups
+push nothing but content-free wakeups.
+- **Announcements:** admins-only send → only admins seed Sender Keys (kills O(N²) SKDM). Content encrypted
+  once under a **shared supergroup read key**, stored as **one opaque blob** (no per-recipient header),
+  delivered by wakeup + **membership-gated pull** (404-for-non-members, `03` §3.4).
+- **Replies:** **pull-based per-announcement threads** ("5 replies, click to read") — readable-by-all but
+  *delivered-to-none* (pulled). Count is free (server tally, like reactions); lazy Sender-Key fetch via the
+  shared read key. **Stays consistent with `32`** (in-channel threads, quiet-by-default, surfacing = admin
+  post-to-channel cap). *Rejected:* a separate opt-in discussion group — breaks click-to-read and the
+  UX-transparency principle (the megaphone fear was conflating *readable* with *pushed*; pull ≠ push).
+- **Reactions:** **server-counted opaque tokens** — server counts `(message,token)` without reading the
+  emoji or any DID (`03` §3.9 intact); live + visible with no online-author dependency. Diverges from `33`
+  (per-member client-tally). *Rejected:* author-mediated aggregation (online dependency, not visible). Lost:
+  per-reactor faces at scale (counts only).
+- **Sender anonymity = tier 2, pseudonymous-among-admins. DECIDED.** Send carries a zkgroup `AuthCredential`
+  presentation verified vs the opaque admin `member_credentials` set (`role=Admin`, **no DID**) — reuses
+  `03` §2/§3.11, **`03` §3.9 fully intact, no admin roster, a seized server yields no organizer list.**
+  Residual: server links one admin's posts to each other (stable opaque id), never to a DID. *Rejected:*
+  tier 1 identified (needs `(group→admin DIDs)` roster = §3.9 carve-out, hands seizer the organizer list) and
+  tier 3 fully-unlinkable (GroupSendEndorsement+sealed sender — buys little for a small admin set). Cost
+  (tiers 2–3): no per-admin attribution → coarse per-IP/per-group rate limits. Members still see *which*
+  admin authored (sender cert inside the read-key blob); only the *server's* view is pseudonymous.
+- **Confidentiality given up** (scoped to broadcast path): (1) admin sends pseudonymous-not-unlinkable;
+  (2) weaker FS (long-lived shared read key; mitigate via epoch rotation). **Kept:** full membership opacity,
+  content confidentiality, reader/reactor anonymity.
+- **Hard open problem:** anonymous reaction de-dup needs a per-`(member,message)` **nullifier** (ZK,
+  anonymous-voting family). Recommend ship the *approximate* path (rate-limit/endorsement budget) first.
+- **Forward-compat (recommendations, undecided):** receive path is the binding constraint — can require
+  *admins* to update, not *receivers*. Most scaling is receiver-invisible (storage dedup, push, sender-side
+  sealing). Recs: keep a *legacy Sender-Key receive representation* possible (only the updated admin client
+  can emit it — server has no keys); a per-device **capability/version signal** would have lead-time value
+  (none today; it's for transition *efficiency*, not correctness); graceful unknown-`Body`-variant handling
+  is general hygiene. Fallback buys correctness, not efficiency.
+- **Open:** broadcast key schedule (long-lived key+rotation / channel key / **MLS** — eval MLS first); reply
+  abuse controls; membership + read-key rekeying at scale; optional spin-off discussion groups.
+
 ## 6. Multi-device (`04`) — substrate ✅, app-level 🚧
 
 **Central distinction:** identity key is a **static credential → SHARED** across devices (provisioned at

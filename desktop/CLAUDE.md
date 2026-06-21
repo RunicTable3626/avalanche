@@ -21,7 +21,7 @@ the `[ ]` / `[x]` checkboxes as each component is completed.
 
 ```
 desktop/                         # Tauri app (this directory)
-├── src/                         # React frontend
+├── src/                         # Solid frontend
 └── src-tauri/                   # Rust backend (Tauri commands, app config)
 ```
 
@@ -40,12 +40,12 @@ There is no main/renderer process split. The app has two layers:
 - Exposes methods as Tauri commands (`#[tauri::command]`)
 - Manages WebSocket loops, metadata persistence via `tauri-plugin-store`
 
-**React frontend** (`src/`, runs in a WebView sandbox):
-- Runs React — no direct native access
+**Solid frontend** (`src/`, runs in a WebView sandbox):
+- Runs Solid — no direct native access
 - Calls Rust via `invoke('command_name', args)`
 - Receives push events via Tauri event system
 
-All Rust core calls flow: `React → invoke() → src-tauri/src/lib.rs → app-core → Rust`.
+All Rust core calls flow: `Solid → invoke() → src-tauri/src/lib.rs → app-core → Rust`.
 
 ---
 
@@ -90,7 +90,7 @@ Windows or Linux skip this step entirely.
 Before closing any branch that adds or changes Desktop UI:
 
 - [ ] iOS SwiftUI view created/updated in `mobile/ios/`
-- [ ] Desktop React component created/updated in `desktop/src/views/`
+- [ ] Desktop Solid component created/updated in `desktop/src/views/`
 - [ ] Tauri command added to `desktop/src-tauri/src/lib.rs` if new Rust calls needed
 - [ ] AppContext updated to match AppState changes
 - [ ] New model fields added to both `.swift` and `.ts` types
@@ -106,3 +106,16 @@ Before closing any branch that adds or changes Desktop UI:
 5. Call from `AppState.swift` via `Task.detached`
 6. Call from `AppViewModel.kt` via `withContext(Dispatchers.IO)`
 7. Add Tauri command in `desktop/src-tauri/src/lib.rs`, typed wrapper in `DevServerActnetService.ts`, stub in `MockActnetService.ts`
+
+---
+
+## Security constraints
+
+The shell is the only WebView with Tauri command access. Keep these invariants:
+
+- `npm ci` only — never `npm install` in production or CI
+- Tauri CSP in `tauri.conf.json`: `default-src 'self'`, no `unsafe-inline`, no `eval`
+- `Object.freeze(Object.prototype)` at app startup in `src/index.tsx`
+- Strict TypeScript (`strict: true` in `tsconfig.json`, no `any`)
+- All message content received as typed data from Tauri commands — never parse raw bytes in the frontend
+- Minimal Tauri command surface: only declare commands the shell legitimately needs in `tauri.conf.json` capabilities

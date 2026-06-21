@@ -32,7 +32,7 @@ The main concern raised about Tauri was `ProjectWebView` — embedding a project
 
 First, the iOS reference (`mobile/ios/Actnet/Sources/Views/Network/ProjectWebView.swift`) is a plain modal sheet with no JavaScript bridge to native code — no `WKScriptMessageHandler`, no injected scripts, no auth token injection. It loads a project URL in a sandboxed `WKWebView` and intercepts navigations to `go.theavalanche.net` as deep links. This maps directly to a Tauri `WebviewWindow` modal with a `navigation_handler`. No embedded-webview concern applies.
 
-Second, the Tauri APIs that were blockers at the time of initial evaluation have since shipped: `Webview::set_cookie()` landed in Tauri 2.8.0 (mid-2025, cross-platform), and navigation interception via `navigation_handler` was already available. The concern about embedding a webview as an inline positioned element within the React layout (tauri #13311, closed "not planned") is irrelevant because our implementation is a modal window, not an inline element.
+Second, the Tauri APIs that were blockers at the time of initial evaluation have since shipped: `Webview::set_cookie()` landed in Tauri 2.8.0 (mid-2025, cross-platform), and navigation interception via `navigation_handler` was already available. The concern about embedding a webview as an inline positioned element within the Solid layout (tauri #13311, closed "not planned") is irrelevant because our implementation is a modal window, not an inline element.
 
 ### WebKit inconsistency
 
@@ -42,14 +42,85 @@ The more concrete Linux concern is webkit2gtk stability: a Tauri maintainer has 
 
 ---
 
+## UI Framework Decision
+
+Solid was chosen over React, Vue, Svelte, Dioxus, and several other options. The decision involved a detailed evaluation of the security properties of each option relative to the threat model (activist users, AI-accelerated exploitation accessible to non-state actors with commodity hardware), the role of the Project architecture in shaping what the shell actually needs to protect, and practical considerations around integration reliability and tooling. The full reasoning is recorded here.
+
+### The shell is the only privileged WebView
+
+The Project architecture creates a meaningful asymmetry. Projects load in sandboxed, bridgeless WebViews on all three platforms — WKWebView on iOS, Android WebView on Android, `Tauri WebviewWindow` on desktop. These WebViews have no IPC access to native code; they can only fire deeplinks. The shell WebView, by contrast, has full Tauri command access to `app-core`.
+
+This means the shell is the only WebView context through which Tauri commands can be exploited. A supply chain attack landing in a Project's WebView can fire deeplinks; a supply chain attack landing in the shell's WebView can call any command the shell exposes — send messages, read state, interact with the crypto layer. Hardening the shell specifically is therefore not symmetric with hardening Projects: it protects the highest-privilege surface in the app.
+
+### Why not Dioxus or Leptos
+
+Dioxus and Leptos (Rust/WASM) are the options with the strongest security properties: zero npm supply chain, Rust memory safety, and a WASM sandbox layer within the WebView. If the shell framework choice were purely a security decision, one of these would be the answer.
+
+However, both carry integration risks that outweigh the remaining security benefit:
+
+**Tauri + WASM is underspecified.** The well-documented Dioxus path is Dioxus Desktop, which bypasses Tauri and uses WRY directly. Running Dioxus as a WASM frontend inside a Tauri WebView — the path that preserves Tauri's capability system — has almost no documentation or production examples. The integration gaps would be discovered mid-implementation.
+
+**The event system is on the critical path.** A messaging app's frontend is event-driven: new messages, delivery status, typing indicators, connection state all push from the Rust backend to the frontend. In a JS framework this is `listen('event', handler)` — two lines. In Dioxus WASM, receiving push events requires wasm-bindgen interop that is non-trivial to set up and fragile to maintain. Getting this wrong means messages don't display reliably, which is a worse failure mode than a slightly larger theoretical attack surface.
+
+**API instability on security-critical code.** Dioxus has made breaking changes across every major version (0.1–0.6). A forced shell rewrite to track a Dioxus version introduces regression risk at the layer that sits in front of Tauri command access — exactly where you don't want disruptive changes.
+
+A mitigated JS framework closes roughly 90% of the gap to Dioxus. The remaining 10% — the WASM sandbox boundary and the elimination of JS execution context entirely — is real but does not justify blocking integration risks on the critical path of a messaging app.
+
+### Why not React or Vue
+
+React's ~800+ transitive npm dependencies represent the largest supply chain surface of any option evaluated. The shell WebView is the highest-privilege surface in the app; having the most explorable dependency tree in it is a direct conflict with the threat model. Vue's profile is similar (~600–800 deps, full virtual DOM runtime). Neither offers a meaningful advantage over Solid for this use case.
+
+Signal Desktop uses React inside hardened Electron. That is a valid architecture for Signal's context. However, Signal's React choice predates AI-accelerated supply chain exploitation as a realistic threat for non-state actors with commodity hardware; the cost-benefit calculation has shifted. Hardening at the configuration layer (CSP, locked deps) is the right response, and applying those mitigations to a minimal-runtime framework is a strictly better posture than applying them to a heavy one.
+
+### Why not Svelte
+
+Svelte was the closest alternative. Both Svelte and Solid compile to direct DOM operations with no virtual DOM; both have minimal runtime footprint after compilation; both close the supply chain gap to an acceptable level with the mitigations below. The decision between them came down to three factors:
+
+**Svelte 5 Runes training data.** Svelte 5's reactivity model (Runes: `$state()`, `$derived()`, `$effect()`) is a significant departure from Svelte 4 and shipped late 2024. Claude Code's training data for Svelte 5 specifically is thinner, and there is a meaningful risk of generating Svelte 4/5 mixed patterns that compile incorrectly. For a project where Claude Code is a primary implementation tool, this is a practical reliability concern.
+
+**Solid's compiler closes the security gap.** Solid's Vite/Babel plugin compiles JSX to direct DOM operations at build time — not to virtual DOM calls. The ~7kb signals runtime is the only code that ships. The security difference from Svelte's "compiles away" property is negligible in practice.
+
+**Fine-grained reactivity for first-party Projects.** The shell is a thin, stable surface where the reactive model rarely matters. First-party Projects (Channel Directory, Collab Docs, Engagement Tracking, etc.) are full web apps where real-time state management is central. Solid's signals — where each signal subscription updates exactly the DOM nodes it affects — are a better architectural fit for those UIs than Svelte's compiler-based component-level reactivity.
+
+### Why not Elm, Mithril, or Lit
+
+**Elm** has zero npm supply chain (its own package registry) and strong type-safety properties. It was eliminated on response capacity: a found vulnerability depends on a small volunteer community with no corporate backing.
+
+**Mithril** was initially evaluated as a security-app precedent (Bitwarden). This turned out to be incorrect — Bitwarden uses Angular. Without that precedent, Mithril is a technically sound but niche choice with a slow development pace and no notable security-app validation.
+
+**Lit** (Google Web Components) has strong backing (Google, W3C browser standards) and minimal runtime. It was eliminated on ergonomics: Lit's verbosity is manageable for a thin shell but becomes a real cost when building the complex UIs that first-party Projects require.
+
+### Why Solid
+
+- **Compiler + no virtual DOM.** JSX is compiled to direct DOM operations. Only the ~7kb signals runtime ships — no framework overhead at runtime, no virtual DOM diffing.
+- **Fine-grained reactivity.** Each signal subscription updates exactly the DOM nodes wired to it. This is the right model for both the shell (message delivery indicators, connection state) and first-party Projects (complex real-time UIs).
+- **JSX familiarity.** Solid's syntax is React-like. Claude Code generates correct, verifiable Solid reliably. React developers can read it immediately.
+- **Consistent framework for first-party Projects.** The same framework, tooling, and component library serve both the desktop shell and first-party Projects — shared design system, consistent UX, one set of conventions.
+- **Well-understood Tauri integration.** Solid runs as a standard web app in the Tauri WebView. Official Tauri template exists. `invoke()` and `listen()` work identically to any JS framework — no wasm-bindgen bridge, no integration unknowns.
+- **Netlify-backed, stable API.** Ryan Carniato (creator) works at Netlify. The API has been stable since 1.0.
+
+### Security mitigations applied
+
+These mitigations close the remaining gap between Solid and a Rust/WASM solution:
+
+- `npm ci` with locked `package-lock.json` — reproducible builds, no silent dependency updates
+- `npm audit` + supply chain scanning (e.g. `socket.dev`) in CI
+- Tauri CSP: `default-src 'self'`, no inline scripts, no `eval`
+- `Object.freeze(Object.prototype)` at app startup — closes prototype pollution
+- All message content flows from Rust via typed Tauri commands — the shell never parses raw bytes from the network
+- Strict TypeScript (`strict: true`, no `any`) — eliminates a class of type confusion bugs at compile time
+- Minimal Tauri command surface — only commands the shell legitimately needs are declared in `tauri.conf.json`
+
+---
+
 ## Tech Stack
 
 | Concern | Desktop | iOS equivalent |
 |---|---|---|
 | Language | TypeScript | Swift |
-| UI framework | React + Tauri | SwiftUI |
-| State management | React Context + useReducer (or Zustand) | ObservableObject + @Published |
-| Navigation | React Router | NavigationStack |
+| UI framework | Solid + Tauri | SwiftUI |
+| State management | Solid signals + stores | ObservableObject + @Published |
+| Navigation | `@solidjs/router` | NavigationStack |
 | Async | async/await + Promises | async/await + Task |
 | Camera (QR) | Tauri plugin or native dialog | AVFoundation + VisionKit |
 | WebView | Tauri `WebviewWindow` (modal) | WKWebView |
@@ -63,7 +134,7 @@ The more concrete Linux concern is webkit2gtk stability: a Tauri maintainer has 
 
 ```
 desktop/
-├── src/                             # React frontend
+├── src/                             # Solid frontend
 │   ├── index.tsx
 │   ├── App.tsx
 │   ├── models/
@@ -104,7 +175,7 @@ desktop/
 │           └── MainLayout.tsx       # sidebar nav (desktop adapts tabs → sidebar)
 ├── src-tauri/
 │   ├── src/
-│   │   └── lib.rs                   # Tauri commands — bridge between React and Rust core
+│   │   └── lib.rs                   # Tauri commands — bridge between Solid and Rust core
 │   ├── Cargo.toml
 │   └── tauri.conf.json              # app config, window setup, capability declarations
 ├── package.json
@@ -117,9 +188,9 @@ desktop/
 There is no main/renderer process split. The app has two layers:
 
 - **Rust backend** (`src-tauri/src/lib.rs`): links against `app-core` directly — no Node.js intermediary. Exposes methods as Tauri commands (`#[tauri::command]`). Manages WebSocket loops and metadata persistence.
-- **React frontend** (`src/`): runs in a WebView sandbox. Calls Rust via `invoke('command_name', args)`. Receives push events via the Tauri event system.
+- **Solid frontend** (`src/`): runs in a WebView sandbox. Calls Rust via `invoke('command_name', args)`. Receives push events via the Tauri event system.
 
-All Rust core calls go: `React component → invoke() → src-tauri/src/lib.rs → app-core → Rust`.
+All Rust core calls go: `Solid component → invoke() → src-tauri/src/lib.rs → app-core → Rust`.
 
 ---
 
@@ -234,7 +305,7 @@ Everything else — conversation list, message bubbles, delivery indicators, net
 
 ### Phase 1 — Tauri project + Rust bridge
 
-- Create `desktop/` with Tauri + Vite + React + TypeScript
+- Create `desktop/` with Tauri + Vite + Solid + TypeScript
 - Wire `app-core` crate into `src-tauri/src/lib.rs` as Tauri commands
 - `tauri.conf.json` config for Win/Mac/Linux targets
 - `make desktop` Makefile target
@@ -252,7 +323,7 @@ Everything else — conversation list, message bubbles, delivery indicators, net
 
 ### Phase 3 — Navigation skeleton
 
-- React Router setup
+- `@solidjs/router` setup
 - `MainLayout.tsx`: left sidebar with Calls / Chats / Network links
 - Root routing: onboarding flow vs. main layout
 

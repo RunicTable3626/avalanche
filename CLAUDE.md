@@ -99,7 +99,7 @@ The app has three UI platforms sharing one Rust core:
 
 - **iOS** — Swift/SwiftUI, UniFFI bindings. Reference implementation.
 - **Android** — Kotlin/Jetpack Compose, UniFFI bindings. See `docs/60-android-implementation.md`.
-- **Desktop** — Tauri/React/TypeScript, Tauri commands. See `docs/61-desktop-implementation.md`.
+- **Desktop** — Tauri/Solid/TypeScript, Tauri commands. See `docs/61-desktop-implementation.md`.
 
 **Any feature added or changed on one platform must be implemented on all three
 in the same session.** iOS is the reference — when behavior is ambiguous, check

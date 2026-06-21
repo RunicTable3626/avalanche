@@ -1051,6 +1051,41 @@ pub async fn remove_member(
     Ok(())
 }
 
+/// Leave a group (docs/53 §Leave). Self-class action: we compute our own
+/// encrypted_member_id deterministically from the group key (no roster scan
+/// needed — the ciphertext for `(did, group_key)` is stable), submit a sole
+/// `leave` action naming it, then drop the group from the local store. Unlike
+/// `remove_member` (admin-class), any member may leave themselves.
+pub async fn leave_group(
+    store: &store::DeviceStore,
+    client: &net::Client,
+    did: &str,
+    group_id_b64_s: &str,
+) -> Result<(), AppError> {
+    submit_actions(
+        store,
+        client,
+        did,
+        group_id_b64_s,
+        |state, group_key| {
+            let emi = group_key.encrypt_member_id(did);
+            let emi_bytes = zkgroup::serialize(&emi);
+            state.members.retain(|m| m.encrypted_member_id != emi_bytes);
+            state.pending_invites.retain(|p| p.encrypted_member_id != emi_bytes);
+            state.pending_approvals.retain(|p| p.encrypted_member_id != emi_bytes);
+            Ok(GroupActionsWire {
+                leave: Some(b64(&emi_bytes)),
+                ..Default::default()
+            })
+        },
+    )
+    .await?;
+    // We've left: drop local group state (the AFTER DELETE trigger marks a
+    // storage-sync tombstone so other devices of this identity drop it too).
+    store.delete_group(group_id_b64_s).await?;
+    Ok(())
+}
+
 pub async fn change_role(
     store: &store::DeviceStore,
     client: &net::Client,
@@ -1386,6 +1421,10 @@ fn derive_change_events(ctx: &ChangeContext, actions: &GroupActionsWire) -> Vec<
     if let Some(emi) = &actions.cancel_join_request {
         let summary = format!("{} cancelled their join request", actor_label(actor_did));
         out.push(make(GroupEventKind::JoinRequestCancelled, actor_did.to_string(), emi.clone(), now_ms, summary));
+    }
+    if let Some(emi) = &actions.leave {
+        let summary = format!("{} left the group", actor_label(actor_did));
+        out.push(make(GroupEventKind::MemberLeft, actor_did.to_string(), emi.clone(), now_ms, summary));
     }
     for emi in &actions.approve_join_request {
         let tdid = emi_b64_to_did(post, emi);
@@ -2484,6 +2523,15 @@ impl AppCore {
             .await
         })
         .map_err(AppErrorFfi::from)
+    }
+
+    /// Leave a group (docs/53 §Leave). Self-class action — works for any
+    /// member, not just admins. Removes our own server-side membership and drops
+    /// the group from the local store.
+    pub fn leave_group(&self, group_id: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime()
+            .block_on(self.leave_group_async(&group_id))
+            .map_err(AppErrorFfi::from)
     }
 
     pub fn change_member_role(

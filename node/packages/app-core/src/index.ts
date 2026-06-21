@@ -1471,6 +1471,40 @@ export class AppCore {
   }
 
   /**
+   * Leave a group yourself. Unlike {@link AppCore.removeMember} (an admin
+   * action), any member can leave. Removes your server-side membership and
+   * drops the group locally.
+   *
+   * @category Groups
+   */
+  async leaveGroup(groupId: string): Promise<void> {
+    await this._native.leaveGroup(groupId);
+  }
+
+  /**
+   * Leave this server (docs/53): leave every group hosted here, then delete the
+   * account on the server. Your identity, contacts, and other servers are
+   * unaffected. Intended for non-discovery memberships.
+   *
+   * @category Account
+   */
+  async leaveServer(): Promise<void> {
+    await this._native.leaveServer();
+  }
+
+  /**
+   * Delete this identity from the network as completely as the protocol allows
+   * (docs/53): leave-cascade every server, tombstone the DID in the PLC
+   * directory, then wipe all local state. Irreversible. Throws
+   * (leaving local state intact) if the PLC tombstone can't be submitted.
+   *
+   * @category Account
+   */
+  async deleteIdentity(): Promise<void> {
+    await this._native.deleteIdentity();
+  }
+
+  /**
    * Change a member's role (member ↔ admin).
    *
    * @category Group Admin

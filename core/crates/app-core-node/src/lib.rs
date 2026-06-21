@@ -1238,6 +1238,38 @@ impl AppCore {
             .map_err(to_napi)
     }
 
+    /// Leave a group (docs/53). Self-class action: works for any member.
+    #[napi]
+    pub async fn leave_group(&self, group_id: String) -> napi::Result<()> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.leave_group(group_id))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    /// Leave this server: leave-cascade hosted groups, then delete the account
+    /// on the server (docs/53 §Leave).
+    #[napi]
+    pub async fn leave_server(&self) -> napi::Result<()> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.leave_server())
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    /// Delete this identity: leave-cascade every account, PLC-tombstone the DID,
+    /// then wipe all local state (docs/53 §Delete identity).
+    #[napi]
+    pub async fn delete_identity(&self) -> napi::Result<()> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.delete_identity())
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
     #[napi]
     pub async fn change_member_role(
         &self,

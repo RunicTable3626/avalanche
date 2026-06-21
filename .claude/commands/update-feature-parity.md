@@ -1,10 +1,10 @@
-Update the feature parity matrix in `docs/feature-parity.md`.
+Update the feature parity matrix in `docs/62-feature-parity.md`.
 
 $ARGUMENTS should describe what changed, e.g.: "iOS groups send" or "Android account creation" or "Desktop DMs napi".
 
 ## Step 1 — Read the current matrix
 
-Read `docs/feature-parity.md` in full. Identify the row(s) and column(s) that need updating based on `$ARGUMENTS`.
+Read `docs/62-feature-parity.md` in full. Identify the row(s) and column(s) that need updating based on `$ARGUMENTS`.
 
 If `$ARGUMENTS` is empty, ask the user: "Which feature and platform did you just implement? (e.g. 'iOS delivery receipts', 'Android account creation')"
 
@@ -18,7 +18,7 @@ Status values:
 
 ## Step 3 — Update the cell
 
-Edit `docs/feature-parity.md` to change the relevant cell. Show the user the before/after diff and confirm it looks correct.
+Edit `docs/62-feature-parity.md` to change the relevant cell. Show the user the before/after diff and confirm it looks correct.
 
 If the feature being marked complete was previously listed as a gap in `/new-feature`'s test plan (cross-platform conformance, recovery flow, state machine edge cases), also check whether the known-gap note in any test file (`// TODO(tests):`) can now be resolved.
 

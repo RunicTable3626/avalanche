@@ -1374,6 +1374,19 @@ export class AppCore {
   }
 
   /**
+   * Last-known group info from the local cache, with no server round-trip
+   * (docs/53). Returns `null` if nothing is cached. Use this to show group info
+   * for a group you've left, where {@link AppCore.fetchGroupState} would fail
+   * the membership-gated server fetch.
+   *
+   * @category Groups
+   */
+  async cachedGroupState(groupId: string): Promise<GroupSummary | null> {
+    const s = await this._native.cachedGroupState(groupId);
+    return s ? groupSummaryFromNative(s) : null;
+  }
+
+  /**
    * Group ids of every group held locally — every group we have the master
    * key for, including ones we were invited to (invites are auto-accepted).
    * Reads the local group store directly, so it surfaces groups with no
@@ -1479,6 +1492,17 @@ export class AppCore {
    */
   async leaveGroup(groupId: string): Promise<void> {
     await this._native.leaveGroup(groupId);
+  }
+
+  /**
+   * Whether the current identity is still a member of the group, per the
+   * locally-cached state (docs/53). Returns `false` after leaving — the UI
+   * uses this to hide the composer while keeping the conversation readable.
+   *
+   * @category Groups
+   */
+  async isGroupMember(groupId: string): Promise<boolean> {
+    return await this._native.isGroupMember(groupId);
   }
 
   /**

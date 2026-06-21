@@ -62,11 +62,17 @@ async fn leave_group_removes_own_membership() {
     let state = alice.fetch_group_state_async(&group_id).await.unwrap();
     assert_eq!(state.members.len(), 1, "bob removed himself");
 
-    // Bob can no longer fetch the group: he dropped it locally and the server
-    // gates state behind membership.
+    // Bob keeps the group locally (tombstone-in-place, docs/53) but is no longer
+    // a member — the composer gate reads this.
+    assert!(
+        !bob.is_group_member_async(&group_id).await.unwrap(),
+        "bob is no longer a member of the cached group"
+    );
+
+    // A server fetch is now membership-gated → 404 for the ex-member.
     assert!(
         bob.fetch_group_state_async(&group_id).await.is_err(),
-        "bob is no longer a member"
+        "server gates state behind membership"
     );
 }
 

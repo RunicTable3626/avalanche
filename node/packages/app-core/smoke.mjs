@@ -23,6 +23,7 @@ for (const method of [
   "setPendingRequest",
   "fetchAndCacheProfile",
   "leaveGroup",
+  "isGroupMember",
   "leaveServer",
   "deleteIdentity",
 ]) {

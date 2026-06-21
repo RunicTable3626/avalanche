@@ -3659,6 +3659,13 @@ impl AppCore {
         groups::leave_group(&inner.store, &inner.client, &did, group_id).await
     }
 
+    /// Async variant of `is_group_member`.
+    pub async fn is_group_member_async(&self, group_id: &str) -> Result<bool, AppError> {
+        let inner = self.inner.lock().await;
+        let did = inner.did.clone();
+        groups::is_group_member(&inner.store, &did, group_id).await
+    }
+
     /// Async variant of `leave_server`.
     pub async fn leave_server_async(&self) -> Result<(), AppError> {
         let inner = self.inner.lock().await;

@@ -1248,6 +1248,28 @@ impl AppCore {
             .map_err(to_napi)
     }
 
+    /// Whether the current identity is still a member of the group (docs/53).
+    #[napi]
+    pub async fn is_group_member(&self, group_id: String) -> napi::Result<bool> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.is_group_member(group_id))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    /// Last-known group info from the local cache, no network (docs/53). `null`
+    /// if nothing is cached.
+    #[napi]
+    pub async fn cached_group_state(&self, group_id: String) -> napi::Result<Option<GroupSummaryJs>> {
+        let core = self.inner.clone();
+        let summary = tokio::task::spawn_blocking(move || core.cached_group_state(group_id))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)?;
+        Ok(summary.map(GroupSummaryJs::from))
+    }
+
     /// Leave this server: leave-cascade hosted groups, then delete the account
     /// on the server (docs/53 §Leave).
     #[napi]

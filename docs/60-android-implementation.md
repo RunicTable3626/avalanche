@@ -252,3 +252,7 @@ Every row maps an iOS file to its Android equivalent. Update status as work land
 1. **NDK setup.** Need `cargo-ndk` and Android NDK installed. Document exact steps in `mobile/CLAUDE.md` once resolved.
 2. **AAR packaging.** Exact `uniffi-bindgen` invocation + AAR assembly steps TBD.
 3. **SQLCipher on Android.** Verify `libsqlcipher.so` is bundled correctly via the NDK build.
+
+## Deferred / Known Limitations
+
+- **SharedPreferences metadata exposure.** The identity list (own DIDs, display names, server URLs, DB filename) is stored in SharedPreferences as plain JSON. It is protected by Android's app sandbox and file-based encryption (FBE), but not by a user-controlled key. An attacker with sandbox-level access (e.g. a backup extraction or physical access with ADB on a debug build) gets enough to link the device to specific orgs. Message content and the contact graph are not exposed — they live inside the per-identity SQLCipher DBs. The fix would be a small `manifest.db` keyed from the Android Keystore (analogous to the Secure-Enclave-keyed approach sketched for iOS in `docs/02-todos-deferred.md`). Deferred because the sensitivity of the leaked metadata is low relative to the implementation cost.

@@ -31,6 +31,18 @@ make dev-all   # starts Postgres, applies migrations, launches homeserver + rela
 
 This runs the homeserver on `localhost:3000` and the [testbot](docs/21-chatbot-project.md) on `localhost:3001`. To make the testbot respond with AI instead of echoing, copy `.env.example` to `.env` and add your [Anthropic API key](https://console.anthropic.com/).
 
+### Run the desktop app (Windows / macOS / Linux)
+
+See **[desktop/README.md](desktop/README.md)** for prerequisites and setup instructions. Short version:
+
+```bash
+cd desktop
+npm install
+npm run tauri dev
+```
+
+No server needed — the desktop app runs in mock mode by default.
+
 ### Run the iOS app on simulator
 
 ```bash

@@ -118,7 +118,6 @@ fun MainTabView(
 @Composable
 private fun MainTabViewPreview() {
     AvalancheTheme {
-        // Preview without a real ViewModel — tab switching not functional.
-        // TODO(opus): wire up a mock AppViewModel for richer previews.
+        MainTabView(appViewModel = rememberPreviewAppViewModel())
     }
 }

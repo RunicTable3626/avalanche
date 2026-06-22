@@ -20,6 +20,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -60,13 +61,11 @@ fun IdentityPickerView(
     val accounts by appViewModel.accounts.collectAsState()
 
     if (accounts.isEmpty()) {
-        // No existing identities — skip straight to the create-new flow,
-        // matching iOS which renders NewAccountView(inviteToken:showRecoverLink:true) here.
-        // The parent NavGraph should detect this and navigate, but we also render a
-        // direct "create" shortcut so the user is never stuck on a blank screen.
-        // TODO(opus): The iOS implementation renders NewAccountView inline; here we
-        //   delegate via the lambda so the NavGraph can push the correct destination.
-        onCreateNewAccount()
+        // No existing identities — skip straight to the create-new flow, matching
+        // iOS which renders NewAccountView here. We delegate via the nav lambda
+        // rather than rendering inline; fire it from a LaunchedEffect so the
+        // navigation happens as a side effect, not during composition.
+        LaunchedEffect(Unit) { onCreateNewAccount() }
         return
     }
 
@@ -249,8 +248,9 @@ private fun IdentityPickerPreview() {
             inviterDid = null,
             postOnboardingRedirect = null,
         )
-        // TODO(opus): AppViewModel requires a Context — wire a fake/preview VM here.
-        // For now the preview demonstrates the composable structure; run on a device
-        // or emulator to see it with a real ViewModel.
+        IdentityPickerView(
+            inviteToken = inviteToken,
+            appViewModel = rememberPreviewAppViewModel(accounts = sampleAccounts),
+        )
     }
 }

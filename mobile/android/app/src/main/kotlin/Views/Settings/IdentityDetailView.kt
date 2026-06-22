@@ -22,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Share
@@ -29,10 +30,14 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -73,6 +78,7 @@ import java.util.Base64
  *                            or via the system back button).
  * @param onNavigateToBlocked Called to push BlockedContactsView for this account.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun IdentityDetailView(
     account: Account,
@@ -96,10 +102,23 @@ fun IdentityDetailView(
     }
     val qrBitmap: Bitmap? = contactURL?.let { generateQRBitmap(it) }
 
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Identity") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(AvalancheColors.Paper)
+            .padding(innerPadding)
             .verticalScroll(rememberScrollState())
             .padding(bottom = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -272,6 +291,7 @@ fun IdentityDetailView(
             }
         }
     }
+    }
 
     // -----------------------------------------------------------------------
     // Dialogs
@@ -423,7 +443,20 @@ private fun generateQRBitmap(content: String, sizePx: Int = 512): Bitmap? {
 @Composable
 private fun IdentityDetailPreview() {
     AvalancheTheme {
-        // TODO(opus): Preview cannot instantiate a real AppViewModel without a Context.
-        //  Wire a preview-friendly stub when a MockAppViewModel wrapper is available.
+        val account = Account(
+            id = "did:example:alice",
+            displayName = "Alice",
+            servers = listOf(
+                ServerInfo(
+                    id = "https://home.example.com",
+                    name = "Home Server",
+                    url = android.net.Uri.parse("https://home.example.com"),
+                ),
+            ),
+        )
+        IdentityDetailView(
+            account = account,
+            viewModel = rememberPreviewAppViewModel(accounts = listOf(account)),
+        )
     }
 }

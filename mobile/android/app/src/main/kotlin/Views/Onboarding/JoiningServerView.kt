@@ -187,8 +187,6 @@ private suspend fun loadPrivacyPolicyUrl(serverUrl: String): String? {
 @Composable
 private fun JoiningServerViewPreview() {
     AvalancheTheme {
-        // TODO(opus): wire a real AppViewModel for interactive previews via
-        // LocalContext + AppViewModelFactory; using a simplified stub here.
         val fakeAccount = Account(
             id = "did:example:alice",
             displayName = "Alice",
@@ -200,9 +198,10 @@ private fun JoiningServerViewPreview() {
             inviterDid = null,
             postOnboardingRedirect = null,
         )
-        // Preview cannot construct AppViewModel without Context; show the
-        // static layout only via a stub lambda approach.
-        // TODO(opus): replace with a proper preview ViewModel once a
-        // previewable interface exists.
+        JoiningServerView(
+            inviteToken = fakeToken,
+            existingAccount = fakeAccount,
+            appViewModel = rememberPreviewAppViewModel(accounts = listOf(fakeAccount)),
+        )
     }
 }

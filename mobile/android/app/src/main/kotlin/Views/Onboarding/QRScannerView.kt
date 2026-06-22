@@ -7,8 +7,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -40,6 +44,7 @@ import kotlinx.coroutines.launch
 fun QRScannerView(
     onScanned: ((String) -> Unit)? = null,
     onInviteToken: (InviteToken) -> Unit = {},
+    onBack: () -> Unit = {},
 ) {
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var isValidating by remember { mutableStateOf(false) }
@@ -73,7 +78,14 @@ fun QRScannerView(
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("Scan QR Code") })
+            TopAppBar(
+                title = { Text("Scan QR Code") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
         },
     ) { innerPadding ->
         Box(

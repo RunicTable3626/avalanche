@@ -11,12 +11,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,11 +46,13 @@ import uniffi.app_core.ContactRowFfi
 // identity-scoped and synced across the identity's devices.
 //
 // Mirrors mobile/ios/Actnet/Sources/Views/Settings/BlockedContactsView.swift.
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BlockedContactsView(
     account: Account,
     appViewModel: AppViewModel,
     modifier: Modifier = Modifier,
+    onBack: () -> Unit = {},
 ) {
     var blocked by remember { mutableStateOf<List<ContactRowFfi>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
@@ -58,8 +67,22 @@ fun BlockedContactsView(
         reload()
     }
 
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = { Text("Blocked Contacts") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
     Box(
-        modifier = modifier
+        modifier = Modifier
+            .padding(innerPadding)
             .fillMaxSize()
             .background(AvalancheColors.Paper),
     ) {
@@ -114,6 +137,7 @@ fun BlockedContactsView(
                 }
             }
         }
+    }
     }
 }
 

@@ -29,7 +29,11 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Text
@@ -48,7 +53,6 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -56,6 +60,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -381,14 +386,16 @@ fun ComposeMessageView(
 // Account picker row
 // ---------------------------------------------------------------------------
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AccountPickerRow(
     accounts: List<Account>,
     selectedAccountId: String?,
     onAccountSelected: (String?) -> Unit,
 ) {
-    // TODO(opus): Replace with a proper dropdown/ExposedDropdownMenuBox.
-    // For now show a simple row of text buttons for each account.
+    val selected = accounts.firstOrNull { it.id == selectedAccountId } ?: accounts.firstOrNull()
+    var expanded by remember { mutableStateOf(false) }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -396,13 +403,35 @@ private fun AccountPickerRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text("From", color = AvalancheColors.Muted, modifier = Modifier.padding(end = 8.dp))
-        accounts.forEach { account ->
-            val isSelected = (selectedAccountId ?: accounts.firstOrNull()?.id) == account.id
-            TextButton(onClick = { onAccountSelected(account.id) }) {
-                Text(
-                    account.displayName,
-                    color = if (isSelected) AvalancheColors.Brand else AvalancheColors.Muted,
-                )
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = it },
+            modifier = Modifier.weight(1f),
+        ) {
+            OutlinedTextField(
+                value = selected?.displayName ?: "",
+                onValueChange = {},
+                readOnly = true,
+                singleLine = true,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
+                accounts.forEach { account ->
+                    DropdownMenuItem(
+                        text = { Text(account.displayName) },
+                        onClick = {
+                            onAccountSelected(account.id)
+                            expanded = false
+                        },
+                    )
+                }
             }
         }
     }
@@ -464,8 +493,14 @@ private fun RecipientFieldRow(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { onSubmit() }),
                     modifier = Modifier.width(180.dp),
-                    // Minimal styling to blend into the flow row
-                    // TODO(opus): match iOS UITextView-style borderless field
+                    // Borderless to match the iOS UITextView-style field that blends
+                    // into the recipient flow row (no visible outline).
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        disabledBorderColor = Color.Transparent,
+                        errorBorderColor = Color.Transparent,
+                    ),
                 )
             }
         }
@@ -802,17 +837,6 @@ private fun handleContactLink(
 }
 
 // ---------------------------------------------------------------------------
-// collectAsStateWithLifecycle helper (avoids a dependency on lifecycle-runtime-compose
-// if not already present — uses collectAsState as fallback).
-// ---------------------------------------------------------------------------
-
-// TODO(opus): Replace with collectAsStateWithLifecycle from
-// androidx.lifecycle:lifecycle-runtime-compose once that dependency is added.
-@Composable
-private fun <T> kotlinx.coroutines.flow.StateFlow<T>.collectAsStateWithLifecycle(): androidx.compose.runtime.State<T> =
-    collectAsState()
-
-// ---------------------------------------------------------------------------
 // Previews
 // ---------------------------------------------------------------------------
 
@@ -820,18 +844,19 @@ private fun <T> kotlinx.coroutines.flow.StateFlow<T>.collectAsStateWithLifecycle
 @Composable
 private fun ComposeMessageViewPreview() {
     AvalancheTheme {
-        // Preview shows the skeleton layout without a real ViewModel.
-        // TODO(opus): wire up a preview ViewModel / mock AppViewModel if one is added.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(AvalancheColors.Paper),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                "ComposeMessageView\n(preview requires a ViewModel)",
-                color = AvalancheColors.Muted,
-            )
-        }
+        val account = Account(
+            id = "did:example:alice",
+            displayName = "Alice",
+            servers = listOf(
+                ServerInfo(
+                    id = "https://home.example.com",
+                    name = "Home",
+                    url = android.net.Uri.parse("https://home.example.com"),
+                ),
+            ),
+        )
+        ComposeMessageView(
+            viewModel = rememberPreviewAppViewModel(accounts = listOf(account)),
+        )
     }
 }

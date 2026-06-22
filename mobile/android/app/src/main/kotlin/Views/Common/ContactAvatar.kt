@@ -82,9 +82,8 @@ fun ContactAvatar(
 
 // Hexagon Shape used for bot avatars. Draws a flat-topped regular hexagon via a
 // GenericShape so it can be used as both clip and background shape, matching the
-// iOS AnyShape(Hexagon()) approach.
-//
-// TODO(opus): verify the hexagon geometry renders correctly in all size contexts.
+// iOS AnyShape(Hexagon()) approach. The radius is min(width, height) / 2 about the
+// centre, so it stays a regular, centred hexagon at any (including non-square) size.
 private val HexagonShape: androidx.compose.ui.graphics.Shape =
     androidx.compose.foundation.shape.GenericShape { size, _ ->
         val w = size.width

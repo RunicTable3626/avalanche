@@ -62,8 +62,6 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NameGroupView(
-    // TODO(opus): ComposeMessageView.Chip is defined in ComposeMessageView.kt once that file
-    // lands. For now its shape is inlined here as RecipientChip to avoid a circular dep.
     members: List<RecipientChip>,
     accountId: String,
     /// Servers the active identity belongs to; the first is its home server.
@@ -297,13 +295,9 @@ fun NameGroupView(
 // ---------------------------------------------------------------------------
 // RecipientChip
 //
-// Mirrors the iOS ComposeMessageView.Chip nested struct. Defined here so
-// NameGroupView.kt can compile standalone; when ComposeMessageView.kt lands
-// it should define this type (or a typealias) and this declaration can be
-// removed in favour of the one from that file.
-//
-// TODO(opus): de-duplicate once ComposeMessageView.kt exists — keep only
-// one declaration and update all call sites.
+// Mirrors the iOS ComposeMessageView.Chip nested struct. The recipient-chip
+// shape is shared across the Chats package via this single declaration;
+// ComposeMessageView uses its own recipient model, so there is no duplication.
 // ---------------------------------------------------------------------------
 
 data class RecipientChip(
@@ -429,22 +423,32 @@ private fun ServerPicker(
 // Previews
 // ---------------------------------------------------------------------------
 
+private val previewServers = listOf(
+    ServerInfo(
+        id = "https://home.example.com",
+        name = "Home",
+        url = android.net.Uri.parse("https://home.example.com"),
+    ),
+    ServerInfo(
+        id = "https://work.example.com",
+        name = "Work",
+        url = android.net.Uri.parse("https://work.example.com"),
+    ),
+)
+
 @Preview(showBackground = true, name = "Group with members")
 @Composable
 private fun NameGroupWithMembersPreview() {
     AvalancheTheme {
-        // TODO(opus): Preview requires a real AppViewModel; stub if a MockAppViewModel exists.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(AvalancheColors.Paper),
-        ) {
-            Text(
-                text = "NameGroupView preview — wire AppViewModel stub to render fully.",
-                color = AvalancheColors.Muted,
-                modifier = Modifier.align(Alignment.Center),
-            )
-        }
+        NameGroupView(
+            members = listOf(
+                RecipientChip(id = "did:example:bob", did = "did:example:bob", displayName = "Bob"),
+                RecipientChip(id = "did:example:carol", did = "did:example:carol", displayName = "Carol"),
+            ),
+            accountId = "did:example:alice",
+            servers = previewServers,
+            viewModel = rememberPreviewAppViewModel(),
+        )
     }
 }
 
@@ -452,16 +456,11 @@ private fun NameGroupWithMembersPreview() {
 @Composable
 private fun NameGroupEmptyPreview() {
     AvalancheTheme {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(AvalancheColors.Paper),
-        ) {
-            Text(
-                text = "NameGroupView empty preview — wire AppViewModel stub to render fully.",
-                color = AvalancheColors.Muted,
-                modifier = Modifier.align(Alignment.Center),
-            )
-        }
+        NameGroupView(
+            members = emptyList(),
+            accountId = "did:example:alice",
+            servers = previewServers,
+            viewModel = rememberPreviewAppViewModel(),
+        )
     }
 }

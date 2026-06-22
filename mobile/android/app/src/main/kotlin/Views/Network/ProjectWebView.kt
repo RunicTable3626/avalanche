@@ -23,6 +23,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -30,6 +31,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * A WebView that opens a Project URL with visible chrome (header bar).
@@ -49,6 +52,7 @@ fun ProjectWebView(
     onDeepLink: (Uri) -> Unit = {},
     appViewModel: AppViewModel = viewModel(),
 ) {
+    val scope = rememberCoroutineScope()
     Scaffold(
         topBar = {
             TopAppBar(
@@ -93,10 +97,12 @@ fun ProjectWebView(
                     android.util.Log.d("ProjectWebView", "onDeepLink called: $deepLinkUri")
                     onDismiss()
                     // Delay slightly so the sheet dismissal completes before navigation.
-                    // TODO(opus): consider using a coroutine delay on the main dispatcher instead
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    // The coroutine runs on the composition scope (main dispatcher) and is
+                    // cancelled automatically if this composable leaves the tree.
+                    scope.launch {
+                        delay(300L)
                         onDeepLink(deepLinkUri)
-                    }, 300L)
+                    }
                 },
             )
         }
@@ -125,9 +131,10 @@ fun WebViewRepresentable(
         factory = { ctx ->
             WebView(ctx).apply {
                 android.util.Log.d("WebView", "loading $url")
+                // JavaScript + DOM storage are required by the Project web app.
+                // Mixed (http-in-https) content is intentionally left at its secure
+                // default (NEVER_ALLOW) — Projects are served over https.
                 settings.javaScriptEnabled = true
-                // TODO(opus): review whether additional WebSettings are needed for the
-                // project web app (DOM storage, mixed content, etc.)
                 settings.domStorageEnabled = true
 
                 webViewClient = object : WebViewClient() {

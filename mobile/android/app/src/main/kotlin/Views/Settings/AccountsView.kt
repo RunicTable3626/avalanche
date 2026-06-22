@@ -19,10 +19,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -58,6 +60,7 @@ fun AccountsView(
     onNavigateToIdentityDetail: (Account) -> Unit = {},
     onNavigateToServerDetail: (Account, ServerInfo) -> Unit = { _, _ -> },
     onNavigateToAddAccount: () -> Unit = {},
+    onOpenLogViewer: () -> Unit = {},
 ) {
     val accounts by viewModel.accounts.collectAsState()
     val context = LocalContext.current
@@ -86,17 +89,21 @@ fun AccountsView(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Placeholder so title centers properly
-            Spacer(modifier = Modifier.width(56.dp))
+            IconButton(onClick = onDismiss) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = AvalancheColors.Ink,
+                )
+            }
             Text(
                 text = "Accounts",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = AvalancheColors.Ink,
             )
-            TextButton(onClick = onDismiss) {
-                Text("Done", color = AvalancheColors.Brand)
-            }
+            // Balancing spacer so the title stays centered opposite the back button.
+            Spacer(modifier = Modifier.width(48.dp))
         }
 
         HorizontalDivider(color = AvalancheColors.Sand300.copy(alpha = 0.5f))
@@ -238,6 +245,13 @@ fun AccountsView(
                             text = appVersion,
                             style = MaterialTheme.typography.bodySmall,
                             color = AvalancheColors.Muted,
+                            // Debug-only: tap the version to open the in-app log
+                            // viewer (mirrors the iOS debug gesture).
+                            modifier = if (BuildConfig.DEBUG) {
+                                Modifier.clickable { onOpenLogViewer() }
+                            } else {
+                                Modifier
+                            },
                         )
                         Text(
                             text = "Open Source License",

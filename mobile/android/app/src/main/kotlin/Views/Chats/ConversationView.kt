@@ -162,12 +162,9 @@ fun ConversationView(
             readAtMs = nowMs,  // outgoing = immediately read
             deliveryStatus = DeliveryStatus.SENDING,
         )
-        // TODO(opus): AppViewModel does not expose a direct addOptimisticMessage method.
-        // The iOS counterpart mutates appState.messagesByConversation and appState.conversations
-        // directly (they are @Published vars). On Android these are private MutableStateFlows.
-        // A follow-up pass should add AppViewModel.addOptimisticMessage(message, conversation)
-        // that does the same two updates atomically. For now the message will appear when the
-        // send completes and the store is reloaded; the UX is slightly less snappy than iOS.
+        // Insert into the UI immediately so the send feels instant (mirrors iOS).
+        // The real row replaces it once the send completes and the store reloads.
+        viewModel.addOptimisticMessage(message = optimistic, conversation = conversation)
 
         scope.launch {
             // Scroll to bottom after optimistic insert.
@@ -639,18 +636,11 @@ private fun LeftGroupBarPreview() {
 @Composable
 private fun BlockedBarPreview() {
     AvalancheTheme {
-        // TODO(opus): BlockedBar preview requires a real AppViewModel; shown as stub.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-        ) {
-            Text(
-                text = "You blocked this contact. [Unblock]",
-                style = MaterialTheme.typography.labelSmall,
-                color = AvalancheColors.Muted,
-            )
-        }
+        BlockedBar(
+            did = "did:example:blocked",
+            accountId = "did:example:alice",
+            viewModel = rememberPreviewAppViewModel(),
+        )
     }
 }
 

@@ -3,6 +3,7 @@ package net.theavalanche.app
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.os.Build
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
@@ -111,9 +112,16 @@ class RecipientTokenEditText(context: Context) : EditText(context) {
         background = null
         setPadding(0, 12, 0, 12)
 
-        // Brand tint for cursor / selection handles.
-        // TODO(opus): tinting the cursor color via DrawableCompat requires API 29+
-        //             on older APIs the default accent color is used.
+        // Brand tint for the text-selection highlight (all APIs) and the caret
+        // (API 29+ via the textCursorDrawable setter; older devices fall back to
+        // the platform accent color).
+        highlightColor = AvalancheColors.Brand.copy(alpha = 0.3f).toArgb()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            textCursorDrawable?.mutate()?.let { caret ->
+                caret.setTint(AvalancheColors.Brand.toArgb())
+                textCursorDrawable = caret
+            }
+        }
 
         addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -415,11 +423,12 @@ fun RecipientTokenField(
  * with a space separator to approximate the iOS layout where the prefix
  * label sits inline and the placeholder follows it.
  *
- * A full-fidelity prefix (label floated to the left, chips indented on the
- * first line only) would require a custom `Layout` or `StaticLayout` with
- * exclusion rects — marked as a deferred improvement.
- * // TODO(opus): implement a proper prefix label with first-line exclusion
- *               rect, matching iOS RecipientTokenTextView.prefixText layout.
+ * NOTE: A full-fidelity prefix (label floated to the left, chips indented on the
+ * first line only) would require a custom `Layout`/`StaticLayout` with exclusion
+ * rects. We deliberately keep the simpler concatenated-hint approach: the active
+ * composer (ComposeMessageView.RecipientFieldRow) renders the "To:" label as a
+ * separate composable in its FlowRow, so this EditText-based variant does not need
+ * the inline prefix.
  */
 private fun buildPrefixedHint(prefix: String, placeholder: String): String =
     if (prefix.isNotEmpty()) "$prefix $placeholder" else placeholder

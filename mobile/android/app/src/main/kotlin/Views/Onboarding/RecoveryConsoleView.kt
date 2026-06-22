@@ -11,9 +11,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -56,14 +60,14 @@ fun RecoveryConsoleView(
     prfOutput: ByteArray,
     did: String,
     appViewModel: AppViewModel,
+    onBack: () -> Unit = {},
 ) {
     // Mutable list of console lines — appended from coroutines on the main thread.
     val logLines = remember { mutableStateListOf<String>() }
 
     // Server URL input — pre-fill localhost in debug builds like iOS does.
     var serverUrlInput by rememberSaveable {
-        // TODO(opus): distinguish debug from release builds via BuildConfig.DEBUG
-        mutableStateOf("http://localhost:3000")
+        mutableStateOf(if (BuildConfig.DEBUG) "http://localhost:3000" else "")
     }
 
     // Whether to show the manual server URL prompt.
@@ -178,6 +182,11 @@ fun RecoveryConsoleView(
         topBar = {
             TopAppBar(
                 title = { Text("Recovering...") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = AvalancheColors.Paper,
                     titleContentColor = AvalancheColors.Ink,
@@ -288,10 +297,10 @@ private fun resolveHomeserverFromPlc(did: String): String {
 @Composable
 private fun RecoveryConsolePreview() {
     AvalancheTheme {
-        // Preview uses a stub ViewModel — the LaunchedEffect fires but
-        // MockActnetService.recoverFromBlob returns a MockAppCoreProtocol,
-        // so the preview won't crash even if performRecovery runs.
-        // TODO(opus): wire a proper preview ViewModel factory so previews
-        // don't need the Application context from AppViewModelFactory.
+        RecoveryConsoleView(
+            prfOutput = ByteArray(32),
+            did = "did:example:alice",
+            appViewModel = rememberPreviewAppViewModel(),
+        )
     }
 }

@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -240,6 +241,11 @@ fun GroupDetailView(
         topBar = {
             TopAppBar(
                 title = { Text("Group info") },
+                navigationIcon = {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = AvalancheColors.Paper,
                     titleContentColor = AvalancheColors.Ink,
@@ -593,17 +599,12 @@ private fun MemberRow(
 @Composable
 private fun GroupDetailViewPreview() {
     AvalancheTheme {
-        // Minimal stub — no real AppViewModel needed for layout review.
-        // The preview won't load from the store (core returns null), so it shows
-        // the loading spinner. To see the full layout, wire a mock ViewModel.
-        // TODO(opus): wire a MockAppViewModel with pre-seeded group summary for a richer preview.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(AvalancheColors.Paper),
-            contentAlignment = Alignment.Center,
-        ) {
-            CircularProgressIndicator(color = AvalancheColors.Brand)
-        }
+        // The preview ViewModel's mock core returns no group summary, so this
+        // renders the loading state — useful for reviewing the scaffold/top bar.
+        GroupDetailView(
+            groupId = "preview-group",
+            accountId = "did:example:alice",
+            appViewModel = rememberPreviewAppViewModel(),
+        )
     }
 }

@@ -21,7 +21,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -88,7 +93,16 @@ private fun EditHistoryRow(
     atMs: Long,
     label: String,
 ) {
-    val relativeTime = remember(atMs) { formatRelativeTime(atMs) }
+    // Live-updating relative time, matching iOS Text(..., style: .relative). A
+    // ticker re-derives the label once a minute (the finest granularity this
+    // formatter shows) so "2 minutes ago" advances without reopening the sheet.
+    var relativeTime by remember(atMs) { mutableStateOf(formatRelativeTime(atMs)) }
+    LaunchedEffect(atMs) {
+        while (true) {
+            relativeTime = formatRelativeTime(atMs)
+            delay(60_000L)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -115,11 +129,8 @@ private fun EditHistoryRow(
 }
 
 /// Formats a unix-millis timestamp as a human-readable relative string.
-/// iOS uses SwiftUI's `Text(..., style: .relative)` which live-updates;
-/// Android's equivalent would require a ticker — this static format is a
-/// best-effort approximation.
-// TODO(opus): Replace with a live-updating relative time (e.g. using a
-// State<String> + LaunchedEffect ticker) to match iOS `.relative` text style.
+/// Callers (EditHistoryRow) re-invoke this from a one-minute LaunchedEffect
+/// ticker so the label live-updates, matching iOS `Text(..., style: .relative)`.
 private fun formatRelativeTime(atMs: Long): String {
     val now = System.currentTimeMillis()
     val diffMs = now - atMs

@@ -3,17 +3,21 @@ package net.theavalanche.app
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,9 +43,11 @@ import kotlinx.coroutines.launch
  * @param onInviteTokenResolved Called with the validated [InviteToken] when
  *   the link is confirmed; the caller should push IdentityPickerView.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InviteLinkEntryView(
     onInviteTokenResolved: (InviteToken) -> Unit = {},
+    onBack: () -> Unit = {},
 ) {
     var linkText by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -71,11 +77,23 @@ fun InviteLinkEntryView(
         }
     }
 
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Enter Invite Link") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(AvalancheColors.Paper)
-            .windowInsetsPadding(WindowInsets.systemBars)
+            .padding(innerPadding)
             .padding(top = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -122,6 +140,7 @@ fun InviteLinkEntryView(
         }
 
         Spacer(modifier = Modifier.weight(1f))
+    }
     }
 }
 

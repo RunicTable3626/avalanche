@@ -12,16 +12,21 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,6 +46,7 @@ import kotlinx.coroutines.launch
  * Navigation: callback-lambda pattern (no NavController dependency here).
  * [onDismiss] is called after a successful leave or when the back button is pressed.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ServerDetailView(
     account: Account,
@@ -71,10 +77,23 @@ fun ServerDetailView(
         }
     }
 
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(server.name) },
+                navigationIcon = {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(AvalancheColors.Paper)
+            .padding(innerPadding)
             .verticalScroll(rememberScrollState())
             .padding(bottom = 32.dp),
     ) {
@@ -164,6 +183,7 @@ fun ServerDetailView(
             }
         }
     }
+    }
 
     // Leave confirmation dialog — mirrors iOS .confirmationDialog(...)
     if (showLeaveConfirmation) {
@@ -237,7 +257,11 @@ private fun ServerDetailViewPreview() {
             displayName = "Alice",
             servers = listOf(homeServer, otherServer),
         )
-        // TODO(opus): wire a real AppViewModel for preview; preview is structural only.
-        // ServerDetailView(account = account, server = otherServer, appViewModel = ..., onDismiss = {})
+        ServerDetailView(
+            account = account,
+            server = otherServer,
+            appViewModel = rememberPreviewAppViewModel(accounts = listOf(account)),
+            onDismiss = {},
+        )
     }
 }

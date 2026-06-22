@@ -3,6 +3,7 @@ package net.theavalanche.app
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Base64
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -36,6 +37,8 @@ object KeystoreKeyManager {
     // AES-GCM parameters
     private const val KEY_SIZE_BITS = 256
     private const val GCM_TAG_LENGTH = 128
+    private const val GCM_IV_LENGTH = 12
+    private const val TRANSFORMATION = "AES/GCM/NoPadding"
 
     /**
      * Returns the DB passphrase, generating and persisting one if it does not yet exist.
@@ -69,58 +72,70 @@ object KeystoreKeyManager {
     }
 
     /**
-     * Reads the passphrase from encrypted SharedPreferences, or null if not yet stored.
-     *
-     * The value is encrypted with an AES-256-GCM key held in the Android Keystore,
+     * Reads and decrypts the passphrase from SharedPreferences, or null if not yet
+     * stored. The stored blob is [IV (12 bytes) || AES-256-GCM ciphertext], base64
+     * encoded, decrypted with a non-exportable key held in the Android Keystore —
      * approximating iOS kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly.
      */
     @Throws(KeyManagerException::class)
     private fun loadFromStorage(context: Context): String? {
         return try {
-            val prefs = getEncryptedPrefs(context)
-            prefs.getString(PREFS_KEY, null)
+            val stored = context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                .getString(PREFS_KEY, null) ?: return null
+            val blob = Base64.decode(stored, Base64.NO_WRAP)
+            val iv = blob.copyOfRange(0, GCM_IV_LENGTH)
+            val ciphertext = blob.copyOfRange(GCM_IV_LENGTH, blob.size)
+            val cipher = Cipher.getInstance(TRANSFORMATION).apply {
+                init(Cipher.DECRYPT_MODE, getOrCreateSecretKey(), GCMParameterSpec(GCM_TAG_LENGTH, iv))
+            }
+            String(cipher.doFinal(ciphertext), Charsets.UTF_8)
         } catch (e: Exception) {
             throw KeyManagerException.KeystoreReadFailed(e)
         }
     }
 
     /**
-     * Persists [passphrase] to encrypted SharedPreferences.
+     * Encrypts [passphrase] with the Keystore key and persists [IV || ciphertext]
+     * (base64) to SharedPreferences. The plaintext never touches disk.
      */
     @Throws(KeyManagerException::class)
     private fun saveToStorage(context: Context, passphrase: String) {
         try {
-            val prefs = getEncryptedPrefs(context)
-            prefs.edit().putString(PREFS_KEY, passphrase).apply()
+            val cipher = Cipher.getInstance(TRANSFORMATION).apply {
+                init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey())
+            }
+            val iv = cipher.iv
+            val ciphertext = cipher.doFinal(passphrase.toByteArray(Charsets.UTF_8))
+            val encoded = Base64.encodeToString(iv + ciphertext, Base64.NO_WRAP)
+            context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                .edit().putString(PREFS_KEY, encoded).apply()
         } catch (e: Exception) {
             throw KeyManagerException.KeystoreWriteFailed(e)
         }
     }
 
     /**
-     * Returns an EncryptedSharedPreferences instance backed by a Keystore-resident
-     * AES-256-GCM master key.
-     *
-     * // TODO(opus): Replace the manual Keystore key generation + Cipher approach below
-     * // with androidx.security.crypto.EncryptedSharedPreferences once the Jetpack
-     * // Security dependency is confirmed in build.gradle.kts.  The API call is:
-     * //
-     * //   EncryptedSharedPreferences.create(
-     * //       context,
-     * //       PREFS_FILE,
-     * //       MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-     * //       EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-     * //       EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-     * //   )
-     * //
-     * // Until that dependency lands, we fall back to plain SharedPreferences as a
-     * // compile-safe stub — the TODO(opus) pass should switch to the encrypted variant.
+     * Returns the AES-256-GCM key for this app from the Android Keystore, creating
+     * a hardware-backed (where available), non-exportable key on first use. The key
+     * is usable after first unlock and does not require per-use authentication, so
+     * the DB can be opened in the background — matching the iOS Keychain semantics.
      */
-    private fun getEncryptedPrefs(context: Context): android.content.SharedPreferences {
-        // TODO(opus): Replace with EncryptedSharedPreferences (androidx.security.crypto)
-        // once androidx.security:security-crypto is added to build.gradle.kts.
-        // Using plain SharedPreferences here is a STUB — not secure for production.
-        return context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+    private fun getOrCreateSecretKey(): SecretKey {
+        val keystore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+        (keystore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry)
+            ?.let { return it.secretKey }
+
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+        val spec = KeyGenParameterSpec.Builder(
+            KEYSTORE_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(KEY_SIZE_BITS)
+            .build()
+        generator.init(spec)
+        return generator.generateKey()
     }
 
     // -------------------------------------------------------------------------

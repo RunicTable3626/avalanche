@@ -37,6 +37,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.URL
 
 /**
  * Screen for creating a new identity after accepting an invite.
@@ -66,8 +68,6 @@ fun NewAccountView(
     // Mirrors SwiftUI .task { privacyPolicyURL = await PublicServerInfo.privacyPolicyURL(...) }
     LaunchedEffect(inviteToken.serverUrl) {
         privacyPolicyUrl = withContext(Dispatchers.IO) {
-            // TODO(opus): wire to the real PublicServerInfo.privacyPolicyUrl(forServer:) call
-            //  once that top-level UniFFI function or HTTP helper is available on Android.
             runCatching { fetchPublicServerInfoPrivacyPolicy(serverUrl = inviteToken.serverUrl) }
                 .getOrNull()
         }
@@ -170,21 +170,27 @@ fun NewAccountView(
 }
 
 // ---------------------------------------------------------------------------
-// Stub — replace with real HTTP call or UniFFI generated helper
+// Public server info
 // ---------------------------------------------------------------------------
 
 /**
  * Fetch the operator's privacy-policy URL from [serverUrl]/v1/info.
- * Returns null if not configured.
+ * Returns null if not configured or unreachable.
  *
- * TODO(opus): implement via the real PublicServerInfo utility once it exists on
- *  Android. iOS calls PublicServerInfo.privacyPolicyURL(forServer:) which hits
- *  <serverUrl>/v1/info and parses the JSON response.
+ * Mirrors iOS PublicServerInfo.privacyPolicyURL(forServer:): GET <serverUrl>/v1/info
+ * and read the "privacy_policy_url" field. Caller runs this on Dispatchers.IO.
  */
-private suspend fun fetchPublicServerInfoPrivacyPolicy(serverUrl: String): String? {
-    // TODO(opus): real implementation — make an HTTP GET to $serverUrl/v1/info,
-    //  parse JSON, return the "privacy_policy_url" field (or null if absent).
-    return null
+private fun fetchPublicServerInfoPrivacyPolicy(serverUrl: String): String? {
+    val base = serverUrl.trimEnd('/')
+    val infoUrl = "$base/v1/info"
+    return runCatching {
+        val connection = URL(infoUrl).openConnection() as java.net.HttpURLConnection
+        connection.connectTimeout = 5_000
+        connection.readTimeout = 5_000
+        if (connection.responseCode != 200) return@runCatching null
+        val body = connection.inputStream.bufferedReader().readText()
+        JSONObject(body).optString("privacy_policy_url").takeIf { it.isNotEmpty() }
+    }.getOrNull()
 }
 
 // ---------------------------------------------------------------------------

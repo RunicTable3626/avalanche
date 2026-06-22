@@ -276,90 +276,18 @@ fun PasskeyExplainerView(
 @Preview(showBackground = true)
 @Composable
 private fun PasskeyExplainerPreview() {
-    // AppViewModel requires a Context; preview uses a minimal stub ViewModel.
-    // TODO(opus): use a LocalInspectionMode-aware factory if previews need a real VM.
     AvalancheTheme {
-        // Render the pure layout with placeholder values — callback lambdas are no-ops.
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(AvalancheColors.Paper)
-                .padding(horizontal = 32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Spacer(modifier = Modifier.weight(1f))
-
-            Text(
-                text = "Create a passkey to protect this identity",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-                color = AvalancheColors.Ink,
-            )
-
-            Column(
-                modifier = Modifier.padding(top = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(64.dp)
-                        .clip(CircleShape)
-                        .background(AvalancheColors.Sand200),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "A",
-                        style = MaterialTheme.typography.headlineMedium,
-                        color = AvalancheColors.Muted,
-                    )
-                }
-                Text(
-                    text = "Alice",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = AvalancheColors.Ink,
-                )
-            }
-
-            Text(
-                text = "Passkeys are stored securely in your password manager or Google account, " +
-                    "and synced across all your devices. You’ll use it to sign back into this " +
-                    "identity if you lose this device.",
-                style = MaterialTheme.typography.bodySmall,
-                color = AvalancheColors.Muted,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(top = 24.dp),
-            )
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 48.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Button(onClick = {}, modifier = Modifier.fillMaxWidth()) {
-                    Icon(imageVector = Icons.Filled.Key, contentDescription = null)
-                    Text(text = "Create Passkey", modifier = Modifier.padding(start = 8.dp))
-                }
-                TextButton(onClick = {}) {
-                    Text(
-                        text = "Use a recovery phrase instead",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = AvalancheColors.Brand,
-                    )
-                }
-                TextButton(onClick = {}) {
-                    Text(
-                        text = "Skip recovery setup",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = AvalancheColors.Muted,
-                    )
-                }
-            }
-        }
+        val token = InviteToken(
+            token = "abc123",
+            serverUrl = "https://demo.theavalanche.net",
+            serverName = "Demo Server",
+            inviterDid = null,
+            postOnboardingRedirect = null,
+        )
+        PasskeyExplainerView(
+            inviteToken = token,
+            displayName = "Alice",
+            viewModel = rememberPreviewAppViewModel(),
+        )
     }
 }

@@ -37,11 +37,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -182,21 +185,28 @@ private fun BubbleContent(
     val bubbleShape: Shape = if (isBot) CutCornerRectangle(cut = 12f) else RoundedCornerShape(16.dp)
 
     if (message.isDeleted) {
-        // Dashed border tombstone
+        // Dashed border tombstone. Compose has no dashed Modifier.border, so we
+        // stroke a dashed rounded rect ourselves via drawBehind + dashPathEffect.
+        val dashColor = AvalancheColors.Muted.copy(alpha = 0.4f)
+        val density = LocalDensity.current
+        val cornerPx = with(density) { 16.dp.toPx() }
+        val strokePx = with(density) { 1.dp.toPx() }
         Box(
             modifier = Modifier
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            // Compose doesn't support dashed borders natively via Modifier.border;
-            // draw a dashed rounded rect using Canvas.
-            // TODO(opus): replace with Canvas drawRoundRect + PathEffect.dashPathEffect if needed
             Box(
                 modifier = Modifier
-                    .border(
-                        width = 1.dp,
-                        color = AvalancheColors.Muted.copy(alpha = 0.4f),
-                        shape = RoundedCornerShape(16.dp),
-                    )
+                    .drawBehind {
+                        drawRoundRect(
+                            color = dashColor,
+                            cornerRadius = CornerRadius(cornerPx, cornerPx),
+                            style = Stroke(
+                                width = strokePx,
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f), 0f),
+                            ),
+                        )
+                    }
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 Text(

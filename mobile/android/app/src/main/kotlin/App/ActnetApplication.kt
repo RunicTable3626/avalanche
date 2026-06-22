@@ -17,9 +17,9 @@ import uniffi.app_core.initLogging
  *
  * iOS background-push handling (didReceiveRemoteNotification) and APNs token forwarding
  * have no 1:1 analog in this Application class; those belong in a FirebaseMessagingService
- * subclass and a notification channel setup routine.
+ * subclass. The notification channel itself is created on API 26+ by
+ * NotificationPresenter.createNotificationChannel(), invoked from MainActivity.onCreate.
  * TODO(opus): Implement FCM push service for background-message wakeup.
- * TODO(opus): Implement notification channel creation (required on API 26+).
  */
 class ActnetApplication : Application() {
 

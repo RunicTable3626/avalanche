@@ -245,7 +245,7 @@ private fun RecoveryPhraseEntryView(
     // Mirror iOS DEBUG default: pre-fill localhost in debug, blank in release.
     var serverUrl by remember {
         mutableStateOf(
-            if (AppConfig.isDebug) "http://localhost:3000" else ""
+            if (BuildConfig.DEBUG) "http://localhost:3000" else ""
         )
     }
 
@@ -318,17 +318,6 @@ private fun RecoveryPhraseEntryView(
         },
         containerColor = AvalancheColors.Paper,
     )
-}
-
-// ---------------------------------------------------------------------------
-// AppConfig helper — mirrors iOS #if DEBUG conditional for the server URL
-// default. A proper build-config approach would use BuildConfig.DEBUG, but
-// we keep this thin to avoid touching build.gradle.kts.
-// ---------------------------------------------------------------------------
-
-private object AppConfig {
-    // TODO(opus): Replace with BuildConfig.DEBUG once build config is wired.
-    val isDebug: Boolean = true
 }
 
 // ---------------------------------------------------------------------------

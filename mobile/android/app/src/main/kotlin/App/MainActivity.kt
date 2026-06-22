@@ -38,12 +38,19 @@ private object Route {
     const val CONVERSATION = "conversation/{id}"    // ConversationView
     const val ACCOUNTS = "accounts"                 // AccountsView
     const val COMPOSE = "compose"                   // ComposeMessageView
+    const val NAME_GROUP = "name_group"             // NameGroupView
     const val GROUP_DETAIL = "group_detail/{groupId}/{accountId}"
     const val IDENTITY_DETAIL = "identity_detail/{did}"
+    const val BLOCKED_CONTACTS = "blocked_contacts/{did}"
     const val SERVER_DETAIL = "server_detail/{serverUrl}"
     const val ADD_ACCOUNT = "add_account"
     const val SCANNER = "scanner"                   // QRScannerView (invite scanning)
     const val INVITE_LINK_ENTRY = "invite_link_entry"
+    const val IDENTITY_PICKER = "identity_picker"
+    const val NEW_ACCOUNT = "new_account"
+    const val PASSKEY_EXPLAINER = "passkey_explainer/{displayName}"
+    const val RECOVERY_PHRASE_SETUP = "recovery_phrase_setup/{displayName}"
+    const val JOINING_SERVER = "joining_server/{did}"
     const val RECOVERY_EXPLAINER = "recovery_explainer"
     const val RECOVERY_CONSOLE = "recovery_console"
     const val LOG_VIEWER = "log_viewer"
@@ -51,8 +58,12 @@ private object Route {
     // helpers
     fun conversation(id: String) = "conversation/$id"
     fun groupDetail(groupId: String, accountId: String) = "group_detail/$groupId/$accountId"
-    fun identityDetail(did: String) = "identity_detail/$did"
+    fun identityDetail(did: String) = "identity_detail/${Uri.encode(did)}"
+    fun blockedContacts(did: String) = "blocked_contacts/${Uri.encode(did)}"
     fun serverDetail(serverUrl: String) = "server_detail/${Uri.encode(serverUrl)}"
+    fun passkeyExplainer(displayName: String) = "passkey_explainer/${Uri.encode(displayName)}"
+    fun recoveryPhraseSetup(displayName: String) = "recovery_phrase_setup/${Uri.encode(displayName)}"
+    fun joiningServer(did: String) = "joining_server/${Uri.encode(did)}"
 }
 
 // ---------------------------------------------------------------------------
@@ -113,8 +124,8 @@ class MainActivity : ComponentActivity() {
 //   - if isOnboarding -> SplashView (onboarding flow)
 //   - else -> MainTabView (chats + network)
 //   - OfflineBanner overlaid on top
-//   - LogViewerView accessible via debug gesture (two-finger triple-tap on iOS;
-//     stubbed here — TODO(opus): hook into a debug shake detector or similar).
+//   - LogViewerView is reachable in debug builds by tapping the app-version
+//     footer in AccountsView (the Android analog of the iOS debug gesture).
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -166,11 +177,13 @@ fun AppNavGraph(
             RecoveryExplainerView(
                 accounts = accounts,
                 onNavigateToRecoveryConsole = { prfOutput, did ->
-                    // ByteArray cannot be a nav arg; stash it in the back-stack
-                    // savedStateHandle so RecoveryConsoleView can retrieve it.
-                    navController.currentBackStackEntry
-                        ?.savedStateHandle
-                        ?.set("prfOutput", prfOutput)
+                    // ByteArray cannot be a nav arg; stash both the PRF output and
+                    // the DID in the back-stack savedStateHandle so RecoveryConsoleView
+                    // can retrieve them after navigation.
+                    navController.currentBackStackEntry?.savedStateHandle?.apply {
+                        set("prfOutput", prfOutput)
+                        set("did", did)
+                    }
                     navController.navigate(Route.RECOVERY_CONSOLE)
                 },
                 onNavigateUp = { navController.popBackStack() },
@@ -184,20 +197,21 @@ fun AppNavGraph(
         composable(Route.SCANNER) {
             QRScannerView(
                 onScanned = { rawText ->
-                    // raw QR text — pass back to caller or store as pending token
+                    // raw QR text — stash and hand off to the link-entry screen,
+                    // which validates and resolves it into an InviteToken.
                     appViewModel.setPendingInviteToken(rawText)
                     navController.navigate(Route.INVITE_LINK_ENTRY) {
                         popUpTo(Route.SCANNER) { inclusive = true }
                     }
                 },
                 onInviteToken = { token ->
-                    // InviteToken already decoded — store and navigate
-                    // TODO(opus): InviteToken is a data class produced by
-                    // QRScannerView; extract the raw token string from it.
-                    navController.navigate(Route.INVITE_LINK_ENTRY) {
+                    // InviteToken already decoded — record it and enter onboarding.
+                    appViewModel.setPendingInvite(token)
+                    navController.navigate(Route.IDENTITY_PICKER) {
                         popUpTo(Route.SCANNER) { inclusive = true }
                     }
                 },
+                onBack = { navController.popBackStack() },
             )
         }
 
@@ -207,26 +221,127 @@ fun AppNavGraph(
         // ----------------------------------------------------------------
         composable(Route.INVITE_LINK_ENTRY) {
             InviteLinkEntryView(
+                onBack = { navController.popBackStack() },
                 onInviteTokenResolved = { token ->
-                    // InviteToken resolved — navigate into the onboarding flow.
-                    // TODO(opus): InviteToken carries server URL / did; wire the
-                    // NewAccountView or JoiningServerView with its contents.
-                    navController.navigate(Route.MAIN) {
-                        popUpTo(0) { inclusive = true }
+                    // InviteToken resolved — record it and choose an identity to
+                    // join with (existing) or create a new one.
+                    appViewModel.setPendingInvite(token)
+                    navController.navigate(Route.IDENTITY_PICKER) {
+                        popUpTo(Route.INVITE_LINK_ENTRY) { inclusive = true }
                     }
                 },
             )
         }
 
         // ----------------------------------------------------------------
+        // Identity picker — pick an existing identity to join the invited server,
+        // or create / recover one. Reads the resolved invite from the ViewModel.
+        // ----------------------------------------------------------------
+        composable(Route.IDENTITY_PICKER) {
+            val invite by appViewModel.pendingInvite.collectAsState()
+            invite?.let { token ->
+                IdentityPickerView(
+                    inviteToken = token,
+                    appViewModel = appViewModel,
+                    onPickExistingAccount = { account ->
+                        navController.navigate(Route.joiningServer(account.id))
+                    },
+                    onCreateNewAccount = { navController.navigate(Route.NEW_ACCOUNT) },
+                    onRecoverIdentity = { navController.navigate(Route.RECOVERY_EXPLAINER) },
+                )
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // New account — enter a display name for a brand-new identity, then set
+        // up recovery (passkey). Reads the resolved invite from the ViewModel.
+        // ----------------------------------------------------------------
+        composable(Route.NEW_ACCOUNT) {
+            val invite by appViewModel.pendingInvite.collectAsState()
+            invite?.let { token ->
+                NewAccountView(
+                    inviteToken = token,
+                    onNext = { displayName ->
+                        navController.navigate(Route.passkeyExplainer(displayName))
+                    },
+                    onRecover = { navController.navigate(Route.RECOVERY_EXPLAINER) },
+                )
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Passkey explainer — offers passkey creation or a recovery phrase.
+        // (The passkey ceremony itself is still a deferred TODO inside the view.)
+        // ----------------------------------------------------------------
+        composable(Route.PASSKEY_EXPLAINER) { backStackEntry ->
+            val displayName = backStackEntry.arguments?.getString("displayName") ?: ""
+            val invite by appViewModel.pendingInvite.collectAsState()
+            invite?.let { token ->
+                PasskeyExplainerView(
+                    inviteToken = token,
+                    displayName = displayName,
+                    viewModel = appViewModel,
+                    onNavigateToRecoveryPhraseSetup = { _, name ->
+                        navController.navigate(Route.recoveryPhraseSetup(name))
+                    },
+                    onHandleDeepLink = { url ->
+                        runCatching { Uri.parse(url) }.getOrNull()?.let { appViewModel.handleDeepLink(it) }
+                    },
+                )
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Recovery phrase setup — alternative to a passkey for a new identity.
+        // ----------------------------------------------------------------
+        composable(Route.RECOVERY_PHRASE_SETUP) { backStackEntry ->
+            val displayName = backStackEntry.arguments?.getString("displayName") ?: ""
+            val invite by appViewModel.pendingInvite.collectAsState()
+            invite?.let { token ->
+                RecoveryPhraseSetupView(
+                    appViewModel = appViewModel,
+                    inviteToken = token,
+                    displayName = displayName,
+                    onComplete = {
+                        appViewModel.setPendingInvite(null)
+                        navController.navigate(Route.MAIN) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    },
+                )
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Joining server — an existing identity joins the invited server.
+        // ----------------------------------------------------------------
+        composable(Route.JOINING_SERVER) { backStackEntry ->
+            val did = backStackEntry.arguments?.getString("did") ?: return@composable
+            val accounts by appViewModel.accounts.collectAsState()
+            val account = accounts.firstOrNull { it.id == did }
+            val invite by appViewModel.pendingInvite.collectAsState()
+            if (account != null && invite != null) {
+                JoiningServerView(
+                    inviteToken = invite!!,
+                    existingAccount = account,
+                    appViewModel = appViewModel,
+                    onJoinComplete = {
+                        appViewModel.setPendingInvite(null)
+                        navController.navigate(Route.MAIN) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    },
+                    onBack = { navController.popBackStack() },
+                )
+            }
+        }
+
+        // ----------------------------------------------------------------
         // Recovery console
         // Actual signature: RecoveryConsoleView(prfOutput, did, appViewModel)
-        // prfOutput is retrieved from the previous back-stack entry's savedStateHandle
-        // (stashed by RecoveryExplainerView before navigating here).
-        // did is also sourced from the same savedStateHandle entry since it cannot
-        // be cleanly embedded in the route without its own parameterisation.
-        // TODO(opus): parameterize the did into the route string once the
-        //   integration pass is done (requires Uri.encode / NavType.StringType).
+        // Both prfOutput (a ByteArray, which cannot be a route arg) and did are
+        // retrieved from the previous back-stack entry's savedStateHandle, stashed
+        // by RecoveryExplainerView before navigating here.
         // ----------------------------------------------------------------
         composable(Route.RECOVERY_CONSOLE) {
             val prfOutput: ByteArray = navController.previousBackStackEntry
@@ -241,6 +356,7 @@ fun AppNavGraph(
                 prfOutput = prfOutput,
                 did = did,
                 appViewModel = appViewModel,
+                onBack = { navController.popBackStack() },
             )
         }
 
@@ -296,8 +412,42 @@ fun AppNavGraph(
                     navController.popBackStack()
                     navController.navigate(Route.conversation(conv.id))
                 },
-                // TODO(opus): wire onNavigateToNameGroup to a NameGroupView destination
-                onNavigateToNameGroup = { _, _, _ -> },
+                onNavigateToNameGroup = { members, accountId, servers ->
+                    // Complex objects can't be route args; stash the group draft in
+                    // this entry's savedStateHandle for NameGroupView to read.
+                    navController.currentBackStackEntry?.savedStateHandle?.apply {
+                        set(
+                            "ng_members",
+                            ArrayList(members.map { RecipientChip(it.id, it.did, it.displayName) }),
+                        )
+                        set("ng_accountId", accountId)
+                        set("ng_servers", ArrayList(servers))
+                    }
+                    navController.navigate(Route.NAME_GROUP)
+                },
+            )
+        }
+
+        // ----------------------------------------------------------------
+        // Name group (final step of multi-recipient compose)
+        // ----------------------------------------------------------------
+        composable(Route.NAME_GROUP) {
+            val handle = navController.previousBackStackEntry?.savedStateHandle
+            val members = handle?.get<ArrayList<RecipientChip>>("ng_members") ?: arrayListOf()
+            val accountId = handle?.get<String>("ng_accountId") ?: ""
+            val servers = handle?.get<ArrayList<ServerInfo>>("ng_servers") ?: arrayListOf()
+            NameGroupView(
+                members = members,
+                accountId = accountId,
+                servers = servers,
+                viewModel = appViewModel,
+                onCreated = { conv ->
+                    navController.navigate(Route.conversation(conv.id)) {
+                        // Drop the compose + name-group screens from the back stack.
+                        popUpTo(Route.MAIN)
+                    }
+                },
+                onDismiss = { navController.popBackStack() },
             )
         }
 
@@ -318,6 +468,7 @@ fun AppNavGraph(
                     navController.navigate(Route.serverDetail(server.id))
                 },
                 onNavigateToAddAccount = { navController.navigate(Route.ADD_ACCOUNT) },
+                onOpenLogViewer = { navController.navigate(Route.LOG_VIEWER) },
             )
         }
 
@@ -349,9 +500,24 @@ fun AppNavGraph(
                     viewModel = appViewModel,
                     onBack = { navController.popBackStack() },
                     onNavigateToBlocked = { acct ->
-                        // BlockedContactsView(account, appViewModel, modifier) — no nav route yet.
-                        // TODO(opus): add a BLOCKED_CONTACTS route and navigate there.
+                        navController.navigate(Route.blockedContacts(acct.id))
                     },
+                )
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Blocked contacts (Settings > identity > Blocked Contacts)
+        // ----------------------------------------------------------------
+        composable(Route.BLOCKED_CONTACTS) { backStackEntry ->
+            val did = backStackEntry.arguments?.getString("did") ?: return@composable
+            val accounts by appViewModel.accounts.collectAsState()
+            val account = accounts.firstOrNull { it.id == did }
+            if (account != null) {
+                BlockedContactsView(
+                    account = account,
+                    appViewModel = appViewModel,
+                    onBack = { navController.popBackStack() },
                 )
             }
         }
@@ -394,6 +560,7 @@ fun AppNavGraph(
                 onEnterLink = { navController.navigate(Route.INVITE_LINK_ENTRY) },
                 // Recovery starts at the explainer, not the console directly.
                 onRecover = { navController.navigate(Route.RECOVERY_EXPLAINER) },
+                onBack = { navController.popBackStack() },
             )
         }
 
@@ -402,9 +569,7 @@ fun AppNavGraph(
         // Actual signature: LogViewerView(onDismiss)
         // ----------------------------------------------------------------
         composable(Route.LOG_VIEWER) {
-            // TODO(opus): LogViewerView has not yet been ported to Android.
-            //   Uncomment when the composable exists:
-            // LogViewerView(onDismiss = { navController.popBackStack() })
+            LogViewerView(onDismiss = { navController.popBackStack() })
         }
     }
 }

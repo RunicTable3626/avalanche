@@ -91,7 +91,7 @@ object NotificationPresenter {
         )
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_email) // TODO(opus): replace with branded icon R.drawable.ic_notification
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(senderDisplayName)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
@@ -128,9 +128,12 @@ object NotificationPresenter {
      * Mirrors iOS NotificationPresenter.updateBadge(appState:).
      */
     fun updateBadge(context: Context, appViewModel: AppViewModel) {
-        // TODO(opus): wire to ShortcutBadger or launcher-specific badge API if desired.
-        // Android badge counts are derived from unread notification count automatically
-        // on most launchers, so explicit badge setting is typically a no-op here.
+        // Android does not expose a portable app-icon badge API: notification dots
+        // are derived automatically by the launcher from active notifications, and
+        // numeric badges are launcher-specific (e.g. ShortcutBadger). We therefore
+        // keep explicit badge management out of the core and let the launcher derive
+        // the dot from our notifications. The unread total is computed here for
+        // logging / future use (e.g. if a launcher-specific badge is added later).
         val total = appViewModel.conversations.value.sumOf { conv ->
             appViewModel.unreadCount(conv)
         }

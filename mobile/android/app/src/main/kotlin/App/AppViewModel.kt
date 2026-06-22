@@ -144,6 +144,14 @@ class AppViewModel(
     private val _pendingInviteToken = MutableStateFlow<String?>(null)
     val pendingInviteToken: StateFlow<String?> = _pendingInviteToken.asStateFlow()
 
+    /**
+     * The validated invite the onboarding flow is currently acting on. Set once a
+     * QR/link is resolved; read by IdentityPickerView / NewAccountView /
+     * JoiningServerView so the token does not need to round-trip through route args.
+     */
+    private val _pendingInvite = MutableStateFlow<InviteToken?>(null)
+    val pendingInvite: StateFlow<InviteToken?> = _pendingInvite.asStateFlow()
+
     // -----------------------------------------------------------------------
     // Mutable state setters (called from composables)
     // -----------------------------------------------------------------------
@@ -153,6 +161,7 @@ class AppViewModel(
     fun setIsAppActive(active: Boolean) { _isAppActive.value = active }
     fun setNavigateToConversation(conv: Conversation?) { _navigateToConversation.value = conv }
     fun setPendingInviteToken(token: String?) { _pendingInviteToken.value = token }
+    fun setPendingInvite(invite: InviteToken?) { _pendingInvite.value = invite }
 
     // -----------------------------------------------------------------------
     // Private state — not exposed to views
@@ -192,6 +201,21 @@ class AppViewModel(
     private var _service: ActnetService = makeService(resolveInitialServiceMode())
 
     val service: ActnetService get() = _service
+
+    /**
+     * Preview/testing only: seed the observable state directly, with no I/O,
+     * network, or FFI. Used by `rememberPreviewAppViewModel` so @Preview
+     * composables can render realistic content. Do not call from app code.
+     */
+    fun seedForPreview(
+        accounts: List<Account> = emptyList(),
+        conversations: List<Conversation> = emptyList(),
+        isOnboarding: Boolean = false,
+    ) {
+        _accounts.value = accounts
+        _conversations.value = conversations
+        _isOnboarding.value = isOnboarding
+    }
 
     // -----------------------------------------------------------------------
     // Preferences keys
@@ -987,6 +1011,32 @@ class AppViewModel(
     }
 
     /**
+     * Optimistically insert a just-sent message into the UI before the network
+     * round-trip completes, and bump the conversation's last-message preview —
+     * mirrors how iOS mutates appState.messagesByConversation/appState.conversations
+     * in ConversationView.sendMessage. Both updates happen here so the list and the
+     * thread stay consistent. A no-op if the message id is already present.
+     */
+    fun addOptimisticMessage(message: Message, conversation: Conversation) {
+        _messagesByConversation.update { map ->
+            val existing = map[conversation.id] ?: emptyList()
+            if (existing.any { it.id == message.id }) return@update map
+            map + (conversation.id to (existing + message))
+        }
+        _conversations.update { list ->
+            list.map { c ->
+                if (c.id == conversation.id) {
+                    c.copy(
+                        lastMessage = message.body,
+                        lastMessageDate = Date(message.sentAtMs),
+                        lastMessageSenderDid = message.senderAccountId,
+                    )
+                } else c
+            }
+        }
+    }
+
+    /**
      * Mark all messages in a conversation as read.
      * Mirrors iOS AppState.markAllMessagesRead(conversationId:accountId:).
      */
@@ -1007,7 +1057,7 @@ class AppViewModel(
         if (!changed) return
 
         _messagesByConversation.update { it + (conversationId to updatedMsgs) }
-        // TODO(opus): NotificationPresenter.updateBadge(appViewModel = this)
+        NotificationPresenter.updateBadge(context = applicationContext, appViewModel = this)
 
         val core = cores[accountId] ?: return
         val convId = conversationId
@@ -1045,7 +1095,7 @@ class AppViewModel(
         if (!changed) return
 
         _messagesByConversation.update { it + (conversationId to updatedMsgs) }
-        // TODO(opus): NotificationPresenter.updateBadge(appViewModel = this)
+        NotificationPresenter.updateBadge(context = applicationContext, appViewModel = this)
 
         val core = cores[accountId] ?: return
         val convId = conversationId
@@ -1676,7 +1726,9 @@ class AppViewModel(
                         }
                         needsConversationReload = true
                     }
-                    // TODO(opus): handle any additional IncomingEvent variants as they are added
+                    // New IncomingEvent variants are intentionally ignored here until
+                    // explicitly handled; this is a statement `when`, so the compiler
+                    // does not force exhaustiveness.
                 }
             }
 
@@ -2068,7 +2120,19 @@ class AppViewModel(
             }
         }
 
-        // TODO(opus): Fire a local notification (NotificationPresenter.present(...))
+        // Fire a local notification for the inbound message. present() suppresses
+        // the banner when the user is already viewing this conversation and always
+        // refreshes the badge; outgoing messages never reach this path.
+        val convForNotif = _conversations.value.firstOrNull { it.id == convId }
+        if (convForNotif != null) {
+            NotificationPresenter.present(
+                context = applicationContext,
+                message = message,
+                conversation = convForNotif,
+                senderDisplayName = displayName(did = senderDid, accountId = accountId),
+                appViewModel = this,
+            )
+        }
     }
 
     // -----------------------------------------------------------------------

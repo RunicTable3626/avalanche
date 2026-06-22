@@ -6,16 +6,17 @@ plugins {
 
 android {
     namespace = "net.theavalanche.app"
-    compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
-    }
+    // API 37 (major). The upgraded AndroidX libs (compose-bom 2026.06, core-ktx
+    // 1.19, lifecycle 2.11, …) embed a minimum-compileSdk of 37 in their metadata,
+    // so 36 no longer suffices. We pin the *major* level only — no minorApiLevel,
+    // since no dependency requires a specific minor (37.1) and pinning one forces
+    // installing that exact minor platform.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "net.theavalanche.app"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0"
 
@@ -41,6 +42,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     // UniFFI-generated Kotlin glue lives outside src/ (it's a build artifact,
@@ -49,7 +51,10 @@ android {
     // up automatically.
     sourceSets {
         getByName("main") {
-            java.srcDir("${rootProject.projectDir}/Generated")
+            // Kotlin 2.x (K2) only compiles .kt files that live under a *Kotlin*
+            // source root — a bare java.srcDir no longer pulls the UniFFI-generated
+            // glue into the Kotlin compilation, so register it on the kotlin set.
+            kotlin.directories.add("${rootProject.projectDir}/Generated")
         }
     }
 }
@@ -77,9 +82,16 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     // Rust core via UniFFI. The generated Kotlin binding (uniffi.app_core) calls
-    // into libapp_core.so through JNA, which must be the @aar artifact so JNA's
-    // own native dispatch library is bundled for Android.
-    implementation(libs.jna) { artifact { type = "aar" } }
+    // into libapp_core.so through JNA, so JNA's own native dispatch library
+    // (libjnidispatch.so) must be bundled into the APK — which only happens when
+    // the dependency is resolved as the Android .aar (the aar ships the jniLibs).
+    // The artifact closure forces the aar variant; the version stays in the catalog.
+    implementation(libs.jna) {
+        artifact {
+            type = "aar"
+            extension = "aar"
+        }
+    }
 
     // QR scanning for onboarding (CameraX + ZXing; ZXing avoids Google Play Services
     // so the app works on de-Googled Android)

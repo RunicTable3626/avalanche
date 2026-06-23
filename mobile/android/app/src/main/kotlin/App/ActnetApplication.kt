@@ -16,12 +16,21 @@ import uniffi.app_core.initLogging
  *    placed on RootView.
  *
  * iOS background-push handling (didReceiveRemoteNotification) and APNs token forwarding
- * have no 1:1 analog in this Application class; those belong in a FirebaseMessagingService
- * subclass. The notification channel itself is created on API 26+ by
+ * map to [ActnetFirebaseMessagingService] here, which reaches the running app via
+ * [appViewModel]. The notification channel itself is created on API 26+ by
  * NotificationPresenter.createNotificationChannel(), invoked from MainActivity.onCreate.
- * TODO(opus): Implement FCM push service for background-message wakeup.
  */
 class ActnetApplication : Application() {
+
+    /**
+     * The live top-level ViewModel, published by MainActivity once created.
+     * [ActnetFirebaseMessagingService] reads this to forward FCM token rotations
+     * and content-free wakeups into the running app. Null when no Activity is alive
+     * (e.g. a push delivered to a cold process) — the message is then fetched on the
+     * next app launch.
+     */
+    @Volatile
+    var appViewModel: AppViewModel? = null
 
     override fun onCreate() {
         super.onCreate()

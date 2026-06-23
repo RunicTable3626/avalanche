@@ -1,11 +1,16 @@
 package net.theavalanche.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -79,6 +84,14 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var appViewModel: AppViewModel
 
+    // Android 13+ POST_NOTIFICATIONS runtime permission. The result is forwarded
+    // to PushManager; FCM token registration happens regardless (data wakeups do
+    // not need the permission — it only gates whether banners are shown).
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            PushManager.onPermissionResult(granted = granted, appViewModel = appViewModel)
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -88,13 +101,29 @@ class MainActivity : ComponentActivity() {
 
         val factory = AppViewModelFactory(applicationContext)
         appViewModel = ViewModelProvider(this, factory)[AppViewModel::class.java]
+        // Publish the live ViewModel so ActnetFirebaseMessagingService can reach it.
+        (application as? ActnetApplication)?.appViewModel = appViewModel
         appViewModel.restoreAccounts()
         intent?.data?.let { appViewModel.handleDeepLink(it) }
+
+        maybeRequestNotificationPermission()
 
         setContent {
             AvalancheTheme {
                 AppNavGraph(appViewModel = appViewModel)
             }
+        }
+    }
+
+    /** Request POST_NOTIFICATIONS on Android 13+ if not already granted. */
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 

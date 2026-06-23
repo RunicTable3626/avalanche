@@ -43,6 +43,23 @@
                 <data android:scheme="https" android:host="go.theavalanche.net" />
             </intent-filter>
         </activity>
+
+        <!-- FCM push: receives token rotations and content-free wakeups (docs/15). -->
+        <service
+            android:name=".ActnetFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Branded small icon + channel for any system-rendered FCM notifications. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="avalanche_messages" />
     </application>
 
 </manifest>

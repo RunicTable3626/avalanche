@@ -1,5 +1,6 @@
 package net.theavalanche.app
 
+import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,13 +34,10 @@ object PushManager {
      * NOTE: On Android, runtime permission requests must be triggered from an
      * Activity, not from a ViewModel or background service. This method fetches
      * the FCM token unconditionally (FCM registration does not require
-     * permission). The permission request itself must be launched from the
-     * Activity/Composable via ActivityResultContracts.RequestPermission and
-     * the result forwarded to [onPermissionResult].
-     *
-     * TODO(opus): Call this from MainActivity after the permission result
-     * callback wires in, or use the Accompanist permissions library from the
-     * relevant composable screen.
+     * permission). The POST_NOTIFICATIONS request itself is launched separately
+     * by MainActivity (ActivityResultContracts.RequestPermission), which forwards
+     * the result to [onPermissionResult]; the permission only gates whether
+     * banners are shown, not token registration.
      */
     fun requestPermissionAndRegister(appViewModel: AppViewModel) {
         // Fetch FCM token regardless of notification permission — the token is
@@ -73,10 +71,9 @@ object PushManager {
     fun didReceiveToken(token: String, appViewModel: AppViewModel) {
         AppLog.info("PushManager", "FCM registration token: $token")
 
-        // TODO(opus): read RELAY_URL from BuildConfig (set via manifestPlaceholders
-        // or buildConfigField in build.gradle.kts, populated from env by the
-        // Makefile analogous to iOS RELAY_URL). Hard-coded empty string for now.
-        val relayUrl = ""  // TODO(opus): BuildConfig.RELAY_URL
+        // RELAY_URL is baked into BuildConfig from a Gradle property / env var /
+        // default (see app/build.gradle.kts), mirroring how iOS reads it from Info.plist.
+        val relayUrl = BuildConfig.RELAY_URL
         if (relayUrl.isEmpty()) {
             AppLog.warn(
                 "PushManager",
@@ -124,20 +121,24 @@ object PushManager {
     // -----------------------------------------------------------------------
 
     private fun fetchTokenAndRegister(appViewModel: AppViewModel) {
-        // TODO(opus): wire up Firebase Cloud Messaging. Pulling FCM in requires the
-        // Firebase BOM + google-services Gradle plugin + a google-services.json,
-        // which we deliberately defer — partly to keep the app runnable on
-        // de-Googled Android without Google Play Services. Mirrors the iOS push
-        // path being a best-effort, env-gated feature. No-op stub for now so the
-        // rest of the app builds; restore the body and add the FCM dependency +
-        // ActnetFirebaseMessagingService when push is implemented.
-        AppLog.info("PushManager", "FCM not wired in yet — skipping push token registration for $appViewModel")
+        // Ask FCM for this install's registration token, then register it with the
+        // relay. Token fetch is async and does not require notification permission
+        // (the wakeups are data-only). onNewToken handles later token rotations.
+        FirebaseMessaging.getInstance().token
+            .addOnCompleteListener { task ->
+                if (!task.isSuccessful) {
+                    AppLog.warn(
+                        "PushManager",
+                        "FCM getToken failed: ${task.exception?.message}",
+                    )
+                    return@addOnCompleteListener
+                }
+                val token = task.result
+                if (token.isNullOrEmpty()) {
+                    AppLog.warn("PushManager", "FCM returned an empty token")
+                    return@addOnCompleteListener
+                }
+                didReceiveToken(token, appViewModel)
+            }
     }
 }
-
-// TODO(opus): When FCM is implemented, add an `ActnetFirebaseMessagingService`
-// extending `com.google.firebase.messaging.FirebaseMessagingService` here
-// (overriding onNewToken / onMessageReceived to forward to PushManager via a
-// callback stored on ActnetApplication), add the Firebase BOM + google-services
-// plugin to Gradle, and register the <service> in AndroidManifest.xml. Omitted
-// for now so the app builds without a Google Play Services dependency.

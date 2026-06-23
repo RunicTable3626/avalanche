@@ -407,7 +407,9 @@ class AppViewModel(
                 }
 
                 startMessagePolling()
-                // TODO(opus): PushManager.requestPermissionAndRegister(appViewModel = this)
+                if (_serviceMode.value != ServiceMode.MOCK) {
+                    PushManager.requestPermissionAndRegister(appViewModel = this@AppViewModel)
+                }
             }
         }
     }
@@ -615,7 +617,9 @@ class AppViewModel(
 
         _isOnboarding.value = false
         startMessagePolling()
-        // TODO(opus): PushManager.requestPermissionAndRegister(appViewModel = this)
+        if (_serviceMode.value != ServiceMode.MOCK) {
+            PushManager.requestPermissionAndRegister(appViewModel = this)
+        }
     }
 
     /** Returns all active core instances. */

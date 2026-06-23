@@ -2,7 +2,16 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+    // FCM (Firebase) — processes google-services.json into the build.
+    alias(libs.plugins.google.services)
 }
+
+// Push relay base URL, baked into BuildConfig.RELAY_URL. Mirrors how iOS injects
+// RELAY_URL into Info.plist from .env (see Makefile). Override per-build with
+// `-PRELAY_URL=...` or a RELAY_URL env var; defaults to the live relay.
+val relayUrl: String = (project.findProperty("RELAY_URL") as String?)
+    ?: System.getenv("RELAY_URL")
+    ?: "https://relay.theavalanche.net"
 
 android {
     namespace = "net.theavalanche.app"
@@ -19,6 +28,8 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
+
+        buildConfigField("String", "RELAY_URL", "\"$relayUrl\"")
 
         // Ship only the ABIs we cross-compile libapp_core.so for (see ANDROID_ABIS
         // in the Makefile). Without this, JNA's @aar drags in libjnidispatch.so for
@@ -92,6 +103,12 @@ dependencies {
             extension = "aar"
         }
     }
+
+    // Push notifications via Firebase Cloud Messaging. The relay only ever sees a
+    // content-free wakeup addressed to a rotating pseudonym (docs/15) — FCM is the
+    // transport, not a data sink. Requires app/google-services.json.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
 
     // QR scanning for onboarding (CameraX + ZXing; ZXing avoids Google Play Services
     // so the app works on de-Googled Android)

@@ -1,24 +1,19 @@
 // Tauri commands — Avalanche Desktop bridge.
 // Each command is a thin delegation to the corresponding app-core method.
 // Types are code-generated via tauri-specta → ../src/bindings.ts.
-// All FFI types live in ffi_types.rs — the single source of truth for the contract.
-// See desktop/BRIDGE-CODEGEN-SPEC.md for the migration plan once app-core is wired.
-
-mod ffi_types;
+// All FFI types are now derived directly on app-core via the "specta" feature —
+// no more manual ffi_types.rs mirror.
 
 use std::sync::Mutex;
 
 use app_core::AppCore;
-use ffi_types::{
-    AccountInfoFfi, AccountResult, ConnectionState, ContactRowFfi, CreatedGroupFfi,
-    ConversationSummaryFfi, DecryptedMessage, GroupSummaryFfi, GroupTarget, IncomingEvent,
-    InviteInfo, MessageRevisionFfi, MessageTarget, ProjectInfoFfi, ReactionFfi,
-    StoredMessageFfi,
-};
 
-/// Map a vec of app-core types to ffi_types via `Into`.
-fn map_vec<T, U: From<T>>(v: Vec<T>) -> Vec<U> {
-    v.into_iter().map(Into::into).collect()
+// Desktop-specific convenience type (not in app-core).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+struct AccountResult {
+    did: String,
+    display_name: String,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -212,25 +207,23 @@ fn send_group_message(
     sent_at_ms: i64,
 ) -> Result<(), String> {
     get_app(&state)?
-        .send_message(MessageTarget::Group(GroupTarget { group_id }).into_app_core(), plaintext, sent_at_ms)
+        .send_message(app_core::MessageTarget::Group { group_id }, plaintext, sent_at_ms)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-fn receive_messages(state: tauri::State<'_, AppState>) -> Result<Vec<DecryptedMessage>, String> {
+fn receive_messages(state: tauri::State<'_, AppState>) -> Result<Vec<app_core::DecryptedMessage>, String> {
     get_app(&state)?
         .receive_messages()
-        .map(map_vec)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-fn next_events(state: tauri::State<'_, AppState>) -> Result<Vec<IncomingEvent>, String> {
+fn next_events(state: tauri::State<'_, AppState>) -> Result<Vec<app_core::IncomingEvent>, String> {
     get_app(&state)?
         .next_events()
-        .map(map_vec)
         .map_err(|e| e.to_string())
 }
 
@@ -238,10 +231,10 @@ fn next_events(state: tauri::State<'_, AppState>) -> Result<Vec<IncomingEvent>, 
 #[specta::specta]
 fn save_message(
     state: tauri::State<'_, AppState>,
-    msg: StoredMessageFfi,
+    msg: app_core::StoredMessageFfi,
 ) -> Result<(), String> {
     get_app(&state)?
-        .save_message(msg.into_app_core())
+        .save_message(msg)
         .map_err(|e| e.to_string())
 }
 
@@ -249,10 +242,9 @@ fn save_message(
 #[specta::specta]
 fn load_conversations(
     state: tauri::State<'_, AppState>,
-) -> Result<Vec<ConversationSummaryFfi>, String> {
+) -> Result<Vec<app_core::ConversationSummaryFfi>, String> {
     get_app(&state)?
         .load_conversations()
-        .map(map_vec)
         .map_err(|e| e.to_string())
 }
 
@@ -261,10 +253,9 @@ fn load_conversations(
 fn load_messages(
     state: tauri::State<'_, AppState>,
     conversation_id: String,
-) -> Result<Vec<StoredMessageFfi>, String> {
+) -> Result<Vec<app_core::StoredMessageFfi>, String> {
     get_app(&state)?
         .load_messages(conversation_id)
-        .map(map_vec)
         .map_err(|e| e.to_string())
 }
 
@@ -346,10 +337,9 @@ fn contact_display_name(
 fn get_account_info(
     state: tauri::State<'_, AppState>,
     did: String,
-) -> Result<AccountInfoFfi, String> {
+) -> Result<app_core::AccountInfoFfi, String> {
     get_app(&state)?
         .get_account_info(did)
-        .map(Into::into)
         .map_err(|e| e.to_string())
 }
 
@@ -366,10 +356,9 @@ fn refresh_contact_profile(
 
 #[tauri::command]
 #[specta::specta]
-fn list_contacts(state: tauri::State<'_, AppState>) -> Result<Vec<ContactRowFfi>, String> {
+fn list_contacts(state: tauri::State<'_, AppState>) -> Result<Vec<app_core::ContactRowFfi>, String> {
     get_app(&state)?
         .list_contacts()
-        .map(map_vec)
         .map_err(|e| e.to_string())
 }
 
@@ -449,10 +438,9 @@ fn delete_identity(state: tauri::State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
-fn fetch_projects(state: tauri::State<'_, AppState>) -> Result<Vec<ProjectInfoFfi>, String> {
+fn fetch_projects(state: tauri::State<'_, AppState>) -> Result<Vec<app_core::ProjectInfoFfi>, String> {
     get_app(&state)?
         .fetch_projects()
-        .map(map_vec)
         .map_err(|e| e.to_string())
 }
 
@@ -469,9 +457,8 @@ fn request_project_token(
 
 #[tauri::command]
 #[specta::specta]
-fn validate_invite(token: String) -> Result<InviteInfo, String> {
+fn validate_invite(token: String) -> Result<app_core::InviteInfo, String> {
     app_core::validate_invite(token)
-        .map(Into::into)
         .map_err(|e| e.to_string())
 }
 
@@ -479,19 +466,18 @@ fn validate_invite(token: String) -> Result<InviteInfo, String> {
 
 #[tauri::command]
 #[specta::specta]
-fn connection_state(state: tauri::State<'_, AppState>) -> Result<ConnectionState, String> {
-    Ok(get_app(&state)?.connection_state().into())
+fn connection_state(state: tauri::State<'_, AppState>) -> Result<app_core::ConnectionState, String> {
+    Ok(get_app(&state)?.connection_state())
 }
 
 #[tauri::command]
 #[specta::specta]
 fn wait_for_connection_state_change(
     state: tauri::State<'_, AppState>,
-    last: ConnectionState,
-) -> Result<ConnectionState, String> {
+    last: app_core::ConnectionState,
+) -> Result<app_core::ConnectionState, String> {
     get_app(&state)?
-        .wait_for_connection_state_change(last.into_app_core())
-        .map(Into::into)
+        .wait_for_connection_state_change(last)
         .map_err(|e| e.to_string())
 }
 
@@ -504,10 +490,9 @@ fn create_group(
     title: String,
     description: String,
     expiry_seconds: u32,
-) -> Result<CreatedGroupFfi, String> {
+) -> Result<app_core::CreatedGroupFfi, String> {
     get_app(&state)?
         .create_group(title, description, expiry_seconds)
-        .map(Into::into)
         .map_err(|e| e.to_string())
 }
 
@@ -516,10 +501,9 @@ fn create_group(
 fn fetch_group_state(
     state: tauri::State<'_, AppState>,
     group_id: String,
-) -> Result<GroupSummaryFfi, String> {
+) -> Result<app_core::GroupSummaryFfi, String> {
     get_app(&state)?
         .fetch_group_state(group_id)
-        .map(Into::into)
         .map_err(|e| e.to_string())
 }
 
@@ -528,7 +512,7 @@ fn fetch_group_state(
 fn cached_group_state(
     state: tauri::State<'_, AppState>,
     group_id: String,
-) -> Result<Option<GroupSummaryFfi>, String> {
+) -> Result<Option<app_core::GroupSummaryFfi>, String> {
     get_app(&state)?
         .cached_group_state(group_id)
         .map(|opt| opt.map(Into::into))
@@ -709,7 +693,7 @@ fn list_groups(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String>
 #[specta::specta]
 fn send_reaction(
     state: tauri::State<'_, AppState>,
-    target: MessageTarget,
+    target: app_core::MessageTarget,
     target_author: String,
     target_sent_at_ms: i64,
     emoji: String,
@@ -717,7 +701,7 @@ fn send_reaction(
     sent_at_ms: i64,
 ) -> Result<(), String> {
     get_app(&state)?
-        .send_reaction(target.into_app_core(), target_author, target_sent_at_ms, emoji, remove, sent_at_ms)
+        .send_reaction(target, target_author, target_sent_at_ms, emoji, remove, sent_at_ms)
         .map_err(|e| e.to_string())
 }
 
@@ -725,13 +709,13 @@ fn send_reaction(
 #[specta::specta]
 fn send_edit(
     state: tauri::State<'_, AppState>,
-    target: MessageTarget,
+    target: app_core::MessageTarget,
     target_sent_at_ms: i64,
     new_body: String,
     sent_at_ms: i64,
 ) -> Result<(), String> {
     get_app(&state)?
-        .send_edit(target.into_app_core(), target_sent_at_ms, new_body, sent_at_ms)
+        .send_edit(target, target_sent_at_ms, new_body, sent_at_ms)
         .map_err(|e| e.to_string())
 }
 
@@ -739,14 +723,14 @@ fn send_edit(
 #[specta::specta]
 fn send_delete(
     state: tauri::State<'_, AppState>,
-    target: MessageTarget,
+    target: app_core::MessageTarget,
     target_author: String,
     target_sent_at_ms: i64,
     for_everyone: bool,
     sent_at_ms: i64,
 ) -> Result<(), String> {
     get_app(&state)?
-        .send_delete(target.into_app_core(), target_author, target_sent_at_ms, for_everyone, sent_at_ms)
+        .send_delete(target, target_author, target_sent_at_ms, for_everyone, sent_at_ms)
         .map_err(|e| e.to_string())
 }
 
@@ -755,10 +739,9 @@ fn send_delete(
 fn load_reactions(
     state: tauri::State<'_, AppState>,
     conversation_id: String,
-) -> Result<Vec<ReactionFfi>, String> {
+) -> Result<Vec<app_core::ReactionFfi>, String> {
     get_app(&state)?
         .load_reactions(conversation_id)
-        .map(map_vec)
         .map_err(|e| e.to_string())
 }
 
@@ -769,9 +752,8 @@ fn load_message_revisions(
     conversation_id: String,
     author: String,
     sent_at_ms: i64,
-) -> Result<Vec<MessageRevisionFfi>, String> {
+) -> Result<Vec<app_core::MessageRevisionFfi>, String> {
     get_app(&state)?
         .load_message_revisions(conversation_id, author, sent_at_ms)
-        .map(map_vec)
         .map_err(|e| e.to_string())
 }

@@ -18,17 +18,23 @@ import androidx.compose.ui.platform.LocalContext
 /**
  * Build an [AppViewModel] suitable for use inside an `@Preview`. The returned
  * instance does no I/O until one of its action methods is called (which previews
- * never do), and is pre-seeded with the supplied [accounts] / [conversations].
+ * never do), and is pre-seeded with the supplied [accounts], [conversations], and
+ * per-conversation [messagesByConversation].
  */
 @Composable
 fun rememberPreviewAppViewModel(
     accounts: List<Account> = emptyList(),
     conversations: List<Conversation> = emptyList(),
+    messagesByConversation: Map<String, List<Message>> = emptyMap(),
 ): AppViewModel {
     val context = LocalContext.current.applicationContext
     return remember {
         AppViewModel(context).apply {
-            seedForPreview(accounts = accounts, conversations = conversations)
+            seedForPreview(
+                accounts = accounts,
+                conversations = conversations,
+                messagesByConversation = messagesByConversation,
+            )
         }
     }
 }

@@ -210,10 +210,12 @@ class AppViewModel(
     fun seedForPreview(
         accounts: List<Account> = emptyList(),
         conversations: List<Conversation> = emptyList(),
+        messagesByConversation: Map<String, List<Message>> = emptyMap(),
         isOnboarding: Boolean = false,
     ) {
         _accounts.value = accounts
         _conversations.value = conversations
+        _messagesByConversation.value = messagesByConversation
         _isOnboarding.value = isOnboarding
     }
 

@@ -15,12 +15,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -29,6 +31,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -41,6 +44,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -275,7 +279,10 @@ fun ConversationView(
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            // Anchor messages to the bottom: when the thread is shorter than the
+            // viewport the bubbles sit at the bottom (chat idiom, matching iOS)
+            // rather than floating at the top; longer threads scroll normally.
+            verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.Bottom),
         ) {
             item { Spacer(Modifier.size(8.dp)) }
             items(messages, key = { it.sentAtMs }) { message ->
@@ -447,19 +454,23 @@ private fun Composer(
             }
         }
 
+        val canSend = messageText.trim().isNotEmpty()
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // Rounded, borderless "pill" input that sits on a soft fill — replaces
+            // the boxy default outline. Grows up to a few lines, then scrolls.
             OutlinedTextField(
                 value = messageText,
                 onValueChange = onMessageTextChange,
                 modifier = Modifier
                     .weight(1f)
-                    .heightIn(min = 40.dp, max = 120.dp),
+                    .heightIn(max = 120.dp),
                 placeholder = {
                     Text(
                         text = if (editingMessage == null) "Message" else "Edit message",
@@ -470,16 +481,37 @@ private fun Composer(
                     capitalization = KeyboardCapitalization.Sentences,
                 ),
                 maxLines = 5,
+                shape = RoundedCornerShape(24.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = AvalancheColors.Sand50,
+                    unfocusedContainerColor = AvalancheColors.Sand50,
+                    disabledContainerColor = AvalancheColors.Sand50,
+                    focusedBorderColor = Color.Transparent,
+                    unfocusedBorderColor = Color.Transparent,
+                    disabledBorderColor = Color.Transparent,
+                    cursorColor = AvalancheColors.Brand,
+                    focusedTextColor = AvalancheColors.Ink,
+                    unfocusedTextColor = AvalancheColors.Ink,
+                ),
             )
 
+            // Circular send button: filled with the brand color when there is text,
+            // muted/disabled otherwise (iMessage-style up arrow, check when editing).
             IconButton(
                 onClick = { if (editingMessage != null) onApplyEdit() else onSend() },
-                enabled = messageText.trim().isNotEmpty(),
+                enabled = canSend,
+                modifier = Modifier
+                    .padding(bottom = 4.dp)
+                    .size(40.dp)
+                    .background(
+                        color = if (canSend) AvalancheColors.Brand else AvalancheColors.Sand300,
+                        shape = CircleShape,
+                    ),
             ) {
                 Icon(
-                    imageVector = if (editingMessage != null) Icons.Filled.Check else Icons.Filled.KeyboardArrowUp,
+                    imageVector = if (editingMessage != null) Icons.Filled.Check else Icons.Filled.ArrowUpward,
                     contentDescription = if (editingMessage != null) "Apply edit" else "Send",
-                    tint = if (messageText.trim().isNotEmpty()) AvalancheColors.Brand else AvalancheColors.Muted,
+                    tint = AvalancheColors.Paper,
                 )
             }
         }
@@ -679,4 +711,122 @@ private fun ComposerEditingPreview() {
             onCancelEdit = {},
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// Full-conversation previews — mirror the iOS #Preview("DM") / #Preview("Group")
+// in ConversationView.swift. The host seeds a preview AppViewModel with a "Me"
+// account, the conversation, and its messages (no network/FFI).
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun ConversationPreviewHost(conversation: Conversation, messages: List<Message>) {
+    val me = Account(
+        id = "did:plc:me",
+        displayName = "Me",
+        servers = listOf(
+            ServerInfo(
+                id = "https://server.example",
+                name = "Example",
+                url = android.net.Uri.parse("https://server.example"),
+            ),
+        ),
+    )
+    val viewModel = rememberPreviewAppViewModel(
+        accounts = listOf(me),
+        conversations = listOf(conversation),
+        messagesByConversation = mapOf(conversation.id to messages),
+    )
+    AvalancheTheme {
+        ConversationView(conversation = conversation, viewModel = viewModel)
+    }
+}
+
+@Preview(showBackground = true, name = "Conversation — DM")
+@Composable
+private fun ConversationDMPreview() {
+    val conv = Conversation(
+        id = "dm-bob",
+        title = "Bob Chena",
+        accountId = "did:plc:me",
+        serverUrl = "https://server.example",
+        recipientDid = "did:plc:bob",
+    )
+    ConversationPreviewHost(
+        conversation = conv,
+        messages = listOf(
+            Message(
+                id = "m1",
+                conversationId = conv.id,
+                senderAccountId = "did:plc:bob",
+                body = "Are we still meeting at noon?",
+                sentAtMs = 1_700_000_000_000,
+                readAtMs = 1_700_000_001_000,
+                deliveryStatus = DeliveryStatus.DELIVERED,
+            ),
+            Message(
+                id = "m2",
+                conversationId = conv.id,
+                senderAccountId = "did:plc:me",
+                body = "Yes — I'll be at the front entrance.",
+                sentAtMs = 1_700_000_060_000,
+                readAtMs = 1_700_000_061_000,
+                deliveryStatus = DeliveryStatus.READ,
+            ),
+        ),
+    )
+}
+
+@Preview(showBackground = true, name = "Conversation — Group")
+@Composable
+private fun ConversationGroupPreview() {
+    val conv = Conversation(
+        id = "group-grp1",
+        title = "March Logistics",
+        accountId = "did:plc:me",
+        serverUrl = "https://server.example",
+        groupId = "grp1",
+        isGroup = true,
+    )
+    ConversationPreviewHost(
+        conversation = conv,
+        messages = listOf(
+            Message(
+                id = "m1",
+                conversationId = conv.id,
+                senderAccountId = "did:plc:bob",
+                body = "Crew — check in when you arrive.",
+                sentAtMs = 1_700_000_000_000,
+                readAtMs = 1_700_000_001_000,
+                deliveryStatus = DeliveryStatus.DELIVERED,
+            ),
+            Message(
+                id = "m2",
+                conversationId = conv.id,
+                senderAccountId = "did:plc:bob",
+                body = "Bring water, it's hot out.",
+                sentAtMs = 1_700_000_010_000,
+                readAtMs = 1_700_000_011_000,
+                deliveryStatus = DeliveryStatus.DELIVERED,
+            ),
+            Message(
+                id = "m3",
+                conversationId = conv.id,
+                senderAccountId = "did:plc:carol",
+                body = "Almost there!",
+                sentAtMs = 1_700_000_020_000,
+                readAtMs = 1_700_000_021_000,
+                deliveryStatus = DeliveryStatus.DELIVERED,
+            ),
+            Message(
+                id = "m4",
+                conversationId = conv.id,
+                senderAccountId = "did:plc:me",
+                body = "On site 👍",
+                sentAtMs = 1_700_000_060_000,
+                readAtMs = 1_700_000_061_000,
+                deliveryStatus = DeliveryStatus.READ,
+            ),
+        ),
+    )
 }

@@ -21,7 +21,7 @@ serde_json = "1"
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 specta-typescript = "0.0.12"
-app-core = { path = "../../core/crates/app-core" }
+app-core = { path = "../../core/crates/app-core", features = ["specta"] }
 
 # zkgroup depends on a Signal fork of curve25519-dalek (it has private fields
 # zkgroup needs to reach into for Ristretto-based proofs). The fork is API-

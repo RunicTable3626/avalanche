@@ -1,6 +1,7 @@
 package net.theavalanche.app
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,12 +20,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,7 +35,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -71,6 +77,7 @@ import java.util.UUID
  *   GroupDetailView. Only called for group conversations.
  * @param onBack  Called to pop this screen off the back-stack.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationView(
     conversation: Conversation,
@@ -267,9 +274,54 @@ fun ConversationView(
         }
     }
 
+    // Group titles are a tappable avatar + name that open the group detail
+    // screen (mirrors the iOS principal toolbar item); DMs show a plain title.
+    val groupId = conversation.groupId
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    if (conversation.isGroup && groupId != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.clickable {
+                                onNavigateToGroupDetail(groupId, conversation.accountId)
+                            },
+                        ) {
+                            ContactAvatar(name = liveConv.title, size = 28.dp)
+                            Text(
+                                text = liveConv.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = AvalancheColors.Ink,
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = liveConv.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = AvalancheColors.Ink,
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = AvalancheColors.Paper,
+                    titleContentColor = AvalancheColors.Ink,
+                    navigationIconContentColor = AvalancheColors.Ink,
+                ),
+            )
+        },
+        containerColor = AvalancheColors.Paper,
+    ) { innerPadding ->
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .padding(innerPadding)
             .background(AvalancheColors.Paper),
     ) {
         // --- Message list ---
@@ -387,6 +439,7 @@ fun ConversationView(
                     onCancelEdit = { cancelEdit() },
                 )
         }
+    }
     }
 
     // Edit history sheet — shown as a full-screen dialog.

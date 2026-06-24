@@ -45,9 +45,15 @@ private val OfflineColor = Color(red = 0.78f, green = 0.42f, blue = 0.10f)
 fun OfflineBanner(appViewModel: AppViewModel) {
     val connectionStates by appViewModel.connectionStates.collectAsState()
 
-    // Recompute aggregate whenever connection states change. Mirrors iOS
-    // AppState.aggregateConnectionState computed property.
-    val state = appViewModel.aggregateConnectionState
+    // Recompute the aggregate whenever the connection-state map changes.
+    // `connectionStates` MUST be read here (as the remember key) so this
+    // composable registers a snapshot read and recomposes on every emission —
+    // aggregateConnectionState is a plain getter over the same underlying
+    // value, so reading only it would never trigger recomposition and the pill
+    // would stick on its first-composition value (e.g. "Reconnecting…" during
+    // the initial connect, never clearing once Connected). Mirrors iOS
+    // AppState.aggregateConnectionState.
+    val state = remember(connectionStates) { appViewModel.aggregateConnectionState }
 
     val visible = shouldShow(state)
 

@@ -15,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 
@@ -109,8 +110,12 @@ fun MainTabView(
             }
         }
 
-        // Offline banner overlaid at the top — mirrors iOS RootView ZStack + OfflineBanner().
-        OfflineBanner(appViewModel = appViewModel)
+        // Offline banner overlaid at the top-center — mirrors iOS RootView
+        // ZStack(alignment: .top) + OfflineBanner(). Without the explicit
+        // align it would default to the Box's top-start (top-left) corner.
+        Box(modifier = Modifier.align(Alignment.TopCenter)) {
+            OfflineBanner(appViewModel = appViewModel)
+        }
     }
 }
 

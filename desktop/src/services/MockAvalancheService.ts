@@ -75,6 +75,13 @@ export function seedConversations(
       isBlocked: false,
     },
     {
+      conversationId: `group-mockgroup3`,
+      groupTitle: "Empty Group",
+      lastMessage: null,
+      isRequest: false,
+      isBlocked: false,
+    },
+    {
       conversationId: `dm-${accountId}-did:plc:organizer`,
       groupTitle: null,
       lastMessage: {
@@ -130,6 +137,38 @@ function seedMessages(conversationId: string, accountId: string): StoredMessageF
         readAtMs: null,
         deliveryStatus: 1,
         editCount: 0,
+        deleted: false,
+        kind: 0,
+        metadata: null,
+        expireTimerSecs: 0,
+        expireAtMs: null,
+      },
+      {
+        id: "msg-g1-2",
+        conversationId,
+        senderDid: "did:plc:organizer",
+        body: "Sorry, wrong chat — disregard this message",
+        sentAtMs: now - 120_000,
+        editedAtMs: null,
+        readAtMs: null,
+        deliveryStatus: 1,
+        editCount: 0,
+        deleted: true,
+        kind: 0,
+        metadata: null,
+        expireTimerSecs: 0,
+        expireAtMs: null,
+      },
+      {
+        id: "msg-g1-3",
+        conversationId,
+        senderDid: accountId,
+        body: "Sounds good! (updated)",
+        sentAtMs: now - 90_000,
+        editedAtMs: now - 30_000,
+        readAtMs: now,
+        deliveryStatus: 3,
+        editCount: 2,
         deleted: false,
         kind: 0,
         metadata: null,
@@ -465,7 +504,7 @@ export class MockAvalancheService implements AvalancheService {
   async listGroups(): Promise<string[]> { return []; }
 
   async sendReaction(
-    _target: { type: "dm"; recipientDid: string } | { type: "group"; groupId: string },
+    _target: { type: "dm"; recipient_did: string } | { type: "group"; group_id: string },
     _targetAuthor: string,
     _targetSentAtMs: number,
     _emoji: string,
@@ -473,13 +512,13 @@ export class MockAvalancheService implements AvalancheService {
     _sentAtMs: number
   ): Promise<void> {}
   async sendEdit(
-    _target: { type: "dm"; recipientDid: string } | { type: "group"; groupId: string },
+    _target: { type: "dm"; recipient_did: string } | { type: "group"; group_id: string },
     _targetSentAtMs: number,
     _newBody: string,
     _sentAtMs: number
   ): Promise<void> {}
   async sendDelete(
-    _target: { type: "dm"; recipientDid: string } | { type: "group"; groupId: string },
+    _target: { type: "dm"; recipient_did: string } | { type: "group"; group_id: string },
     _targetAuthor: string,
     _targetSentAtMs: number,
     _forEveryone: boolean,

@@ -16,6 +16,7 @@ body, html { margin: 0; padding: 0; height: 100%; }
   --color-sidebar: #2A1620;       /* dark sidebar / hero surfaces */
   --color-accent: #6B3E50;        /* primary action / accent */
   --color-error: #C0392B;         /* form error text */
+  --color-offline: #F0A030;       /* offline/connecting banner */
 
   /* Inputs / surfaces */
   --color-input-border: #D8C8BC;  /* default text-input border */
@@ -100,6 +101,24 @@ body, html { margin: 0; padding: 0; height: 100%; }
   border-top-color: #fff;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
+}
+
+/* ── Thin scrollbar (centralized) ─────────────────────────────────────── */
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 @keyframes spin {

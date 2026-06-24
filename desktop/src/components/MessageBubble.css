@@ -1,0 +1,82 @@
+.message-row {
+  display: flex;
+  flex-direction: column;
+  max-width: 72%;
+}
+.message-row.mine {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+.message-row.theirs {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.sender-name {
+  font-size: 12px;
+  color: var(--color-accent);
+  font-weight: 600;
+  margin-bottom: 2px;
+  padding: 0 4px;
+}
+
+.bubble {
+  padding: 9px 13px;
+  border-radius: 16px;
+  font-size: 14px;
+  line-height: 1.45;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.mine .bubble {
+  background: var(--color-sidebar);
+  color: var(--color-bg);
+  border-bottom-right-radius: 4px;
+}
+.theirs .bubble {
+  background: rgba(107, 62, 80, 0.12);
+  color: var(--color-text);
+  border-bottom-left-radius: 4px;
+}
+
+.deleted-tombstone {
+  padding: 9px 13px;
+  border: 1.5px dashed var(--color-text-secondary);
+  border-radius: 8px;
+  font-size: 13px;
+  font-style: italic;
+  color: var(--color-text-secondary);
+}
+
+.message-meta {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  margin-top: 3px;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.timestamp {
+  white-space: nowrap;
+}
+
+.delivery {
+  font-size: 11px;
+}
+.delivery.read {
+  color: var(--color-accent);
+}
+.delivery.failed {
+  color: var(--color-error);
+}
+.delivery.sending {
+  opacity: 0.6;
+}
+
+.retry-hint {
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+}

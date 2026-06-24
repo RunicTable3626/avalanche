@@ -74,32 +74,45 @@ export const commands = {
 };
 
 /* Types */
-/**  Public metadata for an account. Mirrors app-core `AccountInfoFfi`. */
+/**
+ *  Public metadata for an account: display name and bot flag.
+ * 
+ *  `display_name` is only populated for bot accounts. Human display names are
+ *  exchanged via encrypted profile bundles (client-to-client), never stored on
+ *  the server.
+ */
 export type AccountInfoFfi = {
 	did: string,
 	displayName: string | null,
 	isBot: boolean,
 };
 
-/**
- *  Result returned by account-factory commands (`create_account`, `login`,
- *  `recover_from_blob`). Desktop-specific convenience type — app-core returns
- *  `Arc<AppCore>` from these constructors; we extract the fields the UI needs.
- */
 export type AccountResult = {
 	did: string,
 	displayName: string,
 };
 
 /**
- *  Liveness of the connection to the homeserver. Mirrors app-core
- *  `ConnectionState`.
+ *  Liveness of the connection to the homeserver.
+ * 
+ *  Owned by the `AppCore` background reconnect task; observed by UI via
+ *  `connection_state()` and `wait_for_connection_state_change()`.
  */
-export type ConnectionState = { type: "disconnected" } | { type: "connecting" } | { type: "connected" } | {
-	type: "reconnecting",
-} & ReconnectingState;
+export type ConnectionState = 
+/**  Initial state; reconnect task hasn't run yet. */
+{ type: "disconnected" } | 
+/**  An attempt is in flight (handshake / lazy auth). */
+{ type: "connecting" } | 
+/**  WebSocket is open. Steady state. */
+{ type: "connected" } | 
+/**  Last attempt failed; backing off until `next_attempt_at_ms`. */
+{ type: "reconnecting"; next_attempt_at_ms: number };
 
-/**  Minimal contact-list row. Mirrors app-core `ContactRowFfi`. */
+/**
+ *  Minimal contact-list row backing the compose autocomplete and the People
+ *  list. `display_name` is the cached profile display name (empty if no
+ *  profile has been fetched yet — callers fall back to the DID).
+ */
 export type ContactRowFfi = {
 	did: string,
 	displayName: string,
@@ -108,98 +121,202 @@ export type ContactRowFfi = {
 };
 
 /**
- *  A conversation summary for the chat list. Mirrors app-core
- *  `ConversationSummaryFfi`.
+ *  A conversation summary used to build the chat list on startup: one row
+ *  per conversation, with the most recent message attached if any. A
+ *  `None` `last_message` is a known conversation (e.g. a group you've been
+ *  invited to) that hasn't seen any messages yet — the UI typically renders
+ *  it with a placeholder preview.
  */
 export type ConversationSummaryFfi = {
 	conversationId: string,
+	/**
+	 *  For group conversations, the group's title resolved from
+	 *  locally-persisted state. `None` for DMs, and for groups whose state
+	 *  hasn't been fetched yet (e.g. a freshly received invite) — the chat
+	 *  list falls back to a network fetch in that case.
+	 */
 	groupTitle: string | null,
 	lastMessage: StoredMessageFfi | null,
+	/**
+	 *  True for a DM from an un-curated, un-blocked sender — an unaccepted
+	 *  message request (docs/12 §1). The chat list shows a "Message request"
+	 *  label and the conversation opens into the Accept/Delete/Report gate.
+	 *  Always false for groups.
+	 */
 	isRequest: boolean,
+	/**
+	 *  True for a DM with a blocked contact (docs/12 §2). The chat list routes
+	 *  these into a Blocked section. Always false for groups.
+	 */
 	isBlocked: boolean,
 };
 
-/**  Result of `create_group`. Mirrors app-core `CreatedGroupFfi`. */
+/**
+ *  Result of `create_group`. `group_id` is URL-safe-no-pad base64;
+ *  `master_key` is the 32-byte zkgroup master key (caller stashes for
+ *  invite links).
+ */
 export type CreatedGroupFfi = {
 	groupId: string,
 	masterKey: number[],
 };
 
-/**  A decrypted inbound message (mirrors app-core `DecryptedMessage`). */
+/**  A decrypted inbound message. */
 export type DecryptedMessage = {
 	serverId: number,
 	senderDid: string,
 	senderDeviceId: number,
 	plaintext: number[],
+	/**  Sender's sent_at timestamp (from envelope). None for legacy messages. */
 	sentAtMs: number | null,
+	/**
+	 *  URL-safe-no-pad base64 of the group_id when this message arrived as a
+	 *  `proto::GroupMessage` body. `None` for plain DMs.
+	 */
 	groupId: string | null,
+	/**
+	 *  Disappearing-messages timer stamped on the envelope (docs/03 §5);
+	 *  seconds, `0` = no expiry. The client persists it via `save_message`.
+	 */
 	expireTimerSecs: number,
+	/**
+	 *  The sender's profile key carried on the envelope, if any (any variant
+	 *  may carry one). app-core no longer fetches/caches the sender's profile
+	 *  automatically; a consumer that wants display names calls
+	 *  `fetch_and_cache_profile(sender_did, profile_key)` with this. `None`
+	 *  when the envelope carried no key.
+	 */
 	profileKey: number[] | null,
+	/**
+	 *  True when this is an inbound DM from a sender that does not auto-pass the
+	 *  message-request gate (docs/12 §1) — i.e. the consumer should treat it as
+	 *  a *message request* and, if it tracks requests, call
+	 *  `set_pending_request(sender_did, true)`. Always `false` for group
+	 *  deliveries and for senders that pass the gate (curated or known bot).
+	 *  app-core no longer sets the pending-request flag itself; it only reports
+	 *  the verdict so the consumer can decide whether to persist it.
+	 */
 	isRequest: boolean,
 };
 
-/**
- *  A delivery-status update for an outgoing message (e.g. read receipt).
- *  Mirrors app-core `DeliveryStatusUpdate`.
- */
+/**  A delivery status update for an outgoing message (e.g. read receipt received). */
 export type DeliveryStatusUpdate = {
 	conversationId: string,
 	sentAtMs: number,
 	deliveryStatus: number,
 };
 
-export type DmTarget = {
-	recipientDid: string,
-};
-
 /**
- *  Membership/metadata change kind for group timeline entries.
- *  Mirrors app-core `GroupEventKind`.
+ *  Kind of a derived group timeline entry (docs/03 §3.6), reconstructed from a
+ *  `GroupChange`'s actions plus the surrounding state snapshots. Keep this list
+ *  **append-only** — the numeric `kind_code` is persisted in
+ *  `message_history.kind`.
  */
-export type GroupEventKind = "memberJoined" | "memberJoinedViaLink" | "memberRequestedToJoin" | "memberInvited" | "memberLeft" | "memberRemoved" | "joinRequestApproved" | "joinRequestDenied" | "inviteDeclined" | "joinRequestCancelled" | "roleChangedToAdmin" | "roleChangedToMember" | "titleChanged" | "descriptionChanged" | "expiryChanged" | "policyChanged";
+export type GroupEventKind = 
+/**  A pending invitee accepted (promoted themselves into the group). */
+"memberJoined" | 
+/**  Someone joined directly via an open invite link. */
+"memberJoinedViaLink" | 
+/**  Someone requested to join via a request-to-join link (awaits approval). */
+"memberRequestedToJoin" | 
+/**  An admin invited someone (they're now pending). */
+"memberInvited" | 
+/**  A member removed themselves. */
+"memberLeft" | 
+/**  An admin removed another member. */
+"memberRemoved" | 
+/**  An admin approved a pending join request. */
+"joinRequestApproved" | 
+/**  An admin denied a pending join request. */
+"joinRequestDenied" | 
+/**  An invitee declined an invitation. */
+"inviteDeclined" | 
+/**  A requester cancelled their own join request. */
+"joinRequestCancelled" | 
+/**  A member was promoted to admin. */
+"roleChangedToAdmin" | 
+/**  A member's admin role was removed. */
+"roleChangedToMember" | 
+/**  The group title changed. */
+"titleChanged" | 
+/**  The group description changed. */
+"descriptionChanged" | 
+/**  The disappearing-message timer changed. */
+"expiryChanged" | 
+/**  The group policy (join policy / announcement-only / link password) changed. */
+"policyChanged";
 
-export type GroupInviteEvent = {
-	groupId: string,
-	hostingServerUrl: string,
-	inviterDid: string,
-};
-
-/**  A member's row in a group. Mirrors app-core `GroupMemberFfi`. */
+/**  A member's row in a group, decrypted under the group key. */
 export type GroupMemberFfi = {
 	did: string,
+	/**
+	 *  URL-safe-no-pad base64 of the encrypted_member_id. Pass this verbatim
+	 *  to admin actions (remove_member, change_member_role, …).
+	 */
 	encryptedMemberId: string,
+	/**  0 = Member, 1 = Admin. */
 	role: number,
 	joinedAtMs: number,
 };
 
-export type GroupMetadataChangedEvent = {
-	event: GroupMetadataEvent,
-};
-
 /**
- *  One derived chat-timeline entry describing a membership/metadata change.
- *  Mirrors app-core `GroupMetadataEvent`.
+ *  One derived chat-timeline entry describing a membership/metadata change
+ *  (docs/03 §3.6). Persisted as a system row in `message_history` and surfaced
+ *  to the UI via `IncomingEvent::GroupMetadataChanged`.
  */
 export type GroupMetadataEvent = {
+	/**  URL-safe-no-pad base64 group_id this entry belongs to. */
 	groupId: string,
+	/**  Revision this change produced (the post-change revision). */
 	revision: number,
 	kind: GroupEventKind,
+	/**
+	 *  DID of the member who performed the change, from the sub-encrypted
+	 *  `change_meta`. Empty when attribution was unavailable (pre-§3.6 change).
+	 */
 	actorDid: string,
+	/**
+	 *  DID of the member the change is about, when resolvable from the
+	 *  surrounding state. Empty when the target's DID isn't known to us (e.g. a
+	 *  still-pending invitee whose DID we never learned).
+	 */
 	targetDid: string,
+	/**  base64 encrypted_member_id of the target, when the action names one. */
 	targetEmi: string,
+	/**
+	 *  Best-effort millis the change occurred — pulled from a relevant state
+	 *  timestamp (join/invite/request) where available, else fill time.
+	 */
 	occurredAtMs: number,
+	/**
+	 *  For `ExpiryChanged`, the new disappearing-message timer in seconds
+	 *  (`0` = off). Lets the UI render "set disappearing messages to 4 weeks"
+	 *  without a separate state lookup. `0` for all other kinds.
+	 */
 	expirySeconds: number,
+	/**
+	 *  For `TitleChanged`, the new group name, so the UI can render
+	 *  "changed the group name to 'X'". Empty for all other kinds.
+	 */
 	newTitle: string,
+	/**
+	 *  Pre-rendered English one-liner (using DIDs, not display names) for
+	 *  headless consumers / logging. UIs should render from the structured
+	 *  fields instead, resolving DIDs to display names.
+	 */
 	summary: string,
 };
 
-/**  A pending invite or approval entry. Mirrors app-core `GroupPendingFfi`. */
+/**
+ *  A pending invite or approval entry. `timestamp_ms` carries either
+ *  `invited_at_ms` (for invites) or `requested_at_ms` (for approvals).
+ */
 export type GroupPendingFfi = {
 	encryptedMemberId: string,
 	timestampMs: number,
 };
 
-/**  Snapshot of a group's decrypted state. Mirrors app-core `GroupSummaryFfi`. */
+/**  Snapshot of a group's decrypted state. */
 export type GroupSummaryFfi = {
 	groupId: string,
 	masterKey: number[],
@@ -212,85 +329,108 @@ export type GroupSummaryFfi = {
 	pendingApprovals: GroupPendingFfi[],
 };
 
-export type GroupTarget = {
-	groupId: string,
-};
-
 /**
  *  A single event surfaced to the FFI from the background reconnect task.
- *  Mirrors app-core `IncomingEvent`.
+ *  Drained in batches by `next_events()`.
  */
-export type IncomingEvent = {
-	type: "message",
-} & MessageEvent | {
-	type: "receiptUpdate",
-} & ReceiptUpdateEvent | {
-	type: "groupInvite",
-} & GroupInviteEvent | {
-	type: "messageEdited",
-} & MessageEditedEvent | {
-	type: "messageDeleted",
-} & MessageDeletedEvent | {
-	type: "reactionUpdated",
-} & ReactionUpdatedEvent | { type: "storageSynced" } | {
-	type: "groupMetadataChanged",
-} & GroupMetadataChangedEvent | {
-	type: "messagesExpired",
-} & MessagesExpiredEvent;
+export type IncomingEvent = 
+/**  A decrypted content message. */
+{ type: "message"; msg: DecryptedMessage } | 
+/**  A delivery status update from a read receipt. */
+{ type: "receiptUpdate"; update: DeliveryStatusUpdate } | 
+/**
+ *  Received a `GroupContext` DM — we've been invited to a group. The
+ *  master key has already been persisted; the UI should refresh its
+ *  conversation list so the group appears.
+ */
+{ type: "groupInvite"; group_id: string; hosting_server_url: string; inviter_did: string } | 
+/**
+ *  A prior message was edited in place (docs/36). The store has already
+ *  been updated; the UI should refresh the message's body / "Edited" mark.
+ */
+{ type: "messageEdited"; conversation_id: string; author_did: string; sent_at_ms: number; new_body: string; edited_at_ms: number } | 
+/**
+ *  A prior message was deleted FOR_EVERYONE (docs/36). The store now holds
+ *  a tombstone; the UI should render the deleted placeholder.
+ */
+{ type: "messageDeleted"; conversation_id: string; author_did: string; sent_at_ms: number } | 
+/**
+ *  A reaction was added/changed (`removed = false`) or cleared
+ *  (`removed = true`) on a target message (docs/33). The store reflects it;
+ *  the UI should refresh the target's reaction cluster.
+ */
+{ type: "reactionUpdated"; conversation_id: string; target_author: string; target_sent_at_ms: number; reactor_did: string; emoji: string; removed: boolean } | 
+/**
+ *  A background storage sync pulled and applied remote durable-state
+ *  records (e.g. a group master key synced from another device, or an
+ *  updated contact/profile). The domain tables are already updated; the UI
+ *  should rebuild its conversation list so newly-synced groups/contacts
+ *  appear without an app restart. Same "refresh the list" contract as
+ *  `GroupInvite`, but driven by the storage service rather than a DM.
+ */
+{ type: "storageSynced" } | 
+/**
+ *  A group membership/metadata change was derived from the change log
+ *  (docs/03 §3.6) while applying pending changes — e.g. "Alice added Bob",
+ *  "Bob left", "Carol was made an admin". The store already holds the
+ *  matching system row in `message_history`; the UI should refresh the
+ *  conversation timeline. Emitted once per derived entry.
+ */
+{ type: "groupMetadataChanged"; event: GroupMetadataEvent } | 
+/**
+ *  The disappearing-messages reaper hard-deleted one or more messages whose
+ *  timer elapsed (docs/03 §5). The store no longer holds them; the UI should
+ *  refresh the listed conversations (timeline + chat-list preview).
+ */
+{ type: "messagesExpired"; conversation_ids: string[] };
 
-/**  Decoded invite token info. Mirrors app-core `InviteInfo`. */
+/**  Decoded invite token info returned to the mobile layer. */
 export type InviteInfo = {
 	serverUrl: string,
 	serverName: string,
 	inviterDid: string | null,
 	postOnboardingRedirect: string | null,
+	/**
+	 *  Inviter's plaintext display name from the token. Shown on the invite
+	 *  acceptance screen before any server communication. The encrypted
+	 *  profile blob is the source of truth once fetched.
+	 */
 	inviterDisplayName: string | null,
+	/**
+	 *  Inviter's 32-byte profile key from the token, base64url-encoded.
+	 *  The new client primes its contact_profiles cache with this so the
+	 *  auto-DM can show the inviter's name from the very first frame.
+	 */
 	inviterProfileKey: number[] | null,
 };
 
-export type MessageDeletedEvent = {
-	conversationId: string,
-	authorDid: string,
-	sentAtMs: number,
-};
-
-export type MessageEditedEvent = {
-	conversationId: string,
-	authorDid: string,
-	sentAtMs: number,
-	newBody: string,
-	editedAtMs: number,
-};
-
-export type MessageEvent = {
-	msg: DecryptedMessage,
-};
-
-/**  A prior body of an edited message. Mirrors app-core `MessageRevisionFfi`. */
+/**  A prior body of an edited message, for the edit-history sheet. */
 export type MessageRevisionFfi = {
 	body: string,
 	replacedAtMs: number,
 };
 
-/**  Where a content operation is directed. Mirrors app-core `MessageTarget`. */
-export type MessageTarget = {
-	type: "dm",
-} & DmTarget | {
-	type: "group",
-} & GroupTarget;
+/**
+ *  Where a content operation (reaction / edit / delete) is directed: a DM with
+ *  a peer, or a group. Reaction/edit/delete share one API surface across both;
+ *  only the conversation key and the transport differ, and that fork lives in
+ *  `AppCoreInner::send_to_target`. (Plain-text sends keep their own
+ *  `send_dm` / `send_group_message` entry points.)
+ */
+export type MessageTarget = { type: "dm"; recipient_did: string } | { type: "group"; group_id: string };
 
-export type MessagesExpiredEvent = {
-	conversationIds: string[],
-};
-
-/**  A first-party Project. Mirrors app-core `ProjectInfoFfi`. */
+/**  A Project available on the homeserver. */
 export type ProjectInfoFfi = {
 	name: string,
 	url: string,
 	description: string,
 };
 
-/**  A reaction on a message. Mirrors app-core `ReactionFfi`. */
+/**
+ *  A reaction on a message (docs/33-reactions.md), keyed by the target's wire
+ *  identity `(target_author, target_sent_at_ms)`. The UI clusters these by
+ *  target and by emoji.
+ */
 export type ReactionFfi = {
 	conversationId: string,
 	targetAuthor: string,
@@ -300,27 +440,7 @@ export type ReactionFfi = {
 	reactedAtMs: number,
 };
 
-export type ReactionUpdatedEvent = {
-	conversationId: string,
-	targetAuthor: string,
-	targetSentAtMs: number,
-	reactorDid: string,
-	emoji: string,
-	removed: boolean,
-};
-
-export type ReceiptUpdateEvent = {
-	update: DeliveryStatusUpdate,
-};
-
-export type ReconnectingState = {
-	nextAttemptAtMs: number,
-};
-
-/**
- *  A message from local history (persisted in SQLCipher).
- *  Mirrors app-core `StoredMessageFfi`.
- */
+/**  A message from local history (persisted in SQLCipher). */
 export type StoredMessageFfi = {
 	id: string,
 	conversationId: string,
@@ -328,13 +448,32 @@ export type StoredMessageFfi = {
 	body: string,
 	sentAtMs: number,
 	editedAtMs: number | null,
+	/**  NULL = unread, Some = unix millis when marked read. */
 	readAtMs: number | null,
+	/**  0 = sending, 1 = sent, 2 = delivered, 3 = read. */
 	deliveryStatus: number,
+	/**  Number of times edited; drives the "Edited" affordance and the human cap. */
 	editCount: number,
+	/**  True = FOR_EVERYONE tombstone (render "This message was deleted"). */
 	deleted: boolean,
+	/**
+	 *  0 = normal chat bubble; >0 = a system/metadata timeline entry
+	 *  (docs/03 §3.6 group event). Render kind>0 as a centered grey line.
+	 *  The numeric values match `GroupEventKind` order; `metadata` carries the
+	 *  structured actor/target for localization.
+	 */
 	kind: number,
+	/**
+	 *  JSON for system rows (`{ "event": <kind>, "actor_did": .., "target_did": ..,
+	 *  "target_emi": .. }`); `None` for normal chat messages.
+	 */
 	metadata: string | null,
+	/**  Disappearing-messages timer in seconds (docs/03 §5); `0` = no expiry. */
 	expireTimerSecs: number,
+	/**
+	 *  Unix-millis deletion deadline once the countdown has started (on read),
+	 *  or `None`. The UI schedules the live disappear from this.
+	 */
 	expireAtMs: number | null,
 };
 

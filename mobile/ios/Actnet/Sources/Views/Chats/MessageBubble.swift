@@ -8,6 +8,12 @@ struct MessageBubble: View {
     /// rounded ones, echoing the hexagon avatar (docs/54-bot-presentation.md).
     var isBot: Bool = false
 
+    /// Sender's display name, shown above the bubble for incoming group
+    /// messages (Signal-style). Nil for DMs, own messages, and the 2nd+
+    /// message in a consecutive run from the same sender — ConversationView
+    /// decides when to pass it.
+    var senderName: String? = nil
+
     // Reactions / editing / deletion (docs/33, docs/36). `actionsEnabled` gates
     // the long-press menu to conversations where these ops are supported (DMs).
     var reactions: [ReactionFfi] = []
@@ -27,6 +33,13 @@ struct MessageBubble: View {
             if isMe { Spacer(minLength: 60) }
 
             VStack(alignment: isMe ? .trailing : .leading, spacing: 4) {
+                if let senderName, !isMe {
+                    Text(senderName)
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(senderColor)
+                        .padding(.leading, 4)
+                }
                 bubble
                 if !reactionClusters.isEmpty {
                     reactionCluster
@@ -142,6 +155,22 @@ struct MessageBubble: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+
+    /// Deterministic per-sender color for the group name label (Signal-style).
+    /// Picked from a fixed palette by a stable FNV-style hash of the sender DID
+    /// so a given member always gets the same color across launches (String's
+    /// built-in hashValue is per-process-randomized, so we roll our own).
+    private static let senderPalette: [Color] = [
+        .blue, .purple, .pink, .orange, .teal, .indigo, .green, Color.avBrand,
+    ]
+
+    private var senderColor: Color {
+        var hash: UInt64 = 5381
+        for byte in message.senderAccountId.utf8 {
+            hash = (hash &* 33) &+ UInt64(byte)
+        }
+        return Self.senderPalette[Int(hash % UInt64(Self.senderPalette.count))]
     }
 
     /// Cut-corner (octagon-ish) bubble for bots, rounded for people.

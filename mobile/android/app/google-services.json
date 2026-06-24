@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "329035373582",
+    "project_id": "avalanche-push-14d32",
+    "storage_bucket": "avalanche-push-14d32.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:329035373582:android:574cc93e0b6dd60bb5305f",
+        "android_client_info": {
+          "package_name": "net.theavalanche.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBSOAWK4M-d_XoZ0SbNllTe93OwLIP0Pd0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

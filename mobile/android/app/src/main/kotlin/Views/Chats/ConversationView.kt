@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -285,7 +285,7 @@ fun ConversationView(
             verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.Bottom),
         ) {
             item { Spacer(Modifier.size(8.dp)) }
-            items(messages, key = { it.sentAtMs }) { message ->
+            itemsIndexed(messages, key = { _, m -> m.sentAtMs }) { index, message ->
                 if (message.isSystemEvent) {
                     // Group membership/metadata event (docs/03 §3.6) —
                     // a centered grey line, not a chat bubble.
@@ -296,10 +296,29 @@ fun ConversationView(
                         )
                     )
                 } else {
+                    // Sender name above incoming group bubbles, only on the
+                    // first message of a consecutive run (a system event also
+                    // breaks a run). Mirrors ConversationView.swift.
+                    val isMe = message.senderAccountId == conversation.accountId
+                    val firstOfRun = index == 0 ||
+                        messages[index - 1].isSystemEvent ||
+                        messages[index - 1].senderAccountId != message.senderAccountId
+                    val senderName = if (conversation.isGroup && !isMe && firstOfRun) {
+                        viewModel.resolvedName(message.senderAccountId, conversation.accountId)
+                    } else {
+                        null
+                    }
+                    // Last of a run: timestamp/delivery collapse to this bubble.
+                    val isLastInRun = index == messages.lastIndex ||
+                        messages[index + 1].isSystemEvent ||
+                        messages[index + 1].senderAccountId != message.senderAccountId
+
                     MessageBubble(
                         message = message,
-                        isMe = message.senderAccountId == conversation.accountId,
+                        isMe = isMe,
                         isBot = isBotSender(message),
+                        senderName = senderName,
+                        isLastInRun = isLastInRun,
                         reactions = viewModel.reactions(message),
                         myDid = conversation.accountId,
                         actionsEnabled = true,

@@ -2257,7 +2257,9 @@ class AppViewModel(
                 context = applicationContext,
                 message = message,
                 conversation = convForNotif,
-                senderDisplayName = displayName(did = senderDid, accountId = accountId),
+                // resolvedName (not displayName) so an unresolved sender shows
+                // "Unknown" rather than leaking the raw DID into the banner.
+                senderDisplayName = resolvedName(did = senderDid, accountId = accountId),
                 appViewModel = this,
             )
         }

@@ -14,15 +14,18 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,10 +38,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.net.URL
 
 /**
  * Screen for creating a new identity after accepting an invite.
@@ -50,6 +49,9 @@ import java.net.URL
  *   [onRecover] — called when the user taps "Recover an existing identity instead"
  *                 (navigates to RecoveryExplainerView). Only shown when [showRecoverLink]
  *                 is true (default).
+ *   [onBack] — called when the user taps the app-bar back arrow. Mirrors the
+ *              system back button iOS gets from `.navigationTitle` + the
+ *              NavigationStack. The host pops the back stack.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,25 +62,35 @@ fun NewAccountView(
     // so the caller can wire the nav callback with the entered name.
     onNext: (displayName: String) -> Unit = {},
     onRecover: () -> Unit = {},
+    onBack: () -> Unit = {},
 ) {
     var displayName by remember { mutableStateOf("") }
-    // null = loading; empty string = not configured
-    var privacyPolicyUrl by remember { mutableStateOf<String?>(null) }
-
-    // Mirrors SwiftUI .task { privacyPolicyURL = await PublicServerInfo.privacyPolicyURL(...) }
-    LaunchedEffect(inviteToken.serverUrl) {
-        privacyPolicyUrl = withContext(Dispatchers.IO) {
-            runCatching { fetchPublicServerInfoPrivacyPolicy(serverUrl = inviteToken.serverUrl) }
-                .getOrNull()
-        }
-    }
-
+    // The privacy policy URL comes from invite validation (resolved by the
+    // core), so there's no separate server call. null/blank when not configured.
+    val privacyPolicyUrl = inviteToken.privacyPolicyUrl
     val uriHandler = LocalUriHandler.current
 
+    Scaffold(
+        topBar = {
+            // iOS shows an inline `.navigationTitle("New Identity")` with the
+            // system back button; mirror that with an explicit app bar + back
+            // arrow (Compose has no implicit nav chrome).
+            TopAppBar(
+                title = { Text("New Identity") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+        containerColor = AvalancheColors.Paper,
+    ) { innerPadding ->
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(AvalancheColors.Paper)
+            .padding(innerPadding)
             .padding(top = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(24.dp),
@@ -138,11 +150,11 @@ fun NewAccountView(
             Text("Next")
         }
 
-        // Privacy policy link — shown only after loading and if a URL was returned
-        val policyUrl = privacyPolicyUrl
-        if (!policyUrl.isNullOrEmpty()) {
+        // Privacy policy link — shown only if the operator configured one.
+        // Guard against blank values so we never call openUri("").
+        if (!privacyPolicyUrl.isNullOrBlank()) {
             TextButton(
-                onClick = { uriHandler.openUri(policyUrl) },
+                onClick = { uriHandler.openUri(privacyPolicyUrl) },
             ) {
                 Text(
                     text = "View ${inviteToken.serverName}'s privacy policy",
@@ -167,30 +179,7 @@ fun NewAccountView(
             }
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Public server info
-// ---------------------------------------------------------------------------
-
-/**
- * Fetch the operator's privacy-policy URL from [serverUrl]/v1/info.
- * Returns null if not configured or unreachable.
- *
- * Mirrors iOS PublicServerInfo.privacyPolicyURL(forServer:): GET <serverUrl>/v1/info
- * and read the "privacy_policy_url" field. Caller runs this on Dispatchers.IO.
- */
-private fun fetchPublicServerInfoPrivacyPolicy(serverUrl: String): String? {
-    val base = serverUrl.trimEnd('/')
-    val infoUrl = "$base/v1/info"
-    return runCatching {
-        val connection = URL(infoUrl).openConnection() as java.net.HttpURLConnection
-        connection.connectTimeout = 5_000
-        connection.readTimeout = 5_000
-        if (connection.responseCode != 200) return@runCatching null
-        val body = connection.inputStream.bufferedReader().readText()
-        JSONObject(body).optString("privacy_policy_url").takeIf { it.isNotEmpty() }
-    }.getOrNull()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +195,7 @@ private fun NewAccountPreview() {
         serverName = "Example Server",
         inviterDid = null,
         postOnboardingRedirect = null,
+        privacyPolicyUrl = "https://example.theavalanche.net/privacy",
     )
     AvalancheTheme {
         NewAccountView(

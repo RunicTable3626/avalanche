@@ -283,6 +283,7 @@ private fun PasskeyExplainerPreview() {
             serverName = "Demo Server",
             inviterDid = null,
             postOnboardingRedirect = null,
+            privacyPolicyUrl = null,
         )
         PasskeyExplainerView(
             inviteToken = token,

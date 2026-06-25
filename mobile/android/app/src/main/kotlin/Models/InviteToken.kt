@@ -1,6 +1,7 @@
 package net.theavalanche.app
 
 import android.net.Uri
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import uniffi.app_core.validateInvite
@@ -13,6 +14,10 @@ data class InviteToken(
     val serverName: String,
     val inviterDid: String?,
     val postOnboardingRedirect: String?,
+    /// Operator's privacy policy URL, resolved by the core as part of invite
+    /// validation (no separate server call). null when none is configured or
+    /// the value is blank. Onboarding screens show the link only when non-null.
+    val privacyPolicyUrl: String?,
 ) {
     // Mirrors Swift's `var id: String { token }` from Identifiable conformance.
     val id: String get() = token
@@ -45,6 +50,7 @@ data class InviteToken(
                 serverName = info.serverName,
                 inviterDid = info.inviterDid,
                 postOnboardingRedirect = info.postOnboardingRedirect,
+                privacyPolicyUrl = info.privacyPolicyUrl?.takeIf { it.isNotBlank() },
             )
         }
     }

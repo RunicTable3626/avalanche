@@ -7,12 +7,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -317,11 +322,23 @@ fun ConversationView(
             )
         },
         containerColor = AvalancheColors.Paper,
+        // Zero the content insets so the Scaffold doesn't pad the bottom nav bar
+        // itself — we apply the bottom inset explicitly below. Otherwise the
+        // nav-bar padding and the IME padding would stack (sum), leaving a
+        // nav-bar-tall gap above the keyboard. The top app bar still handles the
+        // status bar via its own insets, so innerPadding still carries the top.
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
     ) { innerPadding ->
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(innerPadding)
+            // Edge-to-edge (enableEdgeToEdge) opts out of the system's automatic
+            // adjustResize, so consume the bottom inset here: the LARGER of the
+            // keyboard (IME) and the navigation bar. union() takes the max per
+            // side, so when the keyboard is up the composer sits flush above it,
+            // and when it's down it clears the nav bar — no double counting.
+            .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
             .background(AvalancheColors.Paper),
     ) {
         // --- Message list ---

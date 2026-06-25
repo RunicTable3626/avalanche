@@ -2671,6 +2671,11 @@ pub struct InviteInfo {
     /// The new client primes its contact_profiles cache with this so the
     /// auto-DM can show the inviter's name from the very first frame.
     pub inviter_profile_key: Option<Vec<u8>>,
+    /// Operator's privacy policy URL for `server_url`, resolved server-side as
+    /// part of invite validation (same source as `GET /v1/info`). `None` when
+    /// the operator configured none. Onboarding screens read this directly
+    /// instead of making a separate server call.
+    pub privacy_policy_url: Option<String>,
 }
 
 /// Parse and validate an invite token.
@@ -2713,6 +2718,7 @@ pub fn validate_invite(token: String) -> Result<InviteInfo, AppErrorFfi> {
             // compact token format; these stay None until a wire key is defined.
             inviter_display_name: None,
             inviter_profile_key: None,
+            privacy_policy_url: resp.privacy_policy_url.filter(|s| !s.is_empty()),
         })
     }).map_err(AppErrorFfi::from)
 }

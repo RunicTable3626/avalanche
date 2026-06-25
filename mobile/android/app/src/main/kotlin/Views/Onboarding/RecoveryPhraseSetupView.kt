@@ -478,6 +478,7 @@ private fun DisplayStagePreview() {
                 serverName = "Example Server",
                 inviterDid = null,
                 postOnboardingRedirect = null,
+                privacyPolicyUrl = null,
             ),
             errorMessage = null,
             onContinue = {},

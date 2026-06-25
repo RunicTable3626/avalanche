@@ -17,7 +17,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,11 +28,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONObject
-import java.net.URL
 
 /**
  * Registers an existing DID with a new server.
@@ -56,18 +51,13 @@ fun JoiningServerView(
 ) {
     var isJoining by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    // The operator's privacy policy URL, fetched from the server's public
-    // /v1/info endpoint when the screen appears. null until loaded, or if the
-    // operator hasn't configured one.
-    var privacyPolicyUrl by remember { mutableStateOf<String?>(null) }
+    // The operator's privacy policy URL comes from invite validation (resolved
+    // by the core), so there's no separate server call here. null/blank when the
+    // operator hasn't configured one — the link is hidden in that case.
+    val privacyPolicyUrl = inviteToken.privacyPolicyUrl
 
     val scope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
-
-    // Mirrors iOS .task { await loadServerInfo() }
-    LaunchedEffect(inviteToken.serverUrl) {
-        privacyPolicyUrl = loadPrivacyPolicyUrl(inviteToken.serverUrl)
-    }
 
     Scaffold(
         topBar = {
@@ -94,11 +84,12 @@ fun JoiningServerView(
                 modifier = Modifier.padding(horizontal = 24.dp),
             )
 
-            // Show privacy policy link if the server provided one.
-            if (privacyPolicyUrl != null) {
+            // Show privacy policy link if the server provided one. Guard against
+            // blank values so we never call openUri("") (which would crash).
+            if (!privacyPolicyUrl.isNullOrBlank()) {
                 TextButton(
                     onClick = {
-                        runCatching { uriHandler.openUri(privacyPolicyUrl!!) }
+                        runCatching { uriHandler.openUri(privacyPolicyUrl) }
                     }
                 ) {
                     Text(
@@ -163,26 +154,6 @@ fun JoiningServerView(
     }
 }
 
-/**
- * Best-effort fetch of the operator's privacy policy URL for [serverUrl].
- * Returns null if the server is unreachable, the endpoint errors, or no
- * policy is configured — mirrors iOS PublicServerInfo.privacyPolicyURL(forServer:).
- */
-private suspend fun loadPrivacyPolicyUrl(serverUrl: String): String? {
-    return withContext(Dispatchers.IO) {
-        runCatching {
-            val infoUrl = serverUrl.trimEnd('/') + "/v1/info"
-            val connection = URL(infoUrl).openConnection() as java.net.HttpURLConnection
-            connection.connectTimeout = 5_000
-            connection.readTimeout = 5_000
-            if (connection.responseCode != 200) return@runCatching null
-            val body = connection.inputStream.bufferedReader().readText()
-            val json = JSONObject(body)
-            json.optString("privacy_policy_url").takeIf { it.isNotEmpty() }
-        }.getOrNull()
-    }
-}
-
 @Preview(showBackground = true)
 @Composable
 private fun JoiningServerViewPreview() {
@@ -197,6 +168,7 @@ private fun JoiningServerViewPreview() {
             serverName = "Demo Server",
             inviterDid = null,
             postOnboardingRedirect = null,
+            privacyPolicyUrl = "https://demo.theavalanche.net/privacy",
         )
         JoiningServerView(
             inviteToken = fakeToken,

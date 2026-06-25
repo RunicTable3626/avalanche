@@ -57,6 +57,12 @@ fun IdentityPickerView(
     onPickExistingAccount: (account: Account) -> Unit = {},
     onCreateNewAccount: () -> Unit = {},
     onRecoverIdentity: () -> Unit = {},
+    // Distinct from [onCreateNewAccount]: the auto-skip when there are no
+    // identities must REPLACE this screen on the back stack (not stack on top of
+    // it), otherwise pressing Back from the create screen returns here and this
+    // same effect re-fires, bouncing the user forward forever. Defaults to
+    // [onCreateNewAccount] for previews/back-compat.
+    onSkipToNewAccount: () -> Unit = onCreateNewAccount,
 ) {
     val accounts by appViewModel.accounts.collectAsState()
 
@@ -65,7 +71,7 @@ fun IdentityPickerView(
         // iOS which renders NewAccountView here. We delegate via the nav lambda
         // rather than rendering inline; fire it from a LaunchedEffect so the
         // navigation happens as a side effect, not during composition.
-        LaunchedEffect(Unit) { onCreateNewAccount() }
+        LaunchedEffect(Unit) { onSkipToNewAccount() }
         return
     }
 
@@ -247,6 +253,7 @@ private fun IdentityPickerPreview() {
             serverName = "Example Org",
             inviterDid = null,
             postOnboardingRedirect = null,
+            privacyPolicyUrl = null,
         )
         IdentityPickerView(
             inviteToken = inviteToken,

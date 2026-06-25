@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -94,7 +95,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Fully transparent system navigation bar so the app's background shows
+        // through it edge-to-edge. `light` selects dark back/home icons for our
+        // light (Paper) UI; the transparent scrims keep it clear on every API.
+        enableEdgeToEdge(
+            navigationBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ),
+        )
 
         // Create the notification channel (no-op on API < 26).
         NotificationPresenter.createNotificationChannel(this)
@@ -272,6 +281,14 @@ fun AppNavGraph(
                     },
                     onCreateNewAccount = { navController.navigate(Route.NEW_ACCOUNT) },
                     onRecoverIdentity = { navController.navigate(Route.RECOVERY_EXPLAINER) },
+                    // No identities: the picker has nothing to show, so replace it
+                    // on the back stack. Back from the create screen then returns
+                    // to Splash instead of re-triggering the auto-skip (the loop).
+                    onSkipToNewAccount = {
+                        navController.navigate(Route.NEW_ACCOUNT) {
+                            popUpTo(Route.IDENTITY_PICKER) { inclusive = true }
+                        }
+                    },
                 )
             }
         }
@@ -289,6 +306,10 @@ fun AppNavGraph(
                         navController.navigate(Route.passkeyExplainer(displayName))
                     },
                     onRecover = { navController.navigate(Route.RECOVERY_EXPLAINER) },
+                    // Back arrow / system back: pop. Via the auto-skip path the
+                    // back stack is [SPLASH, NEW_ACCOUNT] so this lands on Splash;
+                    // via the manual "create" path it returns to the picker.
+                    onBack = { navController.popBackStack() },
                 )
             }
         }

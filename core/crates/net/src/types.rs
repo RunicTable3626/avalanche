@@ -229,6 +229,10 @@ impl RawFetchResponse {
 pub struct InviteValidationResponse {
     pub server_name: String,
     pub post_onboarding_redirect: Option<String>,
+    /// Operator's privacy policy URL, bundled by the server so onboarding needs
+    /// no separate `/v1/info` call. Absent when the operator configured none.
+    #[serde(default)]
+    pub privacy_policy_url: Option<String>,
 }
 
 // ── Projects ────────────────────────────────────────────────────────────────

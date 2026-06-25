@@ -28,6 +28,12 @@ struct InviteResponse {
     server_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     post_onboarding_redirect: Option<String>,
+    /// Operator's privacy policy URL (same source as `GET /v1/info`). Bundled
+    /// here so the onboarding client gets it from invite validation in a single
+    /// round-trip instead of a second call. An empty configured value is
+    /// normalized to `None` so clients never receive a blank URL to open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    privacy_policy_url: Option<String>,
 }
 
 async fn validate_invite(
@@ -54,5 +60,10 @@ async fn validate_invite(
     Ok(Json(InviteResponse {
         server_name: state.config.server_name.clone(),
         post_onboarding_redirect,
+        privacy_policy_url: state
+            .config
+            .privacy_policy_url
+            .clone()
+            .filter(|s| !s.is_empty()),
     }))
 }

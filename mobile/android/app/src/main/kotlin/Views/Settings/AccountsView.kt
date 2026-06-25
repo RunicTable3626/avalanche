@@ -11,8 +11,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -79,7 +82,11 @@ fun AccountsView(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(AvalancheColors.Paper),
+            .background(AvalancheColors.Paper)
+            // This screen is its own nav destination (not inside MainTabView's
+            // Scaffold), so it must apply the status-bar inset itself — otherwise
+            // the edge-to-edge window draws the top bar under the status bar.
+            .statusBarsPadding(),
     ) {
         // Top bar
         Row(
@@ -111,7 +118,12 @@ fun AccountsView(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .background(AvalancheColors.Paper),
+                .background(AvalancheColors.Paper)
+                // Keep the footer clear of the (edge-to-edge) system nav bar.
+                .navigationBarsPadding(),
+            // Breathing room above the first section (the later sections each add
+            // their own top=16.dp), and below the footer.
+            contentPadding = PaddingValues(top = 16.dp, bottom = 16.dp),
         ) {
             // ── Section: Scan Invite ────────────────────────────────────────
             item {

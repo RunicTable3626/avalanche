@@ -6,6 +6,9 @@
   "permissions": [
     "core:default",
     "store:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "core:webview:allow-create-webview-window",
     "allow-all"
   ]
 }

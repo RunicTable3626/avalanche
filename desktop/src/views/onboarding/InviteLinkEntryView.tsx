@@ -26,7 +26,7 @@ export default function InviteLinkEntryView(props: Props) {
       <input
         class="text-input ie-input"
         type="text"
-        placeholder="actnet://... or paste token"
+        placeholder="avalanche://... or paste token"
         value={linkText()}
         onInput={(e) => setLinkText(e.currentTarget.value)}
         onKeyDown={(e) => { if (e.key === "Enter") void handleValidate(linkText()); }}

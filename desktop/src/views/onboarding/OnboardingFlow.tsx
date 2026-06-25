@@ -35,13 +35,13 @@ export default function OnboardingFlow() {
     setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
   }
 
-  // TODO: "actnet-deeplink" is NOT yet emitted by the backend — no deep-link
+  // TODO: "avalanche-deeplink" is NOT yet emitted by the backend — no deep-link
   // plugin is wired in src-tauri/src/lib.rs. This listener is a placeholder
   // for when the Rust side wires deep links. Likewise, setPendingInviteToken
   // has no producer yet; the createEffect below is also a forward-looking stub.
   onMount(() => {
     let unlisten: (() => void) | undefined;
-    listen<string>("actnet-deeplink", (ev) => {
+    listen<string>("avalanche-deeplink", (ev) => {
       void validateInvite(ev.payload)
         .then((info) => {
           // Deep-link success: root + identityPicker so Back returns to splash.

@@ -86,7 +86,7 @@ fun ChatsView(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Chats") },
+                title = { Text("") },
                 navigationIcon = {
                     IconButton(onClick = onOpenAccounts) {
                         Icon(

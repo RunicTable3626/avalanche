@@ -3,6 +3,7 @@ package net.theavalanche.app
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.automirrored.filled.Message
@@ -113,7 +114,14 @@ fun MainTabView(
         // Offline banner overlaid at the top-center — mirrors iOS RootView
         // ZStack(alignment: .top) + OfflineBanner(). Without the explicit
         // align it would default to the Box's top-start (top-left) corner.
-        Box(modifier = Modifier.align(Alignment.TopCenter)) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                // The overlay sits outside the Scaffold, so it must apply the
+                // status-bar inset itself — otherwise the pill floats under the
+                // status bar in the edge-to-edge window.
+                .statusBarsPadding(),
+        ) {
             OfflineBanner(appViewModel = appViewModel)
         }
     }

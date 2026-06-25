@@ -2,7 +2,7 @@
 
 [[permission]]
 identifier = "allow-all"
-description = "Allow all actnet custom commands"
+description = "Allow all avalanche custom commands"
 commands.allow = [
   "ping",
   "create_account",
@@ -61,4 +61,5 @@ commands.allow = [
   "send_delete",
   "load_reactions",
   "load_message_revisions",
+  "start_event_loop",
 ]

@@ -4,9 +4,11 @@
 // All FFI types are now derived directly on app-core via the "specta" feature —
 // no more manual ffi_types.rs mirror.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use app_core::AppCore;
+use tauri::Emitter;
 
 // Desktop-specific convenience type (not in app-core).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
@@ -19,7 +21,12 @@ struct AccountResult {
 // ── App state ─────────────────────────────────────────────────────────────────
 
 struct AppState {
-    app: Mutex<Option<std::sync::Arc<AppCore>>>,
+    app: Mutex<Option<Arc<AppCore>>>,
+    /// Generation counter for the background event loop. Incremented every time
+    /// `start_event_loop` is called or `delete_identity` / `leave_server` need
+    /// to cancel a running loop. The spawned thread captures its generation at
+    /// creation and exits when the global counter no longer matches.
+    event_loop_gen: Arc<AtomicU64>,
 }
 
 fn get_app(state: &tauri::State<'_, AppState>) -> Result<std::sync::Arc<AppCore>, String> {
@@ -98,9 +105,10 @@ pub fn run() {
             send_delete,
             load_reactions,
             load_message_revisions,
+            start_event_loop,
         ]);
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "codegen")]
     {
         builder
             .export(
@@ -114,6 +122,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(AppState {
             app: Mutex::new(None),
+            event_loop_gen: Arc::new(AtomicU64::new(0)),
         })
         .invoke_handler(builder.invoke_handler())
         .run(tauri::generate_context!())
@@ -420,15 +429,20 @@ fn unblock_contact(state: tauri::State<'_, AppState>, did: String) -> Result<(),
 #[tauri::command]
 #[specta::specta]
 fn leave_server(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    get_app(&state)?
+    let result = get_app(&state)?
         .leave_server()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    // Cancel the background event loop; the server connection is closed.
+    state.event_loop_gen.fetch_add(1, Ordering::SeqCst);
+    result
 }
 
 #[tauri::command]
 #[specta::specta]
 fn delete_identity(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let result = get_app(&state)?.delete_identity().map_err(|e| e.to_string());
+    // Cancel the background event loop before dropping the AppCore handle.
+    state.event_loop_gen.fetch_add(1, Ordering::SeqCst);
     // Clear session state regardless of result — identity is gone either way.
     *state.app.lock().map_err(|e| format!("lock poisoned: {}", e))? = None;
     result
@@ -756,4 +770,53 @@ fn load_message_revisions(
     get_app(&state)?
         .load_message_revisions(conversation_id, author, sent_at_ms)
         .map_err(|e| e.to_string())
+}
+
+// ── Background event loop ─────────────────────────────────────────────────────
+
+/// Spawns a dedicated OS thread that calls `next_events()` in a loop and
+/// emits every batch to the frontend via `app_handle.emit("avalanche-event", …)`.
+///
+/// A generation counter (`event_loop_gen`) prevents duplicate loops: each
+/// invocation bumps the counter and the spawned thread captures its generation.
+/// When `delete_identity` or `leave_server` bump the counter, the old thread
+/// sees the mismatch and exits. If the frontend calls `startEventLoop()` again
+/// (e.g. after logout + re-login), a new thread with a fresh generation starts.
+///
+/// Uses `std::thread::spawn` (not tokio) because this is a synchronous Tauri
+/// command — no tokio handle is guaranteed on the calling thread — and the
+/// spawned thread runs a pure blocking loop with no async I/O.
+#[tauri::command]
+#[specta::specta]
+fn start_event_loop(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let app = get_app(&state)?;
+    let handle = app_handle.clone();
+
+    // Bump the generation counter so any previous event loop exits, then
+    // capture the new generation for this invocation.
+    let my_gen = state.event_loop_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let gen = Arc::clone(&state.event_loop_gen);
+
+    std::thread::spawn(move || {
+        while gen.load(Ordering::SeqCst) == my_gen {
+            match app.next_events() {
+                Ok(events) => {
+                    if !events.is_empty() {
+                        if let Err(e) = handle.emit("avalanche-event", &events) {
+                            eprintln!("[start_event_loop] emit failed: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[start_event_loop] next_events error: {e}");
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+        }
+    });
+
+    Ok(())
 }

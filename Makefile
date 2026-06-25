@@ -264,6 +264,9 @@ server-release:
 desktop:
 	cd desktop && npm run tauri dev
 
+desktop-bindings:
+	cd desktop && cargo build -p avalanche-desktop --features codegen
+
 dev-all:
 	python3 dev.py
 

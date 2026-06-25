@@ -1,5 +1,5 @@
 [package]
-name = "actnet-desktop"
+name = "avalanche-desktop"
 version = "0.1.0"
 description = "Avalanche Desktop"
 license = "AGPL-3.0-only"
@@ -7,8 +7,11 @@ edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "actnet_desktop_lib"
+name = "avalanche_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+codegen = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -22,6 +25,7 @@ specta = { version = "=2.0.0-rc.25", features = ["derive"] }
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 specta-typescript = "0.0.12"
 app-core = { path = "../../core/crates/app-core", features = ["specta"] }
+tokio = { version = "1", features = ["rt"] }
 
 # zkgroup depends on a Signal fork of curve25519-dalek (it has private fields
 # zkgroup needs to reach into for Ristretto-based proofs). The fork is API-

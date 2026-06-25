@@ -182,12 +182,18 @@ fun ConversationView(
         // The real row replaces it once the send completes and the store reloads.
         viewModel.addOptimisticMessage(message = optimistic, conversation = conversation)
 
+        // Scroll-to-bottom is a UI nicety and must NEVER gate the send. Run it
+        // as a separate, failure-tolerant coroutine — `animateScrollToItem` was
+        // suspending here and the send never ran, leaving the message stuck on
+        // the "sending" clock (and never reaching the server, so adminbot never
+        // saw it).
         scope.launch {
-            // Scroll to bottom after optimistic insert.
-            if (messages.isNotEmpty()) {
-                listState.animateScrollToItem(messages.size)
+            runCatching {
+                if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size)
             }
+        }
 
+        scope.launch {
             try {
                 if (conversation.isGroup) {
                     viewModel.sendGroupMessage(

@@ -98,12 +98,28 @@ pub(crate) fn ffi_runtime() -> &'static tokio::runtime::Runtime {
 pub fn init_logging(filter: String) {
     use tracing_subscriber::{fmt, EnvFilter};
     let env_filter = EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt()
-        .with_env_filter(env_filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .with_target(true)
-        .try_init();
+
+    // Android discards a native process's stderr — logcat only surfaces messages
+    // written through the Android log API — so route tracing to logcat there.
+    // Everywhere else (iOS/Xcode, desktop) stderr is captured as before.
+    #[cfg(target_os = "android")]
+    {
+        let _ = fmt()
+            .with_env_filter(env_filter)
+            .with_writer(paranoid_android::AndroidLogMakeWriter::new("Actnet".to_owned()))
+            .with_ansi(false)
+            .with_target(true)
+            .try_init();
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .with_target(true)
+            .try_init();
+    }
 }
 
 /// A Project available on the homeserver.

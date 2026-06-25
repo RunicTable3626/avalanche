@@ -113,7 +113,7 @@ class MainActivity : ComponentActivity() {
         // Publish the live ViewModel so ActnetFirebaseMessagingService can reach it.
         (application as? ActnetApplication)?.appViewModel = appViewModel
         appViewModel.restoreAccounts()
-        intent?.data?.let { appViewModel.handleDeepLink(it) }
+        intent?.let { handleIntent(it) }
 
         maybeRequestNotificationPermission()
 
@@ -149,6 +149,27 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        handleIntent(intent)
+    }
+
+    /**
+     * Route an incoming intent. A notification tap carries `conversationId` /
+     * `accountId` extras (set in [NotificationPresenter.present]) and is opened
+     * by direct lookup — this correctly opens group conversations, whose id is
+     * `group-<groupId>` rather than a DM recipient DID. A genuine external deep
+     * link (QR scan, invite URL) has no such extras and goes through
+     * [AppViewModel.handleDeepLink].
+     *
+     * Mirrors iOS: AppDelegate.userNotificationCenter(_:didReceive:) opens the
+     * notification's `conversationId`; onOpenURL handles external links.
+     */
+    private fun handleIntent(intent: Intent) {
+        val conversationId = intent.getStringExtra("conversationId")
+        val accountId = intent.getStringExtra("accountId")
+        if (conversationId != null && accountId != null) {
+            appViewModel.openConversationById(conversationId = conversationId, accountId = accountId)
+            return
+        }
         intent.data?.let { appViewModel.handleDeepLink(it) }
     }
 }

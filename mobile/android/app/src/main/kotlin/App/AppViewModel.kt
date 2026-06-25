@@ -119,6 +119,15 @@ class AppViewModel(
     val navigateToConversation: StateFlow<Conversation?> = _navigateToConversation.asStateFlow()
 
     /**
+     * A notification tap that arrived before the conversation list finished
+     * loading (cold-start launch). Stored as (conversationId, accountId) and
+     * flushed by [openConversationById] once `loadConversationsFromStore`
+     * populates `_conversations`. Cleared after a successful open.
+     */
+    @Volatile
+    private var pendingOpenConversation: Pair<String, String>? = null
+
+    /**
      * ID of the conversation currently visible on screen, or null.
      * Set by the conversation composable's LaunchedEffect(onAppear/onDisappear).
      * Used to suppress notifications for the chat the user is actively reading.
@@ -314,6 +323,37 @@ class AppViewModel(
 
     /** Check if a URI is a deep link for this app. */
     fun isDeepLink(uri: Uri): Boolean = uri.host == "go.theavalanche.net"
+
+    /**
+     * Navigate to an existing conversation by its conversation id (the value
+     * stored in `message_history.conversation_id`: `dm-<did>` for DMs,
+     * `group-<groupId>` for groups). Used by the notification-tap path, which
+     * carries `conversationId`/`accountId` extras straight from the
+     * notification that scheduled it.
+     *
+     * Unlike [handleDeepLink]'s `conversation/<did>` action, this never tries to
+     * (re)create a DM — it only opens a conversation that already exists in the
+     * in-memory list, so a group notification opens the actual group rather than
+     * a bogus DM whose "recipient" is the `group-…` id.
+     *
+     * Mirrors iOS AppDelegate.userNotificationCenter(_:didReceive:) which looks
+     * up `conversations.first { id == conversationId && accountId == accountId }`.
+     */
+    fun openConversationById(conversationId: String, accountId: String) {
+        AppLog.info("DeepLink", "openConversationById: $conversationId (account $accountId)")
+        val conv = _conversations.value.firstOrNull {
+            it.id == conversationId && it.accountId == accountId
+        } ?: run {
+            // Cold-start tap: conversations not loaded yet. Remember the request
+            // and flush it once loadConversationsFromStore populates the list.
+            AppLog.info("DeepLink", "conversation not loaded yet; deferring open of $conversationId")
+            pendingOpenConversation = conversationId to accountId
+            return
+        }
+        pendingOpenConversation = null
+        _selectedTab.value = Tab.CHATS
+        _navigateToConversation.value = conv
+    }
 
     // -----------------------------------------------------------------------
     // Unread count — mirrors iOS AppState.unreadCount(for:)
@@ -1200,6 +1240,12 @@ class AppViewModel(
 
         val sorted = newConvs.sortedByDescending { it.lastMessageDate?.time ?: Long.MIN_VALUE }
         _conversations.value = sorted
+
+        // Flush a notification tap that arrived before the list was ready
+        // (cold-start launch): now that conversations exist, open the target.
+        pendingOpenConversation?.let { (convId, acct) ->
+            openConversationById(conversationId = convId, accountId = acct)
+        }
 
         // Kick off async name resolution for any conversation still showing the raw DID.
         for (conv in sorted) {

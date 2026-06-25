@@ -1,4 +1,5 @@
 import { commands } from "../bindings";
+import { invoke } from "@tauri-apps/api/core";
 import type { AvalancheService } from "./AvalancheService";
 import type {
   AccountResult,
@@ -149,6 +150,10 @@ export class DevServerAvalancheService implements AvalancheService {
 
   async deleteIdentity(): Promise<void> {
     await ok(commands.deleteIdentity());
+  }
+
+  async startEventLoop(): Promise<void> {
+    await invoke("start_event_loop");
   }
 
   // ── Projects ───────────────────────────────────────────────────────

@@ -108,7 +108,7 @@ export default function QRScannerView(props: Props) {
         <input
           class="text-input qs-input"
           type="text"
-          placeholder="actnet://... or bare token"
+          placeholder="avalanche://... or bare token"
           value={linkText()}
           onInput={(e) => setLinkText(e.currentTarget.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void validateToken(linkText()); }}

@@ -408,6 +408,11 @@ export class MockAvalancheService implements AvalancheService {
   async leaveServer(): Promise<void> {}
   async deleteIdentity(): Promise<void> {}
 
+  async startEventLoop(): Promise<void> {
+    // Mock mode uses the existing frontend long-poll pattern.
+    // No Rust event loop is needed.
+  }
+
   async fetchProjects(): Promise<ProjectInfoFfi[]> {
     return [
       {

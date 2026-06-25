@@ -8,6 +8,7 @@ import {
 } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { load as loadStore } from "@tauri-apps/plugin-store";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Account, Conversation, InviteInfo, ServerInfo } from "../models";
 import { displayHost } from "../lib/format";
 import { DeliveryStatus, type Message } from "../models/Message";
@@ -41,6 +42,7 @@ interface AppStore {
 
 interface AppContextValue {
   store: AppStore;
+  service: () => AvalancheService;
   setSelectedTab: (tab: "chats" | "network") => void;
   createAccount: (
     serverUrl: string,
@@ -137,8 +139,22 @@ export function AppProvider(props: { children: JSX.Element }) {
   // Event loop lifecycle
   let eventLoopRunning = false;
   let connLoopRunning = false;
+  let eventLoopTimeout: ReturnType<typeof setTimeout> | undefined;
+  let connLoopTimeout: ReturnType<typeof setTimeout> | undefined;
+  let unlistenEvents: UnlistenFn | null = null;
 
   // ── Helpers ────────────────────────────────────────────────────────────────
+
+  /** Centralized access to the active account ID. */
+  function getActiveAccountId(): string {
+    // TODO: multi-account — iterate store.accounts and use the one matching the
+    // currently-selected identity once account switching is implemented.
+    // TODO(robustness): return `null` instead of `""` so callers can
+    // distinguish "no account" from a valid empty-string DID. An empty
+    // string as sentinel could collide with real data in edge cases
+    // (stale event loop after logout).
+    return store.accounts[0]?.id ?? "";
+  }
 
   function getServerUrl(accountId: string): string {
     return (
@@ -477,25 +493,28 @@ export function AppProvider(props: { children: JSX.Element }) {
             : m
         )
       );
-      // Best-effort persist.
-      // TODO: surface save failures to the user (e.g. disk full, IPC error)
-      // rather than silently dropping the message from local history.
-      void service().saveMessage({
-        id: messageId,
-        conversationId,
-        senderDid: senderAccountId,
-        body: text,
-        sentAtMs,
-        editedAtMs: null,
-        readAtMs: sentAtMs,
-        deliveryStatus: DeliveryStatus.sent,
-        editCount: 0,
-        deleted: false,
-        kind: 0,
-        metadata: null,
-        expireTimerSecs: 0,
-        expireAtMs: null,
-      });
+      // Best-effort persist — log failures to console so they are
+      // visible in DevTools but never crash the send path.
+      service()
+        .saveMessage({
+          id: messageId,
+          conversationId,
+          senderDid: senderAccountId,
+          body: text,
+          sentAtMs,
+          editedAtMs: null,
+          readAtMs: sentAtMs,
+          deliveryStatus: DeliveryStatus.sent,
+          editCount: 0,
+          deleted: false,
+          kind: 0,
+          metadata: null,
+          expireTimerSecs: 0,
+          expireAtMs: null,
+        })
+        .catch((err: unknown) => {
+          console.warn("saveMessage failed:", err);
+        });
     } catch {
       setStore("messagesByConversation", conversationId, (msgs) =>
         (msgs ?? []).map((m) =>
@@ -629,38 +648,71 @@ export function AppProvider(props: { children: JSX.Element }) {
       switch (ev.type) {
         case "message": {
           const m = ev.msg;
-          const accountId = store.accounts[0]?.id ?? "";
+          const accountId = getActiveAccountId();
           const conversationId = m.groupId
             ? `group-${m.groupId}`
             : `dm-${accountId}-${m.senderDid}`;
-          const body = new TextDecoder().decode(new Uint8Array(m.plaintext));
-          const msg: Message = {
-            id: crypto.randomUUID(),
-            conversationId,
-            senderAccountId: m.senderDid,
-            body,
-            sentAtMs: m.sentAtMs ?? Date.now(),
-            deliveryStatus: DeliveryStatus.delivered,
-            editCount: 0,
-            isDeleted: false,
-            kind: 0,
-            expireTimerSecs: m.expireTimerSecs,
-          };
-          // TODO: once DevServer mode is wired, reconcile/de-duplicate the
-          // server-delivered copy of an outgoing message against its optimistic
-          // entry (client UUID vs server-assigned id) before appending.
-          setStore("messagesByConversation", conversationId, (prev) => [
-            ...(prev ?? []),
-            msg,
-          ]);
-          // Update conversation preview
-          const convIdx = store.conversations.findIndex(
-            (c) => c.id === conversationId
-          );
-          if (convIdx >= 0) {
-            const previewText = body.length > 100 ? body.slice(0, 100) + "…" : body;
-            setStore("conversations", convIdx, "lastMessage", previewText);
-            setStore("conversations", convIdx, "lastMessageDate", m.sentAtMs ?? Date.now());
+          const senderIsSelf = m.senderDid === accountId;
+
+          if (senderIsSelf && m.sentAtMs !== null) {
+            // Echo of our own outgoing message — update the optimistic entry
+            // in-place by sentAtMs instead of appending a duplicate.
+            // Only match messages that are still in a non-terminal delivery
+            // state (sending/sent); a delivered message is already confirmed
+            // and should not be matched again.
+            setStore("messagesByConversation", conversationId, (prev) =>
+              (prev ?? []).map((existing) =>
+                existing.sentAtMs === m.sentAtMs &&
+                existing.senderAccountId === accountId &&
+                (existing.deliveryStatus === DeliveryStatus.sending ||
+                  existing.deliveryStatus === DeliveryStatus.sent)
+                  ? {
+                      ...existing,
+                      deliveryStatus: DeliveryStatus.delivered,
+                      id: `server-${m.serverId}`,
+                    }
+                  : existing
+              )
+            );
+          } else {
+            // Received from another user — append as a new message.
+            const body = new TextDecoder().decode(new Uint8Array(m.plaintext));
+            const msg: Message = {
+              id: crypto.randomUUID(),
+              conversationId,
+              senderAccountId: m.senderDid,
+              body,
+              sentAtMs: m.sentAtMs ?? Date.now(),
+              deliveryStatus: DeliveryStatus.delivered,
+              editCount: 0,
+              isDeleted: false,
+              kind: 0,
+              expireTimerSecs: m.expireTimerSecs,
+            };
+            setStore("messagesByConversation", conversationId, (prev) => [
+              ...(prev ?? []),
+              msg,
+            ]);
+            // Update conversation preview
+            const convIdx = store.conversations.findIndex(
+              (c) => c.id === conversationId
+            );
+            if (convIdx >= 0) {
+              const previewText =
+                body.length > 100 ? body.slice(0, 100) + "…" : body;
+              setStore(
+                "conversations",
+                convIdx,
+                "lastMessage",
+                previewText
+              );
+              setStore(
+                "conversations",
+                convIdx,
+                "lastMessageDate",
+                m.sentAtMs ?? Date.now()
+              );
+            }
           }
           break;
         }
@@ -685,9 +737,11 @@ export function AppProvider(props: { children: JSX.Element }) {
                 case DeliveryStatus.failed:    return -1; // handled separately
               }
             }
-            // TODO: range-guard the cast (as in messageFromFfi lines 97-99)
-            // so new backend variants don't silently produce undefined from rank().
-            const incoming = update.deliveryStatus as DeliveryStatus;
+            const incoming = (
+              update.deliveryStatus >= 0 && update.deliveryStatus <= 4
+                ? update.deliveryStatus
+                : DeliveryStatus.sent
+            ) as DeliveryStatus;
             setStore(
               "messagesByConversation",
               update.conversationId,
@@ -712,6 +766,84 @@ export function AppProvider(props: { children: JSX.Element }) {
           }
           break;
         }
+        case "messageEdited": {
+          // TODO(robustness): matching solely on senderAccountId+sentAtMs can
+          // collide if two messages share the same millisecond timestamp.
+          // Additionally match on serverId once echo reconciliation assigns it.
+          const edited = ev as Extract<IncomingEvent, { type: "messageEdited" }>;
+          const cid = edited.conversation_id ?? "";
+          if (cid && store.messagesByConversation[cid]) {
+            setStore("messagesByConversation", cid, (prev) =>
+              (prev ?? []).map((m) =>
+                m.senderAccountId === edited.author_did &&
+                m.sentAtMs === edited.sent_at_ms
+                  ? {
+                      ...m,
+                      body: edited.new_body,
+                      editedAtMs: edited.edited_at_ms,
+                      editCount: m.editCount + 1,
+                    }
+                  : m
+              )
+            );
+          } else {
+            // Messages not yet loaded or no conversation_id — reload to
+            // pick up the edit from the store.
+            loadedConversations.value = false;
+            void loadConversationsFromStore();
+          }
+          break;
+        }
+        case "messageDeleted": {
+          const del = ev as Extract<IncomingEvent, { type: "messageDeleted" }>;
+          const cid = del.conversation_id ?? "";
+          if (cid && store.messagesByConversation[cid]) {
+            setStore("messagesByConversation", cid, (prev) =>
+              (prev ?? []).map((m) =>
+                m.senderAccountId === del.author_did &&
+                m.sentAtMs === del.sent_at_ms
+                  ? { ...m, isDeleted: true }
+                  : m
+              )
+            );
+          } else {
+            // Messages not yet loaded or no conversation_id — reload to
+            // pick up the deletion tombstone from the store.
+            loadedConversations.value = false;
+            void loadConversationsFromStore();
+          }
+          break;
+        }
+        case "reactionUpdated": {
+          // TODO: render reactions on messages. For now, reload conversations
+          // to refresh any cached reaction data.
+          // TODO(robustness): concurrent reloads race — see messagesExpired.
+          loadedConversations.value = false;
+          void loadConversationsFromStore();
+          break;
+        }
+        case "messagesExpired": {
+          const exp = ev as Extract<IncomingEvent, { type: "messagesExpired" }>;
+          // TODO(robustness): `setStore` replaces the entire message array,
+          // which erases optimistic/local-only messages not yet persisted.
+          // Merge server data with existing store entries instead.
+          for (const cid of exp.conversation_ids) {
+            loadedMessages.delete(cid);
+            void service()
+              .loadMessages(cid)
+              .then((rows) => {
+                const messages = rows.map(messageFromFfi);
+                setStore("messagesByConversation", cid, messages);
+              })
+              .catch(() => {});
+          }
+          // TODO(robustness): if two events arrive back-to-back, this
+          // launches two concurrent `loadConversationsFromStore()` calls
+          // whose store updates can interleave. Dedup or serialize reloads.
+          loadedConversations.value = false;
+          void loadConversationsFromStore();
+          break;
+        }
         case "groupInvite":
         case "groupMetadataChanged":
         case "storageSynced":
@@ -719,8 +851,10 @@ export function AppProvider(props: { children: JSX.Element }) {
           void loadConversationsFromStore();
           break;
         default:
-          // TODO: handle MessageEdited, MessageDeleted, ReactionUpdated,
-          // and MessagesExpired events once the mock/backend emits them.
+          console.warn(
+            "handleIncomingEvents: unknown event type",
+            (ev as { type: string }).type
+          );
           break;
       }
     }
@@ -729,43 +863,81 @@ export function AppProvider(props: { children: JSX.Element }) {
   function startEventLoop() {
     if (eventLoopRunning) return;
     eventLoopRunning = true;
-    const loop = async () => {
-      if (!eventLoopRunning) return;
-      try {
-        const events = await service().nextEvents();
-        handleIncomingEvents(events);
-        if (eventLoopRunning) void loop();
-      } catch {
-        // service errored — back off before retrying to avoid tight-spin IPC storm
-        if (eventLoopRunning) {
-          // TODO: use an abortable delay (or clearTimeout/flag) so that
-          // stopPolling() during the 1s backoff doesn't spawn a second
-          // concurrent event loop via the stale timer.
-          await new Promise<void>((r) => setTimeout(r, 1000));
-          void loop();
+
+    if (store.serviceMode === ServiceMode.DevServer) {
+      // Kick off the Rust-side background event loop, then register a Tauri
+      // event listener for push events.
+      //
+      // TODO(robustness): the Rust thread may emit events before the
+      // `listen()` promise resolves — those events are silently dropped.
+      // Register the listener first (e.g. in onMount), or start the Rust
+      // thread only after the listener is confirmed active.
+      //
+      // TODO(robustness): if stopPolling() / startPolling() cycles while
+      // `listen()` is still pending, fn1 can leak and double-process events.
+      // A single persistent listener registered in onMount would avoid this.
+      void service().startEventLoop().catch(() => {
+        // If the command fails (e.g. no active account), the listener below
+        // will never fire — the user sees no events, which is correct.
+      });
+
+      listen<IncomingEvent[]>("avalanche-event", (ev) => {
+        if (!eventLoopRunning) return; // stale listener after stopPolling
+        handleIncomingEvents(ev.payload);
+      })
+        .then((fn) => {
+          if (eventLoopRunning) {
+            unlistenEvents = fn;
+          } else {
+            // stopPolling was called while listen was still pending —
+            // clean up immediately so the listener doesn't leak.
+            fn();
+          }
+        })
+        .catch(() => { /* Tauri not available */ });
+    } else {
+      // Mock mode: existing polling pattern.  MockService.nextEvents() parks
+      // its Promise when there are no events, so this loop is effectively
+      // parked until an echo-reply arrives.
+      const loop = async () => {
+        if (!eventLoopRunning) return;
+        try {
+          const events = await service().nextEvents();
+          handleIncomingEvents(events);
+          if (eventLoopRunning) void loop();
+        } catch {
+          if (eventLoopRunning) {
+            eventLoopTimeout = setTimeout(() => void loop(), 1000);
+          }
         }
-      }
-    };
-    void loop();
+      };
+      void loop();
+    }
   }
 
   function startConnectionLoop() {
     if (connLoopRunning) return;
-    const accountId = store.accounts[0]?.id;
+    const accountId = getActiveAccountId();
     if (!accountId) return;
     connLoopRunning = true;
 
-    const loop = async (last: ConnectionState) => {
+    const BACKOFF_MS = 1000;
+    const BACKOFF_CAP_MS = 30000;
+
+    const loop = async (last: ConnectionState, delayMs: number) => {
       if (!connLoopRunning) return;
       try {
         const next = await service().waitForConnectionStateChange(last);
         setStore("connectionStates", accountId, next);
-        if (connLoopRunning) void loop(next);
+        // Reset backoff on successful state change.
+        if (connLoopRunning) void loop(next, BACKOFF_MS);
       } catch {
-        // TODO: retry with backoff on transient failures instead of
-        // silently killing the connection loop. Also reset connLoopRunning
-        // if the initial connectionState() call rejects so the loop isn't
-        // permanently deadlocked.
+        if (connLoopRunning) {
+          connLoopTimeout = setTimeout(() => {
+            const nextDelay = Math.min(delayMs * 2, BACKOFF_CAP_MS);
+            void loop(last, nextDelay);
+          }, delayMs);
+        }
       }
     };
 
@@ -773,10 +945,12 @@ export function AppProvider(props: { children: JSX.Element }) {
       .connectionState()
       .then((state) => {
         setStore("connectionStates", accountId, state);
-        void loop(state);
+        void loop(state, BACKOFF_MS);
       })
-      // TODO: reset connLoopRunning on rejection so the loop can recover.
-      .catch(() => {});
+      .catch(() => {
+        // Reset connLoopRunning so the loop can be restarted on retry.
+        connLoopRunning = false;
+      });
   }
 
   function startPolling() {
@@ -787,6 +961,18 @@ export function AppProvider(props: { children: JSX.Element }) {
   function stopPolling() {
     eventLoopRunning = false;
     connLoopRunning = false;
+    if (eventLoopTimeout) {
+      clearTimeout(eventLoopTimeout);
+      eventLoopTimeout = undefined;
+    }
+    if (connLoopTimeout) {
+      clearTimeout(connLoopTimeout);
+      connLoopTimeout = undefined;
+    }
+    if (unlistenEvents) {
+      unlistenEvents();
+      unlistenEvents = null;
+    }
   }
 
   onCleanup(stopPolling);
@@ -813,6 +999,7 @@ export function AppProvider(props: { children: JSX.Element }) {
 
   const ctx: AppContextValue = {
     store,
+    service,
     setSelectedTab: (tab) => setStore("selectedTab", tab),
     createAccount,
     restoreAccounts,

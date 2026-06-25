@@ -1817,7 +1817,9 @@ final class AppState: ObservableObject {
             NotificationPresenter.present(
                 message: message,
                 conversation: conv,
-                senderDisplayName: displayName(for: senderDid, accountId: accountId),
+                // resolvedName (not displayName) so an unresolved sender shows
+                // "Unknown" rather than leaking the raw DID into the banner.
+                senderDisplayName: resolvedName(for: senderDid, accountId: accountId),
                 appState: self
             )
         }

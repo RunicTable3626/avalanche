@@ -49,6 +49,10 @@ fun QRScannerView(
     val scope = rememberCoroutineScope()
 
     fun handle(value: String) {
+        // Re-entrancy guard: the camera fires repeatedly while held over a code,
+        // so without this a single scan launches several parallel validation
+        // coroutines, each calling onInviteToken -> duplicate nav pushes.
+        if (isValidating) return
         // Validate that it looks like a go.theavalanche.net deep link.
         // Mirrors iOS: guard let url = URL(string: value), AppState.isDeepLink(url)
         val isDeepLink = value.contains("go.theavalanche.net")

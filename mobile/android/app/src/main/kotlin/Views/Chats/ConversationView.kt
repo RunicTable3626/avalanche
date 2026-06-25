@@ -119,6 +119,15 @@ fun ConversationView(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
+    // Gate the "auto-scroll to bottom on new message" effect until initial
+    // positioning (scroll to first unread / bottom) has run. Without this, the
+    // async 0 -> N population of `messages` on load is mistaken for a new
+    // message and animates to the bottom, then 100ms later the initial effect
+    // jumps to the first unread — a visible flash-then-jump. Resets per
+    // conversation. (iOS gets this for free: SwiftUI .onChange(of:) doesn't
+    // fire on initial appearance; Compose's LaunchedEffect does.)
+    var initialScrollDone by remember(conversation.id) { mutableStateOf(false) }
+
     // Human edit/delete-for-everyone window (docs/36): 24h from send.
     val editWindowMs: Long = 24 * 60 * 60 * 1000L
 
@@ -262,6 +271,7 @@ fun ConversationView(
         } else if (msgs.isNotEmpty()) {
             listState.scrollToItem(msgs.size - 1)
         }
+        initialScrollDone = true
     }
 
     // onDisappear: clear current conversation id.
@@ -273,10 +283,11 @@ fun ConversationView(
         }
     }
 
-    // Auto-scroll when new messages arrive.
+    // Auto-scroll when new messages arrive — but only after initial positioning,
+    // so the load-time population isn't treated as an incoming message.
     val messageCount = messages.size
     LaunchedEffect(messageCount) {
-        if (messageCount > 0) {
+        if (initialScrollDone && messageCount > 0) {
             listState.animateScrollToItem(messageCount - 1)
             viewModel.markAllMessagesRead(
                 conversationId = conversation.id,
@@ -360,7 +371,7 @@ fun ConversationView(
             verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.Bottom),
         ) {
             item { Spacer(Modifier.size(8.dp)) }
-            itemsIndexed(messages, key = { _, m -> m.sentAtMs }) { index, message ->
+            itemsIndexed(messages, key = { _, m -> m.id }) { index, message ->
                 if (message.isSystemEvent) {
                     // Group membership/metadata event (docs/03 §3.6) —
                     // a centered grey line, not a chat bubble.

@@ -69,7 +69,11 @@ object PushManager {
      * fresh app launches (via [requestPermissionAndRegister]).
      */
     fun didReceiveToken(token: String, appViewModel: AppViewModel) {
-        AppLog.info("PushManager", "FCM registration token: $token")
+        // Log only a short prefix — the full FCM token is a capability (anyone
+        // holding it can trigger push wakeups to this device) and must not leak
+        // into logcat / bug reports.
+        val tokenPreview = if (token.length > 8) "${token.take(8)}…" else token
+        AppLog.info("PushManager", "FCM registration token: $tokenPreview")
 
         // RELAY_URL is baked into BuildConfig from a Gradle property / env var /
         // default (see app/build.gradle.kts), mirroring how iOS reads it from Info.plist.

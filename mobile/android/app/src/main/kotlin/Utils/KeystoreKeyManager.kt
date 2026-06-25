@@ -1,8 +1,10 @@
 package net.theavalanche.app
 
 import android.content.Context
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
 import android.util.Base64
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -126,16 +128,46 @@ object KeystoreKeyManager {
             ?.let { return it.secretKey }
 
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-        val spec = KeyGenParameterSpec.Builder(
+
+        // API 28+: bind the key to the device being unlocked (approximating iOS
+        // kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly) and prefer StrongBox
+        // (the dedicated secure element). StrongBox failures surface at
+        // generateKey() time, so fall back to a TEE-backed key on devices
+        // without a secure element. Below API 28 neither flag exists.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                generator.init(buildKeySpec(strongBox = true))
+                return generator.generateKey()
+            } catch (e: StrongBoxUnavailableException) {
+                generator.init(buildKeySpec(strongBox = false))
+                return generator.generateKey()
+            }
+        }
+
+        generator.init(buildKeySpec(strongBox = false))
+        return generator.generateKey()
+    }
+
+    /**
+     * Build the AES-256-GCM [KeyGenParameterSpec]. On API 28+ the key is bound
+     * to the device being unlocked and, when [strongBox] is set, backed by the
+     * StrongBox secure element.
+     */
+    private fun buildKeySpec(strongBox: Boolean): KeyGenParameterSpec {
+        val builder = KeyGenParameterSpec.Builder(
             KEYSTORE_ALIAS,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
         )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(KEY_SIZE_BITS)
-            .build()
-        generator.init(spec)
-        return generator.generateKey()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            builder.setUnlockedDeviceRequired(true)
+            if (strongBox) {
+                builder.setIsStrongBoxBacked(true)
+            }
+        }
+        return builder.build()
     }
 
     // -------------------------------------------------------------------------

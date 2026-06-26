@@ -214,3 +214,71 @@ terminal states (`failed`) separately rather than by numeric magnitude.
 Aggregate/derived connection state must not default to `connected` when there are zero
 connections (e.g. no account yet, or just after logout) — return a non-connected state
 so the UI doesn't show a green indicator before any connection exists.
+
+### Debugging best practices (from the Day 3 trenches)
+
+#### Event loop: dedicated thread, never the Tauri sync pool
+
+`AppCore::next_events()` blocks until events arrive. Always call it from
+`start_event_loop`'s dedicated `std::thread` — never invoke it as a sync Tauri
+command from the frontend. A blocking sync command occupies a Tauri thread-pool
+thread; if all threads block on `next_events()`, the entire command surface
+freezes.
+
+```typescript
+// ✅ Right: dedicated OS thread
+void service().startEventLoop();
+
+// ❌ Wrong: starves the pool — all sync commands queue behind this
+setInterval(() => void service().nextEvents(), 2000);
+```
+
+#### `receiveMessages()` is a REST inbox fetch, NOT live push
+
+`AppCore::receive_messages()` calls `client.fetch_messages()` — it polls the
+server's REST inbox. It does NOT return live WebSocket messages. Live events
+flow through `next_events()` → event channel → `handle.emit()` → frontend
+listener. The two APIs are not interchangeable. **Always read the implementation
+before wiring an API — names lie.**
+
+#### Ordering: listen before starting the decrypt thread
+
+The Rust thread emits `avalanche-event` events. If the thread starts before
+the frontend listener is registered, events are silently dropped. Register
+the consumer first, confirm it's active, then start the producer.
+
+```
+// ① Register listener
+listen("avalanche-event", handler).then((fn) => {
+    // ② Listener active — now safe to start the decrypt thread
+    service().startEventLoop();
+    // ③ Drain any messages that arrived in the gap
+    service().receiveMessages();
+});
+```
+
+#### Incoming DMs need in-memory conversation creation
+
+When a live message arrives for a conversation not yet in the store, reloading
+from the database won't help — the message hasn't been persisted yet (save is
+best-effort, async). Create the conversation entry in-memory directly, or the
+message silently disappears.
+
+#### Unicode in prompts breaks JSON
+
+Em dashes (`—`), curly quotes (`‘` `’`), and other non-ASCII
+characters in system prompts silently break `JSON.stringify()`. Some providers
+reject these with "invalid unicode code point". Use ASCII-safe alternatives
+(`--`, `'`, `"`).
+
+#### Model response format varies by provider
+
+Don't assume `content[0].text`. DeepSeek v4 models return a `"thinking"` block
+first. Find the first block with `type: "text"`; fall back to `thinking` text
+if no text block is present. Defensive parsing over positional indexing — the
+same fix applies to any LLM backend swap.
+
+#### `.env` reload won't override existing env vars
+
+`dev.py` uses `os.environ.setdefault()` which skips variables already in the
+environment. Changing a value in `.env` requires a fresh shell.

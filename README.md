@@ -75,12 +75,11 @@ This uses Docker to install a few dev prereqs including a Postgres database serv
 See **[desktop/README.md](desktop/README.md)** for prerequisites and setup instructions. Short version:
 
 ```bash
+make dev-all         # from repo root — starts the backend
 cd desktop
-npm install
+npm ci
 npm run tauri dev
 ```
-
-No server needed — the desktop app runs in mock mode by default.
 
 ### Run the iOS app on simulator
 

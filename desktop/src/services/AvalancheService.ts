@@ -89,6 +89,9 @@ export interface AvalancheService {
   // Event loop lifecycle
   startEventLoop(): Promise<void>;
 
+  // Session management
+  clearSession(): Promise<void>;
+
   // Projects
   fetchProjects(): Promise<import("../bindings").ProjectInfoFfi[]>;
   requestProjectToken(projectUrl: string): Promise<string>;

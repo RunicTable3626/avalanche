@@ -156,6 +156,10 @@ export class DevServerAvalancheService implements AvalancheService {
     await invoke("start_event_loop");
   }
 
+  async clearSession(): Promise<void> {
+    await invoke("clear_session");
+  }
+
   // ── Projects ───────────────────────────────────────────────────────
 
   async fetchProjects(): Promise<import("../bindings").ProjectInfoFfi[]> {

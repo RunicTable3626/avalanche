@@ -1,100 +1,46 @@
-# Avalanche Desktop — Dev Setup
+# Avalanche Desktop
 
-This is the Tauri desktop app (SolidJS frontend + Rust backend). It currently
-runs in **Mock mode** — no real server, no real crypto. All data is seeded
-in-memory so you can demo the UI without a running homeserver.
-
----
+The Avalanche desktop app — encrypted messaging + organizing tools, built with [Tauri 2.x](https://tauri.app/) and [Solid](https://www.solidjs.com/).
 
 ## Prerequisites
 
-### All platforms
+All of these must be on your `PATH`:
 
-| Tool | Version | Install |
-|------|---------|---------|
-| **Rust** | stable (1.75+) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
-| **Node.js** | 18+ | [nodejs.org](https://nodejs.org) or `nvm install --lts` |
-| **npm** | 9+ | bundled with Node.js |
+| Tool | Why |
+|------|-----|
+| **Node.js >= 26** | Frontend runtime (pinned to 26.3.0 in `node/.node-version`) |
+| **Rust** (stable) | Backend (Tauri commands link against `app-core`) |
+| **Docker** | Postgres via `docker compose` |
+| **Python 3.11+** (as `python3`) | Dev scripts (`dev.py`, `dev-invite.py`) |
+| **make** | Build orchestration |
+| **fnm** | Node version manager (dev.py invokes it to run testbot/adminbot) |
+| **WebView2** | Windows only — included with Windows 11; on 10 install the [evergreen runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) |
 
-### Windows (additional)
+**Windows note:** you need `python3` on PATH. If only `python` is installed, copy
+`C:\Python314\python.exe` to `C:\Python314\python3.exe`, or put a shim at
+`~/.cargo/bin/python3` that does `exec python "$@"`.
 
-- **Visual Studio Build Tools 2022** with the "Desktop development with C++"
-  workload — needed by Rust's MSVC toolchain and `tauri-winres` (embeds the
-  app icon into the `.exe`).
-- **OpenSSL** — `choco install openssl` (as administrator).
-- **WebView2** — pre-installed on Windows 10 (Nov 2020+) and Windows 11.
-  If missing: [download from Microsoft](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
-
-### macOS (additional)
-
-- **Xcode Command Line Tools**: `xcode-select --install`
-- **OpenSSL** — `brew install openssl`
-- WebKit ships with macOS — no extra WebView library needed.
-
-### Linux (additional, Ubuntu/Debian)
+## Quick start
 
 ```bash
-sudo apt update && sudo apt install -y \
-  libwebkit2gtk-4.1-dev \
-  libssl-dev \
-  libgtk-3-dev \
-  libayatana-appindicator3-dev \
-  librsvg2-dev \
-  patchelf
-```
-
-For other distros see the [Tauri Linux prerequisites](https://tauri.app/start/prerequisites/#linux).
-
----
-
-## Running the dev build
-
-```bash
-# From the repo root
 cd desktop
-npm ci             # first time only
-npm run tauri dev  # starts Vite + Rust dev server, opens the window
+npm ci
+make dev-all          # from repo root — starts Postgres, homeserver, testbot, adminbot
+npm run tauri dev     # opens the Tauri window
 ```
 
-The first `npm run tauri dev` compiles the full Rust workspace (~5–15 min
-depending on your machine). Subsequent runs are incremental and start in
-seconds.
+Server at `localhost:3000`, testbot at `localhost:3001`, desktop at `localhost:1420`.
 
----
+## Signing up
 
-## What you'll see
+```bash
+make dev-invite       # prints an invite link — paste it on the onboarding screen
+```
 
-The app opens in **Mock mode** — no server required:
+## Testbot AI
 
-1. **Splash screen** — click "Enter Invite Link" and paste any string (it's
-   ignored; the mock creates a local account automatically).
-2. **Chat list** — three seeded conversations: General, Announcements (group
-   chats), and a DM with Jamie (Organizer).
-3. **Messaging** — type a message and press Enter. The other participant
-   echoes it back after ~1 second so you can see the full send/receive flow.
-4. **Sign out** — button at the bottom of the sidebar returns to the splash
-   screen.
+The testbot echoes by default. To get real AI responses, add credentials to `.env` at the repo root (any Anthropic-compatible endpoint works). Restart `make dev-all` after editing.
 
----
+## Mock mode
 
-## Platform notes
-
-| Platform | Status | Notes |
-|----------|--------|-------|
-| **Windows** | ✅ Tested | Requires MSVC + WebView2 (see above) |
-| **macOS** | ✅ Should work | Requires Xcode Command Line Tools |
-| **Linux** | ✅ Should work | Install WebKit/GTK deps above |
-
-Icons for all platforms (`.ico`, `.icns`, `.png`) are committed in
-`src-tauri/icons/` and were generated from `design/app-icon-1024.png` via
-`npx tauri icon`. Regenerate them if the source image changes.
-
----
-
-## Switching to real-server mode
-
-Mock mode is the default. To point at a real homeserver, open
-`src/state/AppContext.tsx` and change both `ServiceMode.Mock` occurrences to
-`ServiceMode.DevServer`, then restart. The Tauri commands in
-`src-tauri/src/lib.rs` delegate directly to `app-core` — create an account
-via the onboarding flow to persist your identity in a local SQLCipher database.
+Click the ⚙ gear in the sidebar and select **Mock** — seeded in-memory data, no server needed.

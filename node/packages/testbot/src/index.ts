@@ -31,6 +31,8 @@ const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 interface Env {
   homeserverUrl: string;
   anthropicApiKey?: string;
+  anthropicAuthToken?: string;
+  anthropicBaseUrl: string;
   bindHost: string;
   bindPort: number;
   logLevel: string;
@@ -57,6 +59,8 @@ function readEnv(): Env {
   return {
     homeserverUrl: process.env.HOMESERVER_URL ?? "http://localhost:3000",
     anthropicApiKey: process.env.ANTHROPIC_API_KEY || undefined,
+    anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN || undefined,
+    anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com",
     bindHost,
     bindPort,
     basePath,
@@ -136,9 +140,6 @@ const indexHtml = (basePath: string) => `<!DOCTYPE html>
         h1 { font-size: 24px; }
         button { font-size: 18px; padding: 12px 24px; cursor: pointer; background: #007AFF; color: white; border: none; border-radius: 8px; }
         button:disabled { background: #999; }
-        a.openbtn { display: inline-block; font-size: 18px; padding: 12px 24px; margin-top: 16px; background: #007AFF; color: white; border-radius: 8px; text-decoration: none; }
-        /* Must out-specify a.openbtn (0-1-1), so scope the hide rule to the element+class. */
-        a.openbtn.hidden { display: none; }
         #status { margin-top: 16px; color: #666; }
     </style>
 </head>
@@ -147,10 +148,10 @@ const indexHtml = (basePath: string) => `<!DOCTYPE html>
     <p>Tap below to start a conversation with an AI chatbot. The bot will send you an encrypted DM.</p>
     <button id="textme" onclick="textMe()">Text Me</button>
     <div id="status"></div>
-    <a id="openlink" class="openbtn hidden" href="#">Click to open the conversation</a>
     <script>
         const params = new URLSearchParams(window.location.search);
-        const token = params.get('token');
+        const hashParams = new URLSearchParams(window.location.hash.slice(1));
+        const token = hashParams.get('token') ?? params.get('token');
 
         async function textMe() {
             const btn = document.getElementById('textme');
@@ -173,16 +174,8 @@ const indexHtml = (basePath: string) => `<!DOCTYPE html>
                     return;
                 }
                 const data = await resp.json();
-                status.textContent = 'Bot created!';
-                // Reveal a real link for the user to tap. A genuine tap is the
-                // user gesture both platforms require to hand a verified link off
-                // to the app (Android App Link / iOS Universal Link); a JS
-                // window.location after the await has no live gesture, so Chrome
-                // keeps it in the browser. The tap fixes that on both platforms
-                // with one code path — no intent:// / UA sniffing needed.
-                const link = document.getElementById('openlink');
-                link.href = 'https://go.theavalanche.net/conversation/' + data.bot.did;
-                link.classList.remove('hidden');
+                status.textContent = 'Bot ' + data.bot.did + ' sent you a DM! Check your Chats tab.';
+                btn.disabled = false;
             } catch (e) {
                 status.textContent = 'Error: ' + e.message;
                 btn.disabled = false;
@@ -275,7 +268,7 @@ async function runBotLoop(
     const displayName = await core.contactDisplayName(msg.senderDid);
 
     conversation.push({ role: "user", content: msg.body });
-    const response = await generateResponse(env.anthropicApiKey, conversation, displayName || undefined);
+    const response = await generateResponse(env, conversation, displayName || undefined);
     conversation.push({ role: "assistant", content: response });
 
     console.log(`testbot: bot ${botDid} >>> to ${msg.senderDid}: ${JSON.stringify(response)}`);
@@ -296,22 +289,33 @@ async function runBotLoop(
  * to echoing the user's last message so the demo still works offline.
  */
 async function generateResponse(
-  apiKey: string | undefined,
+  env: Env,
   conversation: ConversationMessage[],
   userDisplayName: string | undefined,
 ): Promise<string> {
+  const apiKey = env.anthropicApiKey ?? env.anthropicAuthToken;
   if (!apiKey) return echoResponse(conversation);
 
+  const model = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+    ?? process.env.ANTHROPIC_MODEL
+    ?? HAIKU_MODEL;
+
   let systemPrompt =
-    "You are a friendly chatbot on the actnet platform. Keep your responses " +
-    "concise and conversational. You're chatting with an activist — be " +
-    "supportive and helpful.";
+    "You are a friendly chatbot on the Avalanche platform. The user you are " +
+    "chatting with is already using the Avalanche app -- do not tell them to " +
+    "install or download anything. Keep your responses concise and " +
+    "conversational. Be supportive and helpful.";
   if (userDisplayName) {
-    systemPrompt += ` The user's display name is ${userDisplayName}.`;
+    // Sanitize: strip/replace characters that break JSON or enable prompt
+    // injection.  Control chars, curly quotes, and em dashes are common in
+    // display names set from mobile keyboards.
+    const safe = userDisplayName.replace(/[ --–—‘’“”]/g, "'");
+    systemPrompt += ` The user's display name is ${safe}.`;
   }
 
+  console.log(`testbot: API call model=${model} url=${env.anthropicBaseUrl}/v1/messages`);
   try {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    const resp = await fetch(`${env.anthropicBaseUrl}/v1/messages`, {
       method: "POST",
       headers: {
         "x-api-key": apiKey,
@@ -319,18 +323,29 @@ async function generateResponse(
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: HAIKU_MODEL,
+        model,
         max_tokens: 1024,
         system: systemPrompt,
         messages: conversation.map((m) => ({ role: m.role, content: m.content })),
       }),
     });
     if (!resp.ok) {
-      console.error(`testbot: claude API error ${resp.status}: ${await resp.text()}`);
-      return echoResponse(conversation);
+      const errBody = await resp.text();
+      console.error(`testbot: claude API error ${resp.status}: ${errBody}`);
+      return `(API error ${resp.status}: ${errBody.slice(0, 200)})`;
     }
-    const body = (await resp.json()) as { content?: Array<{ text?: string }> };
-    return body.content?.[0]?.text ?? "I'm having trouble thinking right now. Try again?";
+    const body = (await resp.json()) as { content?: Array<{ type?: string; text?: string; thinking?: string }> };
+    // Some models (deepseek-v4-*) return a "thinking" block first; skip
+    // those and use the first "text" block.  Fall back to thinking text
+    // if no text block is present.
+    const textBlock = body.content?.find((b) => b.type === "text");
+    const thinkingBlock = body.content?.find((b) => b.type === "thinking");
+    const text = textBlock?.text ?? thinkingBlock?.thinking;
+    if (!text) {
+      console.error("testbot: unexpected API response shape:", JSON.stringify(body).slice(0, 200));
+      return "(Unexpected API response — check logs)";
+    }
+    return text;
   } catch (e) {
     console.error(`testbot: claude API request failed: ${(e as Error).message}`);
     return echoResponse(conversation);
@@ -385,8 +400,8 @@ function main(): void {
   const env = readEnv();
   initLogging(env.logLevel);
 
-  if (!env.anthropicApiKey) {
-    console.warn("testbot: ANTHROPIC_API_KEY not set — bots will echo messages instead of using Claude");
+  if (!env.anthropicApiKey && !env.anthropicAuthToken) {
+    console.warn("testbot: ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN not set — bots will echo messages instead of using Claude");
   }
 
   const server = createServer((req, res) => {

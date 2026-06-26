@@ -77,6 +77,7 @@ pub fn run() {
             unblock_contact,
             leave_server,
             delete_identity,
+            clear_session,
             fetch_projects,
             request_project_token,
             validate_invite,
@@ -446,6 +447,22 @@ fn delete_identity(state: tauri::State<'_, AppState>) -> Result<(), String> {
     // Clear session state regardless of result — identity is gone either way.
     *state.app.lock().map_err(|e| format!("lock poisoned: {}", e))? = None;
     result
+}
+
+// ── Session management ─────────────────────────────────────────────────────────
+
+/// Clears the active session: cancels the background event loop and drops the
+/// AppCore handle. Called by the frontend on logout / mode-switch so the old
+/// `Arc<AppCore>` is not reused by a subsequent `start_event_loop` call from a
+/// stale or cleared state.
+#[tauri::command]
+#[specta::specta]
+fn clear_session(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // Cancel the background event loop by bumping the generation counter,
+    // then drop the AppCore handle so `get_app` returns "no account".
+    state.event_loop_gen.fetch_add(1, Ordering::SeqCst);
+    *state.app.lock().map_err(|e| format!("lock poisoned: {}", e))? = None;
+    Ok(())
 }
 
 // ── Projects ──────────────────────────────────────────────────────────────────

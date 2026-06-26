@@ -43,6 +43,9 @@ export default function MainLayout(props: RouteSectionProps): JSX.Element {
           <NavLink item={item} />
         ))}
         <div class="sidebar-spacer" />
+        <A href="/settings" class="sidebar-settings-link" aria-label="Settings" title="Settings">
+          <span>⚙</span>
+        </A>
         <button class="logout-btn" onClick={logout} title="Sign out">
           <span>↩</span>
           <span class="logout-label">Sign out</span>

@@ -36,6 +36,7 @@ interface AppStore {
   messagesByConversation: Record<string, Message[]>;
   connectionStates: Record<string, ConnectionState>;
   pendingInviteToken: string | null;
+  serverUrl: string;
 }
 
 // ── Context value ─────────────────────────────────────────────────────────────
@@ -53,6 +54,8 @@ interface AppContextValue {
   restoreAccounts: () => Promise<void>;
   logout: () => void;
   switchMode: (mode: ServiceMode) => void;
+  serverUrl: () => string;
+  setServerUrl: (url: string) => void;
   joinServer: (
     serverUrl: string,
     serverName: string,
@@ -114,16 +117,17 @@ export function AppProvider(props: { children: JSX.Element }) {
   const [store, setStore] = createStore<AppStore>({
     accounts: [],
     isOnboarding: true,
-    serviceMode: ServiceMode.Mock,
+    serviceMode: ServiceMode.DevServer,
     selectedTab: "chats",
     conversations: [],
     messagesByConversation: {},
     connectionStates: {},
     pendingInviteToken: null,
+    serverUrl: "http://localhost:3000",
   });
 
   const [service, setService] = createSignal<AvalancheService>(
-    makeService(ServiceMode.Mock)
+    makeService(ServiceMode.DevServer)
   );
 
   // Reactive display-name cache: reads are tracked by Solid so components
@@ -157,6 +161,11 @@ export function AppProvider(props: { children: JSX.Element }) {
   }
 
   function getServerUrl(accountId: string): string {
+    // Uses `servers[0]` — the first server is the one the account was created
+    // with / joined first.  There is no `isCurrent` field on ServerInfo (the
+    // original code that referenced it was a bug that silently returned "").
+    // TODO(multi-server): pick by a "current server" flag once multi-server
+    // account management is implemented.
     return (
       store.accounts
         .find((a) => a.id === accountId)
@@ -206,18 +215,37 @@ export function AppProvider(props: { children: JSX.Element }) {
     } catch {}
   }
 
+  async function persistServerUrl(url: string) {
+    try {
+      const s = await loadStore("avalanche.json");
+      await s.set("serverUrl", url);
+      await s.save();
+    } catch {}
+  }
+
+  function setServerUrl(url: string) {
+    setStore("serverUrl", url);
+    void persistServerUrl(url);
+  }
+
   // ── Init: read persisted mode on mount ───────────────────────────────────
 
   void (async () => {
     try {
       const s = await loadStore("avalanche.json");
       const savedMode = await s.get<string>("serviceMode");
-      if (
-        savedMode === ServiceMode.Mock ||
-        savedMode === ServiceMode.DevServer
-      ) {
-        setStore("serviceMode", savedMode as ServiceMode);
-        setService(makeService(savedMode as ServiceMode));
+      const savedServerUrl = await s.get<string>("serverUrl");
+      // Restore persisted mode, defaulting to DevServer (the primary dev
+      // target).  Users who previously switched to Mock in DevSettingsView
+      // will get Mock back on restart.
+      const mode =
+        savedMode === ServiceMode.Mock || savedMode === ServiceMode.DevServer
+          ? (savedMode as ServiceMode)
+          : ServiceMode.DevServer;
+      setStore("serviceMode", mode);
+      setService(makeService(mode));
+      if (savedServerUrl != null) {
+        setStore("serverUrl", savedServerUrl);
       }
     } catch {}
   })();
@@ -330,6 +358,11 @@ export function AppProvider(props: { children: JSX.Element }) {
   }
 
   function resetSession() {
+    // Notify the Rust backend to drop the old AppCore handle and cancel the
+    // background event loop before clearing frontend state.  This prevents
+    // the stale Arc<AppCore> from being reused by a subsequent startEventLoop
+    // call (see T38 / clear_session).
+    service().clearSession().catch(() => {});
     // Block restoreAccounts from re-entering while we clear persisted state.
     // Otherwise SplashView.onMount fires restoreAccounts before persistAccounts([])
     // completes, finding stale accounts and auto-signing-in — undoing the logout.
@@ -384,6 +417,20 @@ export function AppProvider(props: { children: JSX.Element }) {
         ...prev,
         { id: serverUrl, name: serverName, url: serverUrl, displayHost: displayHost(serverUrl, serverName) },
       ]);
+      // Persist the new server so it survives restart.  We re-read persisted
+      // accounts rather than relying on the in-memory snapshot, because the
+      // account may have accumulated additional state (e.g. display name from
+      // login) since it was last written.
+      const persisted = await persistedAccounts();
+      const existingIdx = persisted.findIndex((pa) => pa.did === existingAccountId);
+      if (existingIdx >= 0) {
+        persisted[existingIdx].servers.push({
+          id: serverUrl,
+          name: serverName,
+          url: serverUrl,
+        });
+        await persistAccounts(persisted);
+      }
     }
     enterApp();
   }
@@ -443,9 +490,14 @@ export function AppProvider(props: { children: JSX.Element }) {
       .loadMessages(conversationId)
       .then((rows) => {
         const messages = rows.map(messageFromFfi);
-        setStore("messagesByConversation", conversationId, messages);
+        if (messages.length > 0) {
+          setStore("messagesByConversation", conversationId, messages);
+        }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.warn("loadMessages failed for", conversationId, err);
+        loadedMessages.delete(conversationId);
+      });
   }
 
   async function sendOptimistic(
@@ -495,7 +547,7 @@ export function AppProvider(props: { children: JSX.Element }) {
       );
       // Best-effort persist — log failures to console so they are
       // visible in DevTools but never crash the send path.
-      service()
+      void service()
         .saveMessage({
           id: messageId,
           conversationId,
@@ -569,7 +621,9 @@ export function AppProvider(props: { children: JSX.Element }) {
       setStore("messagesByConversation", conversationId, updated);
       void service()
         .markMessagesRead(conversationId, now)
-        .catch(() => {});
+        .catch((e: unknown) => {
+          console.warn("markMessagesRead failed:", e);
+        });
     }
   }
 
@@ -632,7 +686,9 @@ export function AppProvider(props: { children: JSX.Element }) {
             });
           }
         })
-        .catch(() => {})
+        .catch((e: unknown) => {
+          console.warn("contactDisplayName failed:", did, e);
+        })
         .finally(() => {
           displayNamePending.delete(did);
         });
@@ -712,6 +768,33 @@ export function AppProvider(props: { children: JSX.Element }) {
                 "lastMessageDate",
                 m.sentAtMs ?? Date.now()
               );
+            } else {
+              // TODO(bug): in-memory conversations disappear when a
+              // subsequent loadConversations reload replaces the list with
+              // DB results.  Messages are not yet persisted at this point
+              // (saveMessage is fire-and-forget), so the conversation (e.g.
+              // the adminbot welcome DM) vanishes from the sidebar.
+              //
+              // Conversation not in the list yet — create it in-memory.
+              // Reloading from the DB won't help because the message hasn't
+              // been persisted yet (saveMessage is best-effort, async).
+              const isGroup = !!m.groupId;
+              const serverUrl = getServerUrl(accountId);
+              const newConv: Conversation = {
+                id: conversationId,
+                title: isGroup ? "Group" : m.senderDid,
+                accountId,
+                serverUrl,
+                recipientDid: isGroup ? undefined : m.senderDid,
+                groupId: m.groupId ?? undefined,
+                lastMessage: body.length > 100 ? body.slice(0, 100) + "…" : body,
+                lastMessageDate: m.sentAtMs ?? Date.now(),
+                lastMessageKind: 0,
+                isGroup,
+                isRequest: false,
+                isBlocked: false,
+              };
+              setStore("conversations", (prev) => [newConv, ...prev]);
             }
           }
           break;
@@ -786,6 +869,19 @@ export function AppProvider(props: { children: JSX.Element }) {
                   : m
               )
             );
+            // Update conversation preview if the edited message was the
+            // most recent one.
+            const convIdx = store.conversations.findIndex((c) => c.id === cid);
+            if (
+              convIdx >= 0 &&
+              store.conversations[convIdx]?.lastMessageDate === edited.sent_at_ms
+            ) {
+              const previewText =
+                edited.new_body.length > 100
+                  ? edited.new_body.slice(0, 100) + "..."
+                  : edited.new_body;
+              setStore("conversations", convIdx, "lastMessage", previewText);
+            }
           } else {
             // Messages not yet loaded or no conversation_id — reload to
             // pick up the edit from the store.
@@ -806,6 +902,15 @@ export function AppProvider(props: { children: JSX.Element }) {
                   : m
               )
             );
+            // Update conversation preview if the deleted message was the
+            // most recent one.
+            const convIdx = store.conversations.findIndex((c) => c.id === cid);
+            if (
+              convIdx >= 0 &&
+              store.conversations[convIdx]?.lastMessageDate === del.sent_at_ms
+            ) {
+              setStore("conversations", convIdx, "lastMessage", "[deleted]");
+            }
           } else {
             // Messages not yet loaded or no conversation_id — reload to
             // pick up the deletion tombstone from the store.
@@ -824,18 +929,39 @@ export function AppProvider(props: { children: JSX.Element }) {
         }
         case "messagesExpired": {
           const exp = ev as Extract<IncomingEvent, { type: "messagesExpired" }>;
-          // TODO(robustness): `setStore` replaces the entire message array,
-          // which erases optimistic/local-only messages not yet persisted.
-          // Merge server data with existing store entries instead.
           for (const cid of exp.conversation_ids) {
             loadedMessages.delete(cid);
             void service()
               .loadMessages(cid)
               .then((rows) => {
-                const messages = rows.map(messageFromFfi);
-                setStore("messagesByConversation", cid, messages);
+                const serverMessages = rows.map(messageFromFfi);
+                // Merge: start with the fresh server data, then append any
+                // existing optimistic messages (still in sending/sent state)
+                // that were not yet persisted (no matching entry by
+                // senderAccountId+sentAtMs in the server data).  This
+                // prevents data loss when an expiration event fires before
+                // `saveMessage` completes.
+                setStore("messagesByConversation", cid, (prev) => {
+                  const existing = prev ?? [];
+                  // Build a lookup keyed by `${senderAccountId}:${sentAtMs}`
+                  // for O(1) membership checks.
+                  const serverKeys = new Set(
+                    serverMessages.map(
+                      (m) => `${m.senderAccountId}:${m.sentAtMs}`
+                    )
+                  );
+                  const retained = existing.filter(
+                    (m) =>
+                      (m.deliveryStatus === DeliveryStatus.sending ||
+                        m.deliveryStatus === DeliveryStatus.sent) &&
+                      !serverKeys.has(`${m.senderAccountId}:${m.sentAtMs}`)
+                  );
+                  return [...serverMessages, ...retained];
+                });
               })
-              .catch(() => {});
+              .catch((e: unknown) => {
+                console.warn("loadMessages after expiry failed:", cid, e);
+              });
           }
           // TODO(robustness): if two events arrive back-to-back, this
           // launches two concurrent `loadConversationsFromStore()` calls
@@ -865,36 +991,35 @@ export function AppProvider(props: { children: JSX.Element }) {
     eventLoopRunning = true;
 
     if (store.serviceMode === ServiceMode.DevServer) {
-      // Kick off the Rust-side background event loop, then register a Tauri
-      // event listener for push events.
-      //
-      // TODO(robustness): the Rust thread may emit events before the
-      // `listen()` promise resolves — those events are silently dropped.
-      // Register the listener first (e.g. in onMount), or start the Rust
-      // thread only after the listener is confirmed active.
-      //
-      // TODO(robustness): if stopPolling() / startPolling() cycles while
-      // `listen()` is still pending, fn1 can leak and double-process events.
-      // A single persistent listener registered in onMount would avoid this.
-      void service().startEventLoop().catch(() => {
-        // If the command fails (e.g. no active account), the listener below
-        // will never fire — the user sees no events, which is correct.
-      });
-
+      // The Rust thread (dedicated std::thread) calls next_events() in a
+      // loop, which decrypts live WebSocket messages and emits them as
+      // "avalanche-event" events.  We listen for those events here.
+      // receiveMessages() is a REST inbox fetch — it does NOT return live
+      // push events, so we don't poll it.
       listen<IncomingEvent[]>("avalanche-event", (ev) => {
-        if (!eventLoopRunning) return; // stale listener after stopPolling
+        if (!eventLoopRunning) return;
         handleIncomingEvents(ev.payload);
-      })
-        .then((fn) => {
-          if (eventLoopRunning) {
-            unlistenEvents = fn;
-          } else {
-            // stopPolling was called while listen was still pending —
-            // clean up immediately so the listener doesn't leak.
-            fn();
-          }
-        })
-        .catch(() => { /* Tauri not available */ });
+      }).then((fn) => {
+        if (eventLoopRunning) {
+          unlistenEvents = fn;
+          // Listener active — now safe to start the decrypt thread.
+          void service().startEventLoop().catch((e) => {
+            console.error("startEventLoop failed:", e);
+          });
+          // Drain any messages that arrived in the REST inbox gap between
+          // the last poll and the event channel being established.
+          // receiveMessages() is a REST inbox fetch, not live push — it
+          // covers the window where messages were queued server-side before
+          // the WebSocket event channel was connected (see CLAUDE.md §Debugging).
+          void service().receiveMessages().catch((e) => {
+            console.warn("receiveMessages drain failed:", e);
+          });
+        } else {
+          fn();
+        }
+      }).catch((e: unknown) => {
+        console.warn("avalanche-event listener registration failed:", e);
+      });
     } else {
       // Mock mode: existing polling pattern.  MockService.nextEvents() parks
       // its Promise when there are no events, so this loop is effectively
@@ -918,25 +1043,29 @@ export function AppProvider(props: { children: JSX.Element }) {
   function startConnectionLoop() {
     if (connLoopRunning) return;
     const accountId = getActiveAccountId();
+    // Guard against empty DID: prevents storing connection state at key ""
+    // which would pollute the aggregate with a phantom connection.  This
+    // also catches the transient state after resetSession clears accounts
+    // but before enterApp re-establishes a session.
     if (!accountId) return;
     connLoopRunning = true;
 
     const BACKOFF_MS = 1000;
     const BACKOFF_CAP_MS = 30000;
+    let failCount = 0;
 
     const loop = async (last: ConnectionState, delayMs: number) => {
       if (!connLoopRunning) return;
       try {
         const next = await service().waitForConnectionStateChange(last);
+        failCount = 0;
         setStore("connectionStates", accountId, next);
-        // Reset backoff on successful state change.
         if (connLoopRunning) void loop(next, BACKOFF_MS);
       } catch {
         if (connLoopRunning) {
-          connLoopTimeout = setTimeout(() => {
-            const nextDelay = Math.min(delayMs * 2, BACKOFF_CAP_MS);
-            void loop(last, nextDelay);
-          }, delayMs);
+          failCount++;
+          const nextDelay = Math.min(delayMs * 2, BACKOFF_CAP_MS);
+          connLoopTimeout = setTimeout(() => void loop(last, nextDelay), delayMs);
         }
       }
     };
@@ -944,11 +1073,11 @@ export function AppProvider(props: { children: JSX.Element }) {
     void service()
       .connectionState()
       .then((state) => {
+        failCount = 0;
         setStore("connectionStates", accountId, state);
         void loop(state, BACKOFF_MS);
       })
       .catch(() => {
-        // Reset connLoopRunning so the loop can be restarted on retry.
         connLoopRunning = false;
       });
   }
@@ -1005,6 +1134,8 @@ export function AppProvider(props: { children: JSX.Element }) {
     restoreAccounts,
     logout,
     switchMode,
+    serverUrl: () => store.serverUrl,
+    setServerUrl,
     joinServer,
     sendMessage,
     sendGroupMessage,

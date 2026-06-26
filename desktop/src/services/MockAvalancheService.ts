@@ -413,6 +413,10 @@ export class MockAvalancheService implements AvalancheService {
     // No Rust event loop is needed.
   }
 
+  async clearSession(): Promise<void> {
+    // Mock mode has no Rust backend session to clear.
+  }
+
   async fetchProjects(): Promise<ProjectInfoFfi[]> {
     return [
       {

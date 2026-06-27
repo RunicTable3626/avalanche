@@ -1,5 +1,6 @@
 import { createSignal, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
+import { FiArrowLeft } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
 import { ServiceMode } from "../../services/AvalancheService";
 import "./DevSettingsView.css";
@@ -37,7 +38,7 @@ export default function DevSettingsView(): JSX.Element {
     <div class="dev-settings">
       <header class="dev-settings-header">
         <button class="back-btn" onClick={() => navigate?.(-1)}>
-          ← Back
+          <FiArrowLeft size={14} />Back
         </button>
         <h1>Developer Settings</h1>
       </header>

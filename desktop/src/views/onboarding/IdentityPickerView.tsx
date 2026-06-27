@@ -1,4 +1,5 @@
 import { For, Show } from "solid-js";
+import { FiArrowLeft, FiPlus, FiChevronRight } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
 import type { InviteInfo } from "../../models/InviteToken";
 import type { Account } from "../../models/Account";
@@ -36,7 +37,7 @@ export default function IdentityPickerView(props: Props) {
                       {account.servers.map((s) => s.name).join(", ")}
                     </div>
                   </div>
-                  <span class="ip-chevron">›</span>
+                  <FiChevronRight size={16} class="ip-chevron" />
                 </div>
               )}
             </For>
@@ -46,14 +47,14 @@ export default function IdentityPickerView(props: Props) {
         <div class="ip-section-label">New</div>
         <div class="ip-list">
           <div class="ip-action-row ip-action-new" onClick={props.onNewIdentity}>
-            <span>＋</span>
+            <FiPlus size={18} />
             <span>Create a new identity</span>
-            <span class="ip-chevron-push">›</span>
+            <FiChevronRight size={16} class="ip-chevron-push" />
           </div>
         </div>
 
         {props.onBack && (
-          <button class="back-btn ip-back" onClick={props.onBack}>← Back</button>
+          <button class="back-btn ip-back" onClick={props.onBack}><FiArrowLeft size={14} />Back</button>
         )}
     </div>
   );

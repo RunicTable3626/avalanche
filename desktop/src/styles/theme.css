@@ -83,6 +83,9 @@ body, html { margin: 0; padding: 0; height: 100%; }
 }
 
 .back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   background: none;
   border: none;
   color: var(--color-text-secondary);

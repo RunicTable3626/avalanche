@@ -1,4 +1,5 @@
 import { createSignal, onMount } from "solid-js";
+import { FiChevronUp, FiChevronDown, FiArrowUp } from "solid-icons/fi";
 import { useApp } from "../state/AppContext";
 import type { Conversation } from "../models";
 import "./ComposeMessageView.css";
@@ -104,7 +105,7 @@ export default function ComposeMessageView(props: Props) {
             onClick={toggleExpand}
             aria-label={expanded() ? "Collapse" : "Expand"}
           >
-            {expanded() ? "▼" : "▲"}
+            {expanded() ? <FiChevronDown size={14} /> : <FiChevronUp size={14} />}
           </button>
         )}
       </div>
@@ -113,7 +114,7 @@ export default function ComposeMessageView(props: Props) {
         disabled={!draft().trim() || sending()}
         onClick={handleSend}
       >
-        ↑
+        <FiArrowUp size={20} />
       </button>
     </div>
   );

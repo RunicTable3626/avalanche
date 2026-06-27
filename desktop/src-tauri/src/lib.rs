@@ -113,6 +113,10 @@ pub fn run() {
             delete_expired_messages,
         ]);
 
+    // Codegen path (never compiled into the shipped app): write bindings.ts and
+    // exit before launching the GUI, so regeneration runs headless (CI, no
+    // display). The export path is relative to the binary's cwd, so this must be
+    // run from `desktop/src-tauri` — see the `desktop-bindings` Makefile target.
     #[cfg(feature = "codegen")]
     {
         builder
@@ -121,8 +125,10 @@ pub fn run() {
                 "../src/bindings.ts",
             )
             .expect("failed to export specta bindings");
+        return;
     }
 
+    #[allow(unreachable_code)]
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(AppState {

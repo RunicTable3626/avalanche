@@ -51,3 +51,4 @@ protoc-bin-vendored   = "3"
 
 [dev-dependencies]
 tokio = { workspace = true }
+proptest = { workspace = true }

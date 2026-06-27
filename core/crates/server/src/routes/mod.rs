@@ -26,6 +26,7 @@ pub(crate) mod messages;
 mod prekeys;
 mod profile;
 mod projects;
+mod provisioning;
 mod push;
 mod recovery;
 mod registration;
@@ -46,6 +47,7 @@ pub fn router() -> Router<AppState> {
         .merge(recovery::routes())
         .merge(storage::routes())
         .merge(devices::routes())
+        .merge(provisioning::routes())
         .merge(invites::routes())
         .merge(profile::routes())
         .merge(groups::routes())

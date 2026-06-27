@@ -135,6 +135,7 @@ dependencies = [
  "net",
  "p256",
  "paranoid-android",
+ "proptest",
  "prost",
  "prost-build",
  "protoc-bin-vendored",

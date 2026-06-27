@@ -24,6 +24,7 @@ pub mod messaging;
 pub mod plc;
 pub mod prekeys;
 pub mod profile;
+pub mod provisioning;
 pub mod recovery;
 pub mod storage_sync;
 
@@ -42,6 +43,12 @@ pub mod proto {
     /// PRF-derived `blob_key` and stored on the homeserver, opaque to it.
     pub mod recovery {
         include!(concat!(env!("OUT_DIR"), "/actnet.recovery.rs"));
+    }
+
+    /// Device-linking provisioning bundle (docs/04-multi-device.md §4). Sealed
+    /// to the new device over the ephemeral relay mailbox; opaque to the server.
+    pub mod provisioning {
+        include!(concat!(env!("OUT_DIR"), "/actnet.provisioning.rs"));
     }
 }
 
@@ -695,6 +702,10 @@ pub struct AppCore {
     /// `net`'s reader (foreground-only, for battery). Defaults `true` so headless
     /// bots — which never call `set_app_active` — keep their keepalive running.
     pub(crate) app_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Pending device-linking state on the *existing* (approving) device, set by
+    /// `link_create_pairing`/`link_accept_pairing` and consumed by
+    /// `link_send_bundle` (docs/04 §4). `None` outside an in-progress link.
+    pub(crate) link_state: std::sync::Mutex<Option<provisioning::LinkHandshake>>,
 }
 
 /// One server-bound account context of an identity (docs/06 §9): a device store,
@@ -775,6 +786,7 @@ impl AppCore {
             expire_reaper_task: std::sync::Mutex::new(None),
             reconnect_notify: Arc::new(tokio::sync::Notify::new()),
             app_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            link_state: std::sync::Mutex::new(None),
         }
     }
 
@@ -2956,6 +2968,347 @@ impl PreparedAccount {
     }
 }
 
+// ── Device linking (docs/04 §4) ─────────────────────────────────────────────
+
+/// How long a link step waits for the peer to act before giving up.
+const LINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// Mailbox poll interval while waiting for a slot to be filled.
+const LINK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Poll a provisioning mailbox slot until it has content or the timeout passes.
+async fn poll_slot(
+    client: &net::Client,
+    session_id: &str,
+    slot: &str,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, AppError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(bytes) = client.get_provisioning_slot(session_id, slot).await? {
+            return Ok(bytes);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AppError::Provisioning(format!(
+                "timed out waiting for provisioning slot '{slot}'"
+            )));
+        }
+        tokio::time::sleep(LINK_POLL_INTERVAL).await;
+    }
+}
+
+/// Given a decrypted provisioning bundle, register this device additively under
+/// the identity and return a live `AppCore`. The shared identity key, rotation
+/// key, and storage key come from the bundle; this device mints its own
+/// registration id, prekeys, and (going forward) sessions, then pulls durable
+/// state via the storage service (docs/05 §11). Mirrors `recover_from_blob`'s
+/// persistence, but additive (`/v1/devices/link`, no device deleted) and with
+/// no group restore — groups arrive through storage sync.
+async fn provision_linked_device(
+    bundle: provisioning::ProvisioningBundle,
+    db_path: String,
+    db_key: String,
+) -> Result<Arc<AppCore>, AppError> {
+    let identity = crypto::IdentityKeyPair::deserialize(&bundle.identity_keypair)?;
+    let rotation_key_private = bundle.rotation_key_private.clone();
+    let rotation_key_public = recovery::rotation_public_from_private(&rotation_key_private)?;
+    let did = bundle.did.clone();
+    if !did.starts_with("did:plc:") {
+        return Err(AppError::Provisioning(
+            "linking requires a did:plc: identity".into(),
+        ));
+    }
+
+    // Home server: the bundle's primary, else PLC-resolved.
+    let primary_server = match bundle.servers.first() {
+        Some(s) => s.clone(),
+        None => plc::resolve_homeserver_url(&did)
+            .await
+            .map_err(|e| AppError::Provisioning(format!("cannot resolve home server: {e}")))?,
+    };
+    let primary_client = net::Client::new(&primary_server);
+
+    // Pick a free device_id (max existing + 1) and a fresh registration id.
+    let existing = primary_client.fetch_devices(&did).await?;
+    if existing.is_empty() {
+        return Err(AppError::Provisioning(
+            "identity has no existing devices to link to".into(),
+        ));
+    }
+    let new_device_id: u32 = (existing.iter().copied().max().unwrap_or(0) + 1) as u32;
+    let new_registration_id = rand::Rng::random::<u32>(&mut rand::rng()) & 0x3FFF;
+
+    // Fresh prekeys signed by the shared identity.
+    let signed = crypto::prekeys::generate_signed_prekey(&identity, 1)?;
+    let one_time = crypto::prekeys::generate_one_time_prekeys(1, 20)?;
+    let kyber = crypto::prekeys::generate_kyber_prekey(&identity, LAST_RESORT_KYBER_ID)?;
+    let one_time_kyber: Vec<crypto::prekeys::GeneratedKyberPreKey> = (1u32..=20)
+        .map(|id| crypto::prekeys::generate_kyber_prekey(&identity, id))
+        .collect::<Result<_, _>>()?;
+
+    // Anti-replay nonce: challenge any existing device of the account. The
+    // rotation signature is the real authorization; the nonce only prevents
+    // replay, so binding it to the account (via any device) is sufficient.
+    let existing_device_id = existing.iter().copied().min().unwrap();
+    let nonce = primary_client.challenge(&did, existing_device_id).await?;
+    let link_payload = format!("linkdevice:{did}:{new_device_id}:{nonce}");
+    let rotation_sig =
+        recovery::sign_with_rotation_key(&rotation_key_private, link_payload.as_bytes())?;
+
+    let link_resp = primary_client
+        .link_device(&net::types::LinkDeviceRequest {
+            did: did.clone(),
+            new_device_id: new_device_id as i32,
+            new_identity_key: identity.public_key().serialize(),
+            new_registration_id: new_registration_id as i32,
+            nonce,
+            rotation_key_signature: rotation_sig,
+            rotation_key: rotation_key_public.clone(),
+            signed_prekey_id: signed.wire.id as i32,
+            signed_prekey_public: signed.wire.public_key.clone(),
+            signed_prekey_signature: signed.wire.signature.clone(),
+            one_time_prekeys: one_time
+                .iter()
+                .map(|k| (k.wire.id as i32, k.wire.public_key.clone()))
+                .collect(),
+            kyber_prekey_id: kyber.wire.id as i32,
+            kyber_prekey_public: kyber.wire.public_key.clone(),
+            kyber_prekey_signature: kyber.wire.signature.clone(),
+        })
+        .await?;
+
+    // Open the local split store and persist the linked-device state.
+    let (_identity_store, store) = store::open_split(
+        Path::new(&db_path),
+        &store::DatabaseKey::from_passphrase(db_key),
+    )
+    .await
+    .map_err(AppError::from)?;
+
+    store.save_identity_keypair(&identity).await?;
+    store
+        .save_rotation_key(&rotation_key_private, &rotation_key_public)
+        .await?;
+    // Restore the identity-level storage key (docs/05 §11) so this device reads
+    // the same durable-state records as the others. A bundle should always
+    // carry one for a human identity; if absent, skip (no sync).
+    if bundle.storage_key.len() == 32 {
+        let mut sk = [0u8; 32];
+        sk.copy_from_slice(&bundle.storage_key);
+        store.save_storage_key(&sk).await?;
+        storage_sync::ensure_triggers(&store).await?;
+    }
+    store.save_did(&did, Timestamp::now()).await?;
+    store
+        .save_device_account(&DeviceAccount {
+            server_url: primary_server.clone(),
+            device_id: new_device_id,
+            registered_at: Timestamp::now(),
+            registration_id: new_registration_id,
+        })
+        .await?;
+    store.save_signed_prekey(signed.wire.id, &signed.record).await?;
+    store
+        .save_one_time_prekeys(
+            &one_time
+                .iter()
+                .map(|k| (k.wire.id, k.record.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    store
+        .save_kyber_prekeys(&[(kyber.wire.id, kyber.record.clone())])
+        .await?;
+    store
+        .save_kyber_prekeys(
+            &one_time_kyber
+                .iter()
+                .map(|k| (k.wire.id, k.record.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    store.seed_prekey_counter("one_time", REG_ONE_TIME_NEXT_ID).await?;
+    store.seed_prekey_counter("kyber", REG_KYBER_NEXT_ID).await?;
+
+    // Restore the profile (name + key) from the bundle for immediate UI; the
+    // authoritative copy also arrives via storage sync.
+    if bundle.profile_key.len() == profile::PROFILE_KEY_LEN {
+        store
+            .save_own_profile(&store::profiles::OwnProfile {
+                profile_key: bundle.profile_key.clone(),
+                display_name: bundle.display_name.clone(),
+            })
+            .await?;
+    }
+
+    let client = build_authed_client(
+        &primary_server,
+        did.clone(),
+        new_device_id,
+        &identity,
+        Some(link_resp.session_token),
+    );
+
+    // Upload one-time Kyber public halves separately (matching create_inner).
+    client
+        .upload_prekeys(&net::types::UploadPrekeysRequest {
+            signed_prekey: None,
+            one_time_prekeys: None,
+            kyber_prekey: None,
+            one_time_kyber_prekeys: Some(
+                one_time_kyber
+                    .iter()
+                    .map(|k| (k.wire.id as i32, k.wire.public_key.clone(), k.wire.signature.clone()))
+                    .collect(),
+            ),
+        })
+        .await?;
+
+    let local_address = DeviceAddress::new(
+        AccountId::new(crypto::groups::did_to_service_id_string(&did)),
+        DeviceId::new(new_device_id),
+    );
+    let identity_store = store.identity.clone();
+    let core = Arc::new(AppCore::build(AppCoreInner {
+        identity: identity_store,
+        store,
+        client,
+        local_address,
+        did: did.clone(),
+        device_id: new_device_id,
+        backup_accounts: Vec::new(),
+    }));
+    core.start_reconnect_task();
+    core.start_storage_sync_task();
+    core.start_expire_reaper();
+
+    // Pull durable state (groups, contacts, settings, profiles) so the linked
+    // device is operational (docs/05 §11). Best-effort: a failure leaves the
+    // device registered and able to receive new messages; sync retries.
+    if let Err(e) = core.sync_storage_async().await {
+        tracing::warn!("[link] initial storage sync failed: {e}");
+    }
+
+    Ok(core)
+}
+
+/// FFI handle driving device linking from the **new** (joining) device, which
+/// has no `AppCore` yet (docs/04 §4). Modeled on [`PreparedAccount`].
+///
+/// Usage (either gesture works — role is independent of who shows the code):
+/// - **show a code:** `create_pairing` → render the returned string as a QR
+///   and/or copyable text → `await_link`.
+/// - **scan/paste a code:** `accept_pairing(code)` → `await_link`.
+#[derive(uniffi::Object)]
+pub struct DeviceLinkNew {
+    handshake: Mutex<Option<provisioning::LinkHandshake>>,
+}
+
+#[uniffi::export]
+impl DeviceLinkNew {
+    /// Create a new linking handle. Generates ephemeral key material lazily in
+    /// `create_pairing`/`accept_pairing`.
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { handshake: Mutex::new(None) })
+    }
+
+    /// This (new) device shows the pairing code. Creates a mailbox session on
+    /// `mailbox_server` (defaults to the built-in mailbox host when omitted, so
+    /// the new device need not be told a server URL). Returns the pairing
+    /// string to render as a QR and/or copyable code.
+    pub fn create_pairing(&self, mailbox_server: Option<String>) -> Result<String, AppErrorFfi> {
+        ffi_runtime()
+            .block_on(self.create_pairing_async(mailbox_server))
+            .map_err(AppErrorFfi::from)
+    }
+
+    /// This (new) device scanned/pasted the existing device's pairing code.
+    pub fn accept_pairing(&self, code: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime()
+            .block_on(self.accept_pairing_async(code))
+            .map_err(AppErrorFfi::from)
+    }
+
+    /// Complete the link: derive the shared key, receive the sealed bundle, and
+    /// register this device. Blocks until the existing device approves or the
+    /// attempt times out. Returns a live `AppCore`.
+    pub fn await_link(&self, db_path: String, db_key: String) -> Result<Arc<AppCore>, AppErrorFfi> {
+        ffi_runtime()
+            .block_on(self.await_link_async(db_path, db_key))
+            .map_err(AppErrorFfi::from)
+    }
+}
+
+impl DeviceLinkNew {
+    pub async fn create_pairing_async(
+        &self,
+        mailbox_server: Option<String>,
+    ) -> Result<String, AppError> {
+        let mailbox_url =
+            mailbox_server.unwrap_or_else(|| provisioning::DEFAULT_MAILBOX_SERVER.to_string());
+        let ephemeral = crypto::EphemeralKeyPair::generate();
+        let client = net::Client::new(&mailbox_url);
+        let session = client.create_provisioning_session().await?;
+        let code = provisioning::PairingCode {
+            mailbox_url: mailbox_url.clone(),
+            session_id: session.session_id.clone(),
+            ephemeral_pub: ephemeral.public_bytes(),
+        }
+        .encode();
+        *self.handshake.lock().await = Some(provisioning::LinkHandshake {
+            ephemeral,
+            mailbox_url,
+            session_id: session.session_id,
+            peer_pub: None,
+        });
+        Ok(code)
+    }
+
+    pub async fn accept_pairing_async(&self, code: String) -> Result<(), AppError> {
+        let pc = provisioning::PairingCode::decode(&code)?;
+        let ephemeral = crypto::EphemeralKeyPair::generate();
+        let client = net::Client::new(&pc.mailbox_url);
+        client
+            .put_provisioning_slot(&pc.session_id, provisioning::SLOT_HANDSHAKE, &ephemeral.public_bytes())
+            .await?;
+        *self.handshake.lock().await = Some(provisioning::LinkHandshake {
+            ephemeral,
+            mailbox_url: pc.mailbox_url,
+            session_id: pc.session_id,
+            peer_pub: Some(pc.ephemeral_pub),
+        });
+        Ok(())
+    }
+
+    pub async fn await_link_async(
+        &self,
+        db_path: String,
+        db_key: String,
+    ) -> Result<Arc<AppCore>, AppError> {
+        let hs = self
+            .handshake
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| AppError::Provisioning("call create_pairing or accept_pairing first".into()))?;
+        let client = net::Client::new(&hs.mailbox_url);
+
+        // Resolve the peer's ephemeral public key (from the code if we scanned,
+        // else from the handshake slot the scanner posted).
+        let peer_pub = match hs.peer_pub.clone() {
+            Some(p) => p,
+            None => poll_slot(&client, &hs.session_id, provisioning::SLOT_HANDSHAKE, LINK_TIMEOUT).await?,
+        };
+        let key = hs.shared_key(&peer_pub)?;
+
+        let sealed =
+            poll_slot(&client, &hs.session_id, provisioning::SLOT_BUNDLE, LINK_TIMEOUT).await?;
+        let bundle = provisioning::open_bundle(&sealed, &key)?;
+
+        provision_linked_device(bundle, db_path, db_key).await
+    }
+}
+
 // ── Internal async implementation (not exported via FFI) ────────────────────
 
 impl AppCore {
@@ -3839,6 +4192,144 @@ impl AppCore {
         ffi_runtime()
             .block_on(self.sync_storage_async())
             .map_err(AppErrorFfi::from)
+    }
+
+    // ── Device linking, existing-device side (docs/04 §4) ─────────────────
+    //
+    // This already-provisioned device authorizes a new device by sealing the
+    // identity's static credential (identity key + rotation key + storage key +
+    // routing) to it over the ephemeral mailbox. Role is independent of gesture:
+    // call `link_create_pairing` to *show* a code, or `link_accept_pairing` to
+    // *scan/paste* the new device's code; then `link_send_bundle`.
+
+    /// Show a pairing code to link a new device. Creates a mailbox session on
+    /// `mailbox_server`, or this device's own server when omitted. Returns the
+    /// pairing string; follow with `link_send_bundle`.
+    pub fn link_create_pairing(
+        &self,
+        mailbox_server: Option<String>,
+    ) -> Result<String, AppErrorFfi> {
+        ffi_runtime()
+            .block_on(self.link_create_pairing_async(mailbox_server))
+            .map_err(AppErrorFfi::from)
+    }
+
+    /// Ingest the new device's pairing code (scanned or pasted). Posts this
+    /// device's ephemeral key to the mailbox; follow with `link_send_bundle`.
+    pub fn link_accept_pairing(&self, code: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime()
+            .block_on(self.link_accept_pairing_async(code))
+            .map_err(AppErrorFfi::from)
+    }
+
+    /// Seal the provisioning bundle to the new device and post it to the
+    /// mailbox. Requires a prior `link_create_pairing`/`link_accept_pairing`.
+    pub fn link_send_bundle(&self) -> Result<(), AppErrorFfi> {
+        ffi_runtime()
+            .block_on(self.link_send_bundle_async())
+            .map_err(AppErrorFfi::from)
+    }
+}
+
+impl AppCore {
+    pub async fn link_create_pairing_async(
+        &self,
+        mailbox_server: Option<String>,
+    ) -> Result<String, AppError> {
+        let mailbox_url = match mailbox_server {
+            Some(m) => m,
+            None => self.inner.lock().await.client.server_url().to_string(),
+        };
+        let ephemeral = crypto::EphemeralKeyPair::generate();
+        let client = net::Client::new(&mailbox_url);
+        let session = client.create_provisioning_session().await?;
+        let code = provisioning::PairingCode {
+            mailbox_url: mailbox_url.clone(),
+            session_id: session.session_id.clone(),
+            ephemeral_pub: ephemeral.public_bytes(),
+        }
+        .encode();
+        *self.link_state.lock().expect("link_state poisoned") = Some(provisioning::LinkHandshake {
+            ephemeral,
+            mailbox_url,
+            session_id: session.session_id,
+            peer_pub: None,
+        });
+        Ok(code)
+    }
+
+    pub async fn link_accept_pairing_async(&self, code: String) -> Result<(), AppError> {
+        let pc = provisioning::PairingCode::decode(&code)?;
+        let ephemeral = crypto::EphemeralKeyPair::generate();
+        let client = net::Client::new(&pc.mailbox_url);
+        client
+            .put_provisioning_slot(&pc.session_id, provisioning::SLOT_HANDSHAKE, &ephemeral.public_bytes())
+            .await?;
+        *self.link_state.lock().expect("link_state poisoned") = Some(provisioning::LinkHandshake {
+            ephemeral,
+            mailbox_url: pc.mailbox_url,
+            session_id: pc.session_id,
+            peer_pub: Some(pc.ephemeral_pub),
+        });
+        Ok(())
+    }
+
+    pub async fn link_send_bundle_async(&self) -> Result<(), AppError> {
+        let hs = self
+            .link_state
+            .lock()
+            .expect("link_state poisoned")
+            .take()
+            .ok_or_else(|| {
+                AppError::Provisioning(
+                    "call link_create_pairing or link_accept_pairing first".into(),
+                )
+            })?;
+        let client = net::Client::new(&hs.mailbox_url);
+
+        let peer_pub = match hs.peer_pub.clone() {
+            Some(p) => p,
+            None => poll_slot(&client, &hs.session_id, provisioning::SLOT_HANDSHAKE, LINK_TIMEOUT).await?,
+        };
+        let key = hs.shared_key(&peer_pub)?;
+
+        // Build the bundle from current durable state.
+        let bundle = {
+            let inner = self.inner.lock().await;
+            let identity = inner.store.load_identity().await?.ok_or(AppError::NoAccount)?;
+            let (rot_priv, _rot_pub) = inner
+                .store
+                .load_rotation_key()
+                .await?
+                .ok_or_else(|| AppError::Provisioning("no rotation key to transport".into()))?;
+            let storage_key = inner
+                .store
+                .load_storage_key()
+                .await?
+                .map(|k| k.to_vec())
+                .unwrap_or_default();
+            let (display_name, profile_key) = inner
+                .store
+                .load_own_profile()
+                .await?
+                .map(|p| (p.display_name, p.profile_key))
+                .unwrap_or_default();
+            provisioning::ProvisioningBundle {
+                identity_keypair: identity.serialize(),
+                rotation_key_private: rot_priv,
+                storage_key,
+                did: inner.did.clone(),
+                servers: vec![inner.client.server_url().to_string()],
+                display_name,
+                profile_key,
+            }
+        };
+
+        let sealed = provisioning::seal_bundle(&bundle, &key)?;
+        client
+            .put_provisioning_slot(&hs.session_id, provisioning::SLOT_BUNDLE, &sealed)
+            .await?;
+        Ok(())
     }
 }
 

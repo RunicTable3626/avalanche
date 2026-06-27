@@ -24,10 +24,12 @@ use base64::prelude::*;
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use crate::{db, error::ServerError, state::AppState};
+use crate::{db, error::ServerError, middleware::client_ip::ClientIp, state::AppState};
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/v1/devices/replace", post(replace_device))
+    Router::new()
+        .route("/v1/devices/replace", post(replace_device))
+        .route("/v1/devices/link", post(link_device))
 }
 
 #[derive(Deserialize)]
@@ -168,7 +170,14 @@ async fn replace_device(
     .await?;
 
     // Store prekeys for the new device.
-    store_prekeys(&mut conn, new_device_pk, &req).await?;
+    store_prekeys(
+        &mut conn,
+        new_device_pk,
+        &req.signed_prekey,
+        &req.one_time_prekeys,
+        &req.kyber_prekey,
+    )
+    .await?;
 
     // Update recovery blob if provided.
     if let Some(blob_b64) = &req.recovery_blob {
@@ -190,12 +199,168 @@ async fn replace_device(
     }))
 }
 
+// ── POST /v1/devices/link ───────────────────────────────────────────────────
+//
+// Additive sibling of /replace (docs/04 §4): links a *new* device to an
+// existing identity without deleting any device, so the existing device set
+// stays intact and fan-out reaches the new device too. Rotation-key authorized
+// like /replace — the new device transports the rotation key over the
+// provisioning channel to sign this. The new device builds its own per-device
+// state (registration id, prekeys) and pulls durable state via the storage
+// service afterward.
+
+#[derive(Deserialize)]
+struct LinkDeviceRequest {
+    did: String,
+    new_device_id: i32,
+    /// The shared identity public key — the same key the identity's other
+    /// devices publish (docs/04 §1), transported to the new device by linking.
+    new_identity_key: String, // base64
+    new_registration_id: i32,
+    /// Nonce from `POST /v1/auth/challenge`, issued for any existing device of
+    /// the account. The rotation signature is the real auth; the nonce is only
+    /// anti-replay, so binding it to the account (not a specific device) is fine.
+    nonce: String,
+    /// ECDSA P-256 signature over `"linkdevice:{did}:{new_device_id}:{nonce}"`.
+    rotation_key_signature: String, // base64
+    /// The P-256 rotation public key (SEC1) that signed the payload; verified
+    /// against the DID document's rotationKeys.
+    rotation_key: String, // base64
+    signed_prekey: SignedPreKeyUpload,
+    one_time_prekeys: Vec<OneTimePreKeyUpload>,
+    kyber_prekey: KyberPreKeyUpload,
+}
+
+#[derive(Serialize)]
+struct LinkDeviceResponse {
+    session_token: String,
+    expires_at: String,
+    /// The device_id the new device was registered under (echoed back).
+    device_id: i32,
+}
+
+async fn link_device(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<LinkDeviceRequest>,
+) -> Result<Json<LinkDeviceResponse>, ServerError> {
+    // Decode + verify the rotation key signature over the canonical payload.
+    let rotation_key_bytes = BASE64_STANDARD
+        .decode(&req.rotation_key)
+        .map_err(|_| ServerError::BadRequest("invalid base64 rotation_key".into()))?;
+    let verifying_key = VerifyingKey::from_sec1_bytes(&rotation_key_bytes)
+        .map_err(|_| ServerError::BadRequest("invalid P-256 rotation key".into()))?;
+
+    let payload = format!("linkdevice:{}:{}:{}", req.did, req.new_device_id, req.nonce);
+
+    let sig_bytes = BASE64_STANDARD
+        .decode(&req.rotation_key_signature)
+        .map_err(|_| ServerError::BadRequest("invalid base64 rotation_key_signature".into()))?;
+    let signature = Signature::from_der(&sig_bytes)
+        .or_else(|_| Signature::from_slice(&sig_bytes))
+        .map_err(|_| ServerError::BadRequest("invalid ECDSA signature".into()))?;
+    verifying_key
+        .verify(payload.as_bytes(), &signature)
+        .map_err(|_| ServerError::Unauthorized)?;
+
+    // The rotation key must be in the DID's PLC rotationKeys (a valid
+    // self-signature alone proves nothing). did:local: bots can't link.
+    if !req.did.starts_with("did:plc:") {
+        return Err(ServerError::BadRequest(
+            "device linking requires a did:plc: identifier".into(),
+        ));
+    }
+    let submitted_compressed = verifying_key.to_encoded_point(true).as_bytes().to_vec();
+    let authorized = crate::plc::fetch_rotation_keys_p256(&req.did).await?;
+    if !authorized.iter().any(|k| k == &submitted_compressed) {
+        tracing::warn!(
+            did = %req.did,
+            "device link rejected: submitted rotation key not in PLC rotationKeys"
+        );
+        return Err(ServerError::Unauthorized);
+    }
+
+    let mut conn = state.db.acquire().await?;
+
+    if !db::ip_rate_limits::check_and_increment(
+        &mut conn,
+        &ip,
+        crate::middleware::rate_limit::ACTION_DEVICE_LINK,
+        crate::middleware::rate_limit::LIMIT_DEVICE_LINK,
+        crate::middleware::rate_limit::WINDOW_DEVICE_LINK,
+    )
+    .await?
+    {
+        return Err(ServerError::RateLimited);
+    }
+
+    let account = db::accounts::find_by_did(&mut conn, &req.did)
+        .await?
+        .ok_or(ServerError::NotFound)?;
+
+    // Consume the anti-replay nonce. It must belong to a device of *this*
+    // account (the new device gets it by challenging an existing device).
+    let challenge_device_pk = db::challenges::consume(&mut conn, &req.nonce)
+        .await?
+        .ok_or(ServerError::Unauthorized)?;
+    let challenge_device = db::devices::find_by_pk(&mut conn, challenge_device_pk)
+        .await?
+        .ok_or(ServerError::Unauthorized)?;
+    if challenge_device.account_id != account.id {
+        return Err(ServerError::Unauthorized);
+    }
+
+    // The new device_id must be free — linking is additive and must never
+    // clobber an existing device row.
+    if db::devices::find(&mut conn, account.id, req.new_device_id)
+        .await?
+        .is_some()
+    {
+        return Err(ServerError::Conflict("device_id already in use".into()));
+    }
+
+    let new_identity_key = BASE64_STANDARD
+        .decode(&req.new_identity_key)
+        .map_err(|_| ServerError::BadRequest("invalid base64 new_identity_key".into()))?;
+
+    let new_device_pk = db::devices::create(
+        &mut conn,
+        account.id,
+        req.new_device_id,
+        &new_identity_key,
+        req.new_registration_id,
+    )
+    .await?;
+
+    store_prekeys(
+        &mut conn,
+        new_device_pk,
+        &req.signed_prekey,
+        &req.one_time_prekeys,
+        &req.kyber_prekey,
+    )
+    .await?;
+
+    let token = generate_token();
+    let expires_at =
+        db::sessions::create(&mut conn, &token, new_device_pk, state.config.token_lifetime_secs)
+            .await?;
+
+    Ok(Json(LinkDeviceResponse {
+        session_token: token,
+        expires_at: expires_at.to_string(),
+        device_id: req.new_device_id,
+    }))
+}
+
 async fn store_prekeys(
     conn: &mut sqlx::PgConnection,
     device_pk: i64,
-    req: &ReplaceDeviceRequest,
+    signed_prekey: &SignedPreKeyUpload,
+    one_time_prekeys: &[OneTimePreKeyUpload],
+    kyber_prekey: &KyberPreKeyUpload,
 ) -> Result<(), ServerError> {
-    let spk = &req.signed_prekey;
+    let spk = signed_prekey;
     db::prekeys::upsert_signed(
         conn,
         device_pk,
@@ -209,8 +374,7 @@ async fn store_prekeys(
     )
     .await?;
 
-    let otpks: Vec<(i32, Vec<u8>)> = req
-        .one_time_prekeys
+    let otpks: Vec<(i32, Vec<u8>)> = one_time_prekeys
         .iter()
         .map(|k| {
             Ok((
@@ -223,7 +387,7 @@ async fn store_prekeys(
         .collect::<Result<_, ServerError>>()?;
     db::prekeys::insert_one_time_batch(conn, device_pk, &otpks).await?;
 
-    let kpk = &req.kyber_prekey;
+    let kpk = kyber_prekey;
     db::prekeys::upsert_kyber(
         conn,
         device_pk,

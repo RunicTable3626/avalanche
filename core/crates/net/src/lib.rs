@@ -791,6 +791,118 @@ impl Client {
         Ok(resp.json().await?)
     }
 
+    // ── Device linking / provisioning mailbox (docs/04 §4) ────────────────
+    //
+    // These are unauthenticated. The mailbox endpoints may target a *different*
+    // server than this client's home server (the mailbox host named in the
+    // pairing code), so callers construct a `Client::new(mailbox_url)` for them;
+    // `link_device` targets the DID's home server.
+
+    /// Create an ephemeral provisioning session on this client's server.
+    pub async fn create_provisioning_session(&self) -> Result<ProvisioningSession, NetError> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/provisioning/sessions", self.server_url))
+            .json(&serde_json::json!({}))
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Write opaque ciphertext to a provisioning slot.
+    pub async fn put_provisioning_slot(
+        &self,
+        session_id: &str,
+        slot: &str,
+        ciphertext: &[u8],
+    ) -> Result<(), NetError> {
+        let body = serde_json::json!({ "ciphertext": BASE64_STANDARD.encode(ciphertext) });
+        let resp = self
+            .http
+            .put(format!("{}/v1/provisioning/{}/{}", self.server_url, session_id, slot))
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+        Ok(())
+    }
+
+    /// Read a provisioning slot. Returns `None` if the slot has not been written
+    /// yet or the session is missing/expired (HTTP 404) — callers poll on `None`.
+    pub async fn get_provisioning_slot(
+        &self,
+        session_id: &str,
+        slot: &str,
+    ) -> Result<Option<Vec<u8>>, NetError> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/provisioning/{}/{}", self.server_url, session_id, slot))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+        #[derive(serde::Deserialize)]
+        struct SlotResponse {
+            ciphertext: String,
+        }
+        let body: SlotResponse = resp.json().await?;
+        let bytes = BASE64_STANDARD
+            .decode(&body.ciphertext)
+            .map_err(|e| NetError::Base64(e.to_string()))?;
+        Ok(Some(bytes))
+    }
+
+    /// Link an additive new device to an existing identity (rotation-key
+    /// authorized). Targets the DID's home server.
+    pub async fn link_device(&self, req: &LinkDeviceRequest) -> Result<LinkDeviceResponse, NetError> {
+        let body = serde_json::json!({
+            "did": req.did,
+            "new_device_id": req.new_device_id,
+            "new_identity_key": BASE64_STANDARD.encode(&req.new_identity_key),
+            "new_registration_id": req.new_registration_id,
+            "nonce": req.nonce,
+            "rotation_key_signature": BASE64_STANDARD.encode(&req.rotation_key_signature),
+            "rotation_key": BASE64_STANDARD.encode(&req.rotation_key),
+            "signed_prekey": {
+                "id": req.signed_prekey_id,
+                "public_key": BASE64_STANDARD.encode(&req.signed_prekey_public),
+                "signature": BASE64_STANDARD.encode(&req.signed_prekey_signature),
+            },
+            "one_time_prekeys": req.one_time_prekeys.iter().map(|(id, pk)| {
+                serde_json::json!({"id": id, "public_key": BASE64_STANDARD.encode(pk)})
+            }).collect::<Vec<_>>(),
+            "kyber_prekey": {
+                "id": req.kyber_prekey_id,
+                "public_key": BASE64_STANDARD.encode(&req.kyber_prekey_public),
+                "signature": BASE64_STANDARD.encode(&req.kyber_prekey_signature),
+            },
+        });
+
+        let resp = self
+            .http
+            .post(format!("{}/v1/devices/link", self.server_url))
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(NetError::Server(status.as_u16(), resp.text().await.unwrap_or_default()));
+        }
+        Ok(resp.json().await?)
+    }
+
     // ── Profile ──────────────────────────────────────────────────────────
 
     /// Upload the caller's encrypted profile blob.

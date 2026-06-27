@@ -1,7 +1,7 @@
 // Smoke test: load the wrapper, exercise initLogging, and confirm
 // AppCore.login() rejects with NoAccount on a fresh DB.
 import { rmSync } from "node:fs";
-import { initLogging, AppCore } from "./dist/index.js";
+import { initLogging, AppCore, DeviceLinkNew } from "./dist/index.js";
 
 initLogging("info");
 
@@ -28,13 +28,30 @@ for (const method of [
   "deleteIdentity",
   "reconnectNow",
   "setAppActive",
+  "linkCreatePairing",
+  "linkAcceptPairing",
+  "linkSendBundle",
 ]) {
   if (typeof AppCore.prototype[method] !== "function") {
     console.error(`unexpected: AppCore.prototype.${method} is not a function`);
     process.exit(1);
   }
 }
-console.log("contact opt-in + group methods present on AppCore");
+console.log("contact opt-in + group + device-link methods present on AppCore");
+
+// DeviceLinkNew (new-device side of device linking, docs/04 §4). A full
+// round-trip needs a server + an existing device; this offline smoke only
+// confirms the napi object is constructable and its methods are wired.
+{
+  const link = new DeviceLinkNew();
+  for (const method of ["createPairing", "acceptPairing", "awaitLink"]) {
+    if (typeof link[method] !== "function") {
+      console.error(`unexpected: DeviceLinkNew.prototype.${method} is not a function`);
+      process.exit(1);
+    }
+  }
+  console.log("DeviceLinkNew constructable with createPairing/acceptPairing/awaitLink");
+}
 
 if (typeof globalThis.Temporal === "undefined") {
   console.warn(

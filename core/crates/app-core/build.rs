@@ -10,6 +10,7 @@ fn main() {
             "../../proto/content.proto",
             "../../proto/groups.proto",
             "../../proto/recovery.proto",
+            "../../proto/provisioning.proto",
         ],
         &["../../proto"],
     )

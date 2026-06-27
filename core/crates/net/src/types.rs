@@ -297,6 +297,44 @@ pub struct ReplaceDeviceResponse {
     pub expires_at: String,
 }
 
+// ── Device linking (additive add-device, docs/04 §4) ────────────────────────
+
+/// An additive add-device request. Mirrors [`ReplaceDeviceRequest`] minus
+/// `old_device_id` (nothing is deleted) and `recovery_blob` (linking does not
+/// touch it). Authorized by a rotation-key signature over
+/// `"linkdevice:{did}:{new_device_id}:{nonce}"`.
+pub struct LinkDeviceRequest {
+    pub did: String,
+    pub new_device_id: i32,
+    pub new_identity_key: Vec<u8>,
+    pub new_registration_id: i32,
+    pub nonce: String,
+    pub rotation_key_signature: Vec<u8>,
+    pub rotation_key: Vec<u8>,
+    pub signed_prekey_id: i32,
+    pub signed_prekey_public: Vec<u8>,
+    pub signed_prekey_signature: Vec<u8>,
+    pub one_time_prekeys: Vec<(i32, Vec<u8>)>,
+    pub kyber_prekey_id: i32,
+    pub kyber_prekey_public: Vec<u8>,
+    pub kyber_prekey_signature: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LinkDeviceResponse {
+    pub session_token: String,
+    pub expires_at: String,
+    pub device_id: i32,
+}
+
+// ── Provisioning mailbox (docs/04 §4) ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ProvisioningSession {
+    pub session_id: String,
+    pub expires_at: String,
+}
+
 fn decode_b64(s: &str) -> Result<Vec<u8>, NetError> {
     BASE64_STANDARD.decode(s).map_err(|e| NetError::Base64(e.to_string()))
 }

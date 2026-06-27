@@ -67,6 +67,24 @@ pub const WINDOW_AUTH_CHALLENGE: i64 = 3600;
 pub const LIMIT_AUTH_TOKEN: i32 = 60;
 pub const WINDOW_AUTH_TOKEN: i64 = 3600;
 
+// Device-linking provisioning mailbox (docs/04 §4). All unauthenticated (the
+// new device has no account yet), so per-IP. Sessions are short-lived and a
+// link involves a handful of round-trips; `await`/poll on GET inflates its
+// count, so GET is the loosest. DEVICE_LINK is the additive add-device call
+// itself (rotation-key authorized) — rare per user.
+pub const ACTION_PROVISIONING_CREATE: &str = "provisioning_create";
+pub const LIMIT_PROVISIONING_CREATE: i32 = 30;
+pub const WINDOW_PROVISIONING_CREATE: i64 = 3600;
+pub const ACTION_PROVISIONING_PUT: &str = "provisioning_put";
+pub const LIMIT_PROVISIONING_PUT: i32 = 120;
+pub const WINDOW_PROVISIONING_PUT: i64 = 3600;
+pub const ACTION_PROVISIONING_GET: &str = "provisioning_get";
+pub const LIMIT_PROVISIONING_GET: i32 = 1200;
+pub const WINDOW_PROVISIONING_GET: i64 = 3600;
+pub const ACTION_DEVICE_LINK: &str = "device_link";
+pub const LIMIT_DEVICE_LINK: i32 = 30;
+pub const WINDOW_DEVICE_LINK: i64 = 3600;
+
 // ── Group endpoints ─────────────────────────────────────────────────────────
 
 // Per-account: group creation is cheap server-side but every legitimate user

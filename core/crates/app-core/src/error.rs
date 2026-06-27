@@ -18,6 +18,9 @@ pub enum AppError {
     #[error("protocol error: {0}")]
     Protocol(String),
 
+    #[error("device-linking error: {0}")]
+    Provisioning(String),
+
     #[error("contact is blocked: {0}")]
     Blocked(String),
 
@@ -45,6 +48,9 @@ pub enum AppErrorFfi {
     Protocol { reason: String },
 
     #[error("{reason}")]
+    Provisioning { reason: String },
+
+    #[error("{reason}")]
     Blocked { reason: String },
 
     /// The PLC tombstone could not be submitted, so the identity was NOT
@@ -61,6 +67,7 @@ impl From<AppError> for AppErrorFfi {
             AppError::Net(e) => AppErrorFfi::Net { reason: e.to_string() },
             AppError::NoAccount => AppErrorFfi::NoAccount,
             AppError::Protocol(s) => AppErrorFfi::Protocol { reason: s },
+            AppError::Provisioning(s) => AppErrorFfi::Provisioning { reason: s },
             AppError::Blocked(s) => AppErrorFfi::Blocked { reason: s },
             AppError::IdentityDeletionFailed(s) => {
                 AppErrorFfi::IdentityDeletionFailed { reason: s }

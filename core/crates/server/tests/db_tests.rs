@@ -1311,3 +1311,85 @@ async fn delete_account_with_filed_abuse_report_succeeds() {
     assert_eq!(about.len(), 1, "reports about the deleted account survive");
     assert_eq!(about[0].reporter_account, other);
 }
+
+// ── Provisioning (device-linking mailbox) tests ──────────────────────────────
+
+#[tokio::test]
+async fn provisioning_session_create_and_slot_round_trip() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    server::db::provisioning::create_session(&mut *tx, "sess-rt-001", 300).await.unwrap();
+
+    // A slot starts empty.
+    assert!(server::db::provisioning::get_slot(&mut *tx, "sess-rt-001", "handshake")
+        .await
+        .unwrap()
+        .is_none());
+
+    // Put then get.
+    let stored = server::db::provisioning::put_slot(&mut *tx, "sess-rt-001", "handshake", b"abc")
+        .await
+        .unwrap();
+    assert!(stored);
+    let got = server::db::provisioning::get_slot(&mut *tx, "sess-rt-001", "handshake")
+        .await
+        .unwrap();
+    assert_eq!(got.as_deref(), Some(&b"abc"[..]));
+
+    // Overwrite (upsert) the same slot.
+    server::db::provisioning::put_slot(&mut *tx, "sess-rt-001", "handshake", b"xyz")
+        .await
+        .unwrap();
+    let got = server::db::provisioning::get_slot(&mut *tx, "sess-rt-001", "handshake")
+        .await
+        .unwrap();
+    assert_eq!(got.as_deref(), Some(&b"xyz"[..]));
+
+    // A different slot is independent.
+    server::db::provisioning::put_slot(&mut *tx, "sess-rt-001", "bundle", b"sealed")
+        .await
+        .unwrap();
+    assert_eq!(
+        server::db::provisioning::get_slot(&mut *tx, "sess-rt-001", "bundle").await.unwrap().as_deref(),
+        Some(&b"sealed"[..])
+    );
+}
+
+#[tokio::test]
+async fn provisioning_put_to_missing_session_is_rejected() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    let stored = server::db::provisioning::put_slot(&mut *tx, "no-such-session", "handshake", b"x")
+        .await
+        .unwrap();
+    assert!(!stored, "writing to a nonexistent session must not store anything");
+    assert!(server::db::provisioning::get_slot(&mut *tx, "no-such-session", "handshake")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn provisioning_expired_session_hides_slots() {
+    let pool = test_pool().await;
+    let mut tx = begin_tx(&pool).await;
+
+    // Create a session that is already expired (negative lifetime).
+    server::db::provisioning::create_session(&mut *tx, "sess-expired-01", -10).await.unwrap();
+
+    // Both writing and reading gate on a live session, so neither succeeds.
+    let stored = server::db::provisioning::put_slot(&mut *tx, "sess-expired-01", "handshake", b"x")
+        .await
+        .unwrap();
+    assert!(!stored, "cannot write to an expired session");
+    assert!(server::db::provisioning::get_slot(&mut *tx, "sess-expired-01", "handshake")
+        .await
+        .unwrap()
+        .is_none());
+
+    // delete_expired sweeps it.
+    let swept = server::db::provisioning::delete_expired(&mut *tx).await.unwrap();
+    assert!(swept >= 1);
+}

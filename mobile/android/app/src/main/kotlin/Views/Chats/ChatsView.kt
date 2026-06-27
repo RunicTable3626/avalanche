@@ -183,7 +183,11 @@ fun ChatsView(
                                 recipientDid != null &&
                                 viewModel.isBot(recipientDid, conversation.accountId)
                             // Preview text — mirrors iOS ConversationRow.previewText.
-                            val previewText: String? = remember(conversation) {
+                            // Computed live (not `remember`d) so the snapshot reads of
+                            // `displayNameCache` inside resolvedName/groupEventText are
+                            // tracked: when a name resolves async, this row recomposes and
+                            // "Unknown" becomes the real name.
+                            val previewText: String? = run {
                                 if (conversation.lastMessageKind > 0) {
                                     val msg = Message(
                                         id = conversation.id,

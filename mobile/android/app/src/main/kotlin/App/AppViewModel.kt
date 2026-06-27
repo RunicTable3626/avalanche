@@ -3,6 +3,7 @@ package net.theavalanche.app
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -218,8 +219,17 @@ class AppViewModel(
     /** Per-account event-channel listener coroutine jobs. Cancelled on logout/mode switch. */
     private val eventJobs: MutableMap<String, Job> = mutableMapOf()
 
-    /** Cached display names for remote DIDs, keyed by DID. */
-    private val displayNameCache: MutableMap<String, String> = mutableMapOf()
+    /**
+     * Cached display names for remote DIDs, keyed by DID. Backed by Compose
+     * snapshot state so that when an async resolution lands
+     * (`applyResolvedDisplayName`), the conversation-list rows — whose preview
+     * text is computed live from this cache via `resolvedName`/`groupEventText`
+     * — recompose and replace "Unknown" with the real name. With a plain map the
+     * read isn't tracked, so a row resolved only after the list first rendered
+     * stays stale until the view is rebuilt (e.g. opening the conversation and
+     * coming back). Mirrors iOS's `@Published displayNameCache`.
+     */
+    private val displayNameCache: MutableMap<String, String> = mutableStateMapOf()
 
     /** DIDs currently being fetched (to avoid duplicate requests). */
     private val displayNameInFlight: MutableSet<String> = mutableSetOf()
@@ -231,8 +241,12 @@ class AppViewModel(
      */
     private val unresolvedDids: MutableSet<String> = mutableSetOf()
 
-    /** Cached bot status for remote DIDs, keyed by DID. */
-    private val isBotCache: MutableMap<String, Boolean> = mutableMapOf()
+    /**
+     * Cached bot status for remote DIDs, keyed by DID. Snapshot-backed for the
+     * same reactivity reason as `displayNameCache`: the row avatar must switch
+     * to the bot frame once bot status resolves.
+     */
+    private val isBotCache: MutableMap<String, Boolean> = mutableStateMapOf()
 
     /** Cached group titles, keyed by URL-safe-no-pad base64 group_id. */
     private val groupTitleCache: MutableMap<String, String> = mutableMapOf()

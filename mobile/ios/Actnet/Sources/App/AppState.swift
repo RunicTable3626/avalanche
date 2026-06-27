@@ -72,8 +72,14 @@ final class AppState: ObservableObject {
     private var stateTasks: [String: Task<Void, Never>] = [:]
     /// Per-account event-channel listener tasks. Cancelled on logout/mode switch.
     private var eventTasks: [String: Task<Void, Never>] = [:]
-    /// Cached display names for remote DIDs, keyed by DID.
-    private var displayNameCache: [String: String] = [:]
+    /// Cached display names for remote DIDs, keyed by DID. `@Published` so that
+    /// when an async resolution lands (`applyResolvedDisplayName`), the
+    /// conversation-list rows — whose preview text is computed live from this
+    /// cache via `resolvedName`/`groupEventText` — re-render and replace
+    /// "Unknown" with the real name. Without this, a row resolved only after the
+    /// list first rendered stays stale until the view is rebuilt (e.g. by
+    /// navigating into the conversation and back).
+    @Published private var displayNameCache: [String: String] = [:]
     /// DIDs currently being fetched (to avoid duplicate requests).
     private var displayNameInFlight: Set<String> = []
     /// DIDs that resolved to no name this session. Suppresses re-spawning a
@@ -86,7 +92,9 @@ final class AppState: ObservableObject {
     /// side-effect of name resolution (same server account record), and read
     /// by avatar rendering to pick the bot frame + badge
     /// (docs/54-bot-presentation.md). A missing entry renders as a person.
-    private var isBotCache: [String: Bool] = [:]
+    /// `@Published` for the same reactivity reason as `displayNameCache`: the
+    /// row avatar must switch to the bot frame once bot status resolves.
+    @Published private var isBotCache: [String: Bool] = [:]
     /// Cached group titles, keyed by URL-safe-no-pad base64 group_id.
     /// Populated by `fetchGroupTitle` and consumed by the conversation
     /// list / `Conversation.title`.

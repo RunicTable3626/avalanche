@@ -1,9 +1,12 @@
 # Multi-device: detailed design
 
 Status: **in-progress design doc.** The cryptographic substrate (per-device
-prekeys, sessions, sender keys, message routing) is already built and exercised;
-the application-level pieces (linking, sync) are not. Sections marked **OPEN**
-are unresolved; sections marked **DECIDED** are committed.
+prekeys, sessions, sender keys, message routing) is built and exercised, and
+**device linking (§4) is now built** — a second device can join an identity over
+an ephemeral provisioning mailbox. Cross-device *sync* (§5) is partial: the event
+channel's `SyncSent`/`SyncRead` types exist and apply, and the Durable channel
+(the storage service, `docs/05`) is built through stage 4. Sections marked
+**OPEN** are unresolved; sections marked **DECIDED** are committed.
 
 Background reading:
 
@@ -92,43 +95,83 @@ drains its own queue.
 - **Stale-session reconciliation** — registration-id comparison forces a session
 refresh when a peer device re-registers (the lazy-establishment work in
 `ensure_group_recipient_sessions`).
+- **Device linking / provisioning** — a 2nd device can now join an identity over
+an ephemeral mailbox; the linking device picks the next free `device_id` (§4).
 
 What is **not** built (the rest of this doc):
 
-- Device linking / provisioning (a 2nd device cannot currently join an identity).
-- Sent-message and read-state sync across a user's own devices.
-- History backfill onto a freshly linked device.
+- Sent-message and read-state sync across a user's own devices (the §5.4 event
+channel: the `SyncSent`/`SyncRead` types and apply paths exist, but the fan-out
+to one's *own* other devices is a no-op until §4 produces a second device — now
+unblocked, but the own-device fan-out wiring is still pending).
+- History backfill onto a freshly linked device (explicit non-goal, §10).
 - Device revocation flow.
 - Device-set-change detection / UX.
 
-`device_id` is threaded through registration and recovery but hardcoded to `1`
-in practice (`RegistrationInfo::device_id`).
+`device_id` is hardcoded to `1` at account *creation* and *recovery*
+(single-slot, `RegistrationInfo::device_id`); **linking** is the one path that
+allocates a fresh `device_id` (max existing + 1).
 
 ## 4. Device linking (provisioning a 2nd device)
 
-**Status: DECIDED (model); provisioning-channel wire details TBD.**
+**Status: BUILT.** The model was DECIDED; the wire protocol below is now
+implemented (`app-core/src/provisioning.rs`, `crypto/src/ephemeral.rs`,
+`server/src/routes/provisioning.rs` + `devices.rs`, migration `019`).
 
 The problem reduces to: *transport the identity's shared identity private key (and
-rotation key) onto the new device without it ever touching the server in
-plaintext, then let the new device build its own fresh per-device state.*
+rotation key + storage key) onto the new device without it ever touching the
+server in plaintext, then let the new device build its own fresh per-device
+state.*
 
-The chosen flow, following Signal's provisioning model:
+### 4.1 The provisioning channel (as built)
 
-1. New device generates an ephemeral keypair, displays a QR encoding its
-  ephemeral public key + a provisioning address.
-2. An existing (already-trusted) device scans it, encrypts the shared identity
-  key + rotation key to the ephemeral public key, and sends it over the
-   server-relayed-but-E2E-encrypted provisioning channel (reuse the relay; the
-   server sees only ciphertext).
-3. New device registers its **own** `device_id`, prekeys, and registration ID on
-  the server; generates its own sessions and sender keys going forward.
+The transport is a short-lived, ciphertext-only **mailbox on a homeserver** (the
+"relay" is the homeserver, not the push-relay crate — that one is push-only).
+Three unauthenticated, per-IP-rate-limited endpoints back it (the new device has
+no account yet), with ~5-minute sessions: `POST /v1/provisioning/sessions`, and
+`PUT`/`GET /v1/provisioning/{id}/{slot}` over two slots (`handshake`, `bundle`).
+
+The handshake is **role- and rendering-flexible** — a deliberate divergence from
+Signal's "desktop is always secondary" model:
+
+1. **Either** device generates an ephemeral Curve25519 key pair and renders a
+  pairing string (`av1.<b64url>…`) as a QR *and/or* a copy-pasteable code. The
+   string carries `{mailbox_url, session_id, ephemeral_pub}`. A server-less
+   device defaults the mailbox to a built-in host (`DEFAULT_MAILBOX_SERVER`), so
+   it never needs to be told a server URL; an existing device uses its own.
+2. The other device ingests the string (scan or paste), generates its own
+  ephemeral key pair, and `PUT`s its public half to the `handshake` slot.
+3. Both derive `K = HKDF(X25519(ephemeral keypairs))`.
+4. The **existing** device seals the bundle under `K` (AES-256-GCM, recovery-blob
+  envelope shape) and `PUT`s it to the `bundle` slot. The **new** device polls,
+   opens it, and registers (4.2).
+
+Because `K` depends on the `ephemeral_pub` carried out-of-band (QR/paste), a
+hostile mailbox can only DoS (mismatched `K` -> clean abort), never read the
+bundle. Role (existing vs. new) is chosen in-app and is independent of who shows
+vs. scans the code. **Short, human-spoken PAKE codes were considered and
+deferred** (would need SPAKE2): a scanned-or-pasted high-entropy code is secure
+under plain ECDH and covers the flexibility goal without new crypto.
+
+### 4.2 Additive registration
+
+The new device registers via `POST /v1/devices/link` — the additive sibling of
+`/v1/devices/replace`: rotation-key authorized (signature over
+`linkdevice:{did}:{new_device_id}:{nonce}`, verified against the DID's PLC
+`rotationKeys`), but it **inserts** a device row instead of swapping one, so the
+existing device set stays intact. The anti-replay nonce is obtained by
+challenging any existing device of the account (the rotation signature is the
+real auth). The new device then pulls durable state via the storage service
+(`docs/05` §11) — groups, contacts, settings arrive there, not in the bundle.
 
 Notes / sharp edges:
 
 - **Linking reuses recovery-blob crypto.** "Restore from recovery" and "link a
 new device" produce nearly the same end state — a device holding the shared
 identity key. The difference is the source (a live device vs. a server-stored
-blob) and the *aliveness assumption* (see §7).
+blob) and the *aliveness assumption* (see §7). The bundle additionally carries
+the **rotation key** (the recovery blob omits it, re-deriving from the passkey —
+which a linked device has no access to, so it must be transported).
 - **All devices are co-equal; there is no "primary."** Any already-trusted device
 can authorize a link. This is Signal's model and is accepted here, but it means
 possession of *any* one device is sufficient to add another — write it down as
@@ -136,6 +179,14 @@ a conscious choice.
 - **Linking is additive: new `device_id`, fresh per-device state.** The new device
 takes a `device_id` not currently in use and generates its own registration ID,
 prekeys, and sessions. The shared identity key is the only thing transported in.
+- **Not e2e-tested end-to-end.** The mailbox + handshake + bundle round-trip is
+covered (both directions); the final `/v1/devices/link` registration is not,
+because it needs a `did:plc:` rotation key resolvable in the live PLC directory
+— the same constraint that leaves `recover_from_blob` untested e2e (`docs/05`
+§13.2). Server-side `link` validation is HTTP-tested.
+- **The linked device does not cache the recovery `blob_key`** (no passkey), so it
+cannot refresh the server recovery blob; the existing device owns that, and
+group keys roam via storage sync.
 
 ## 5. Cross-device sync: what roams, and how
 
@@ -408,11 +459,13 @@ the provisioning channel.
 
 1. **(this doc)** reconcile the identity-key model — zero code, dissolves the
   scariest worries.
-2. **Device linking / provisioning channel** — unblocks everything; reuse
-  recovery-blob crypto, provision the shared identity key + storage key (§4, §5.6,
-  `docs/05-device-data-sync.md`).
+2. **Device linking / provisioning channel** — DONE (§4). Reuses recovery-blob
+  crypto; provisions the shared identity key + rotation key + storage key over an
+  ephemeral homeserver mailbox; additive `/v1/devices/link` registration.
 3. **Event-channel sync** — Sent transcript (covers all of the Conversation
-  channel) + `Read` at minimum. Makes multi-device usable, not just correct (§5.4).
+  channel) + `Read` at minimum. Makes multi-device usable, not just correct
+  (§5.4). Partial: types and apply paths exist; own-device fan-out is the
+  remaining wiring (now unblocked by step 2).
 4. **New-device-in-existing-group SKDM redistribution test** (§6).
 5. **Storage service** — the Durable channel; build per `docs/05-device-data-sync.md`.
   After it, durable features cost a domain table + adapter, not a sync type (§5.6).

@@ -597,6 +597,56 @@ impl PreparedAccount {
     }
 }
 
+// ── DeviceLinkNew wrapper (device linking, new-device side, docs/04 §4) ──────
+
+#[napi]
+pub struct DeviceLinkNew {
+    inner: Arc<core::DeviceLinkNew>,
+}
+
+#[napi]
+impl DeviceLinkNew {
+    #[napi(constructor)]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self { inner: core::DeviceLinkNew::new() }
+    }
+
+    /// This (new) device shows the pairing code. Returns the pairing string to
+    /// render as a QR and/or copyable code. `mailboxServer` defaults to the
+    /// built-in mailbox host when omitted.
+    #[napi]
+    pub async fn create_pairing(&self, mailbox_server: Option<String>) -> napi::Result<String> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.create_pairing(mailbox_server))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    /// This (new) device scanned/pasted the existing device's pairing code.
+    #[napi]
+    pub async fn accept_pairing(&self, code: String) -> napi::Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.accept_pairing(code))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    /// Complete the link: receive the sealed bundle and register this device.
+    /// Blocks until the existing device approves or the attempt times out.
+    #[napi]
+    pub async fn await_link(&self, db_path: String, db_key: String) -> napi::Result<AppCore> {
+        let inner = self.inner.clone();
+        let core_inner = tokio::task::spawn_blocking(move || inner.await_link(db_path, db_key))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)?;
+        Ok(AppCore { inner: core_inner })
+    }
+}
+
 // ── AppCore wrapper ─────────────────────────────────────────────────────────
 
 #[napi]
@@ -717,6 +767,38 @@ impl AppCore {
             .map_err(join_err)?
             .map_err(to_napi)?;
         Ok(AppCore { inner })
+    }
+
+    // ── device linking, existing-device side (docs/04 §4) ────────────────────
+
+    #[napi]
+    pub async fn link_create_pairing(
+        &self,
+        mailbox_server: Option<String>,
+    ) -> napi::Result<String> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.link_create_pairing(mailbox_server))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    #[napi]
+    pub async fn link_accept_pairing(&self, code: String) -> napi::Result<()> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.link_accept_pairing(code))
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
+    }
+
+    #[napi]
+    pub async fn link_send_bundle(&self) -> napi::Result<()> {
+        let core = self.inner.clone();
+        tokio::task::spawn_blocking(move || core.link_send_bundle())
+            .await
+            .map_err(join_err)?
+            .map_err(to_napi)
     }
 
     // ── identity ────────────────────────────────────────────────────────────

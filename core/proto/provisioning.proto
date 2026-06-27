@@ -1,0 +1,47 @@
+syntax = "proto3";
+package actnet.provisioning;
+
+// Device-linking provisioning bundle (docs/04-multi-device.md §4).
+//
+// The existing (already-provisioned) device seals this to the new device over
+// the ephemeral relay mailbox. Wire format inside the AES-GCM envelope mirrors
+// the recovery blob:
+//   version(1) || nonce(12) || ciphertext(ProvisioningBundle proto || tag)
+// The AES key is HKDF(X25519(ephemeral keypairs)) — see app-core provisioning.
+//
+// This is the "static credential" half of the identity (docs/04 §1): the
+// shared identity key + rotation key + storage key + routing info. The new
+// device builds its own per-device state (registration id, prekeys, sessions)
+// and pulls durable state (groups, contacts, settings) via the storage service
+// (docs/05 §11), so none of that rides this bundle.
+message ProvisioningBundle {
+  // libsignal identity keypair, serialized bytes. Shared across the identity's
+  // devices (docs/04 §1); the new device uploads the same public half.
+  bytes identity_keypair = 1;
+
+  // P-256 rotation private key (SEC1 bytes). Authorizes the additive
+  // POST /v1/devices/link on the new device (verified against the DID's PLC
+  // rotationKeys, like /v1/devices/replace). The recovery blob deliberately
+  // omits this (it is re-derived from the passkey there); linking has no
+  // passkey on the new device, so it must be transported.
+  bytes rotation_key_private = 2;
+
+  // 32-byte identity-level storage key (docs/05 §4/§11). Lets the new device
+  // decrypt the durable-state store it pulls after linking.
+  bytes storage_key = 3;
+
+  // The identity's DID (e.g. did:plc:...). The new device registers its link
+  // under this DID rather than minting a new identity.
+  string did = 4;
+
+  // The identity's homeserver list (origins, no trailing slash). servers[0] is
+  // the primary/home server where the link registers and storage is pulled.
+  repeated string servers = 5;
+
+  // User's display name in plaintext, for immediate UI before the profile syncs.
+  string display_name = 6;
+
+  // 32-byte profile key, empty for accounts without a profile. Lets the new
+  // device decrypt its own profile blob.
+  bytes profile_key = 7;
+}

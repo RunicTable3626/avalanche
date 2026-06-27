@@ -27,6 +27,7 @@ pub mod prekeys;
 pub mod profiles;
 pub mod projects;
 pub mod project_tokens;
+pub mod provisioning;
 pub mod push;
 pub mod ip_rate_limits;
 pub mod rate_limits;

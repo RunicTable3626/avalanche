@@ -20,6 +20,7 @@
 //! production implementation of [`Store`]; tests can supply any compatible type.
 //! This keeps cryptographic logic isolated and testable without a database.
 
+pub mod ephemeral;
 pub mod error;
 pub mod groups;
 pub mod identity;
@@ -29,6 +30,7 @@ pub mod sender_cert;
 pub mod sender_keys;
 pub mod session;
 
+pub use ephemeral::EphemeralKeyPair;
 pub use error::CryptoError;
 pub use identity::{IdentityKey, IdentityKeyPair};
 pub use prekeys::{

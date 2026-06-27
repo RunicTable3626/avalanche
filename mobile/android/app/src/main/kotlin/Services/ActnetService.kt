@@ -171,6 +171,14 @@ interface AppCoreProtocol {
     @Throws(AppErrorFfi::class) fun syncStorage()
 
     // -----------------------------------------------------------------------
+    // Device linking, existing-device side (docs/04-multi-device.md §4)
+    // -----------------------------------------------------------------------
+
+    @Throws(AppErrorFfi::class) fun linkCreatePairing(mailboxServer: String?): String
+    @Throws(AppErrorFfi::class) fun linkAcceptPairing(code: String)
+    @Throws(AppErrorFfi::class) fun linkSendBundle()
+
+    // -----------------------------------------------------------------------
     // Messaging
     // -----------------------------------------------------------------------
 
@@ -342,6 +350,11 @@ class LiveAppCoreProtocol(private val core: AppCore) : AppCoreProtocol {
     override fun deleteIdentity() = core.deleteIdentity()
 
     override fun syncStorage() = core.syncStorage()
+
+    override fun linkCreatePairing(mailboxServer: String?): String =
+        core.linkCreatePairing(mailboxServer)
+    override fun linkAcceptPairing(code: String) = core.linkAcceptPairing(code)
+    override fun linkSendBundle() = core.linkSendBundle()
 
     override fun sendDm(recipientDid: String, plaintext: ByteArray, sentAtMs: Long) =
         core.sendDm(recipientDid, plaintext, sentAtMs)
@@ -534,6 +547,10 @@ open class MockAppCoreProtocol : AppCoreProtocol {
     override fun deleteIdentity() {}
 
     override fun syncStorage() {}
+
+    override fun linkCreatePairing(mailboxServer: String?): String = ""
+    override fun linkAcceptPairing(code: String) {}
+    override fun linkSendBundle() {}
 
     override fun sendDm(recipientDid: String, plaintext: ByteArray, sentAtMs: Long) {}
     override fun sendMessage(target: MessageTarget, plaintext: ByteArray, sentAtMs: Long) {}

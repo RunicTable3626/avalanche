@@ -188,6 +188,22 @@ pub fn sign_with_rotation_key(
     Ok(sig.to_der().as_bytes().to_vec())
 }
 
+/// Derive the P-256 rotation public key (SEC1 compressed) from its private
+/// bytes. Used by device linking: the new device receives only the rotation
+/// *private* key over the provisioning channel and must recompute the public
+/// half to submit it in the link request.
+pub fn rotation_public_from_private(private_key_bytes: &[u8]) -> Result<Vec<u8>, AppError> {
+    use p256::ecdsa::SigningKey;
+
+    let signing_key = SigningKey::from_bytes(private_key_bytes.into())
+        .map_err(|e| AppError::Protocol(format!("invalid rotation key: {e}")))?;
+    Ok(signing_key
+        .verifying_key()
+        .to_encoded_point(true)
+        .as_bytes()
+        .to_vec())
+}
+
 /// A single group's worth of input to the blob builder.
 pub struct GroupBlobEntry {
     pub master_key: Vec<u8>,

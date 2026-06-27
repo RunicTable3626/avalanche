@@ -307,13 +307,23 @@ fans out per-device** in the send path.
 
 Built per-device today: registration, prekey fetch, 1:1 + group send fan-out, per-device queues, stale-
 session reconciliation via registration-id comparison. `device_id` is a routing label only, carries no key
-material. Not built: device linking, sync, history backfill, revocation, device-set-change UX.
+material. Built: **device linking** (below). Not built: own-device event-sync fan-out, history backfill
+(explicit non-goal), revocation, device-set-change UX.
 
-**Device linking** (📐, model decided): new device shows QR (ephemeral pubkey + provisioning addr); existing
-device encrypts shared identity key + storage key to it over the relay-mediated-but-E2E provisioning channel
-(server sees only ciphertext); new device registers its own device_id/prekeys/sessions. **All devices co-
-equal, no "primary"** (Signal model — possession of any one device authorizes a link; conscious choice).
-Linking reuses recovery-blob crypto.
+**Device linking** (✅ built, `04` §4): a short-lived **ciphertext-only mailbox on a homeserver** (3 unauth
+endpoints `/v1/provisioning/{sessions,id/slot}`, ~5-min TTL) rendezvouses the two devices. **Role- and
+rendering-flexible** (deliberate divergence from Signal's "desktop always secondary"): either device shows a
+pairing string (rendered as QR *and/or* copy-paste code) carrying `{mailbox_url, session_id, ephemeral_pub}`;
+the other posts its ephemeral pubkey to a `handshake` slot; both derive `K=HKDF(X25519(...))`; the existing
+device seals the bundle (identity key + **rotation key** + storage key + did + servers) under `K` to a
+`bundle` slot. K depends on the out-of-band pubkey → hostile mailbox can DoS but not read. New device
+registers additively via **`POST /v1/devices/link`** (rotation-key authorized like `/replace`, but inserts —
+existing devices stay), then pulls durable state via storage service. Server-less device defaults
+`DEFAULT_MAILBOX_SERVER` (`av.theavalanche.net`), so it needn't know a URL. **Short PAKE codes deferred**
+(scanned/pasted high-entropy code is secure under plain ECDH; SPAKE2 unneeded). **All devices co-equal, no
+"primary"** (possession of any one authorizes a link). Reuses recovery-blob crypto; bundle adds the rotation
+key (recovery omits it, re-deriving from passkey). Registration not e2e-tested (needs live PLC, like
+`recover_from_blob`); mailbox+handshake+bundle round-trip is.
 
 **Three sync channels (`04` §5), deliberately cap the sync-message-type count** (Signal accreted ~20
 SyncMessage variants before moving durable state to a Storage Service — we commit to the capped model up

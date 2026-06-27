@@ -1609,6 +1609,41 @@ export class AppCore {
   async rotateGroupPseudonym(groupId: string): Promise<Uint8Array> {
     return asU8(await this._native.rotateGroupPseudonym(groupId));
   }
+
+  // ── device linking, existing-device side (docs/04 §4) ─────────────────────
+
+  /**
+   * Show a pairing code to link a new device to this identity. Creates an
+   * ephemeral mailbox session and returns the pairing string to render as a QR
+   * and/or copyable code. `mailboxServer` defaults to this device's own server.
+   * Follow with {@link AppCore.linkSendBundle}.
+   *
+   * @category Device linking
+   */
+  async linkCreatePairing(mailboxServer?: string): Promise<string> {
+    return this._native.linkCreatePairing(mailboxServer);
+  }
+
+  /**
+   * Ingest the new device's pairing code (scanned or pasted). Follow with
+   * {@link AppCore.linkSendBundle}.
+   *
+   * @category Device linking
+   */
+  async linkAcceptPairing(code: string): Promise<void> {
+    await this._native.linkAcceptPairing(code);
+  }
+
+  /**
+   * Seal the identity's credentials to the new device and post them to the
+   * mailbox. Requires a prior {@link AppCore.linkCreatePairing} or
+   * {@link AppCore.linkAcceptPairing}.
+   *
+   * @category Device linking
+   */
+  async linkSendBundle(): Promise<void> {
+    await this._native.linkSendBundle();
+  }
 }
 
 // ── PreparedAccount ─────────────────────────────────────────────────────────
@@ -1658,6 +1693,50 @@ export class PreparedAccount {
    */
   did(): string {
     return this._native.did();
+  }
+}
+
+// ── DeviceLinkNew ─────────────────────────────────────────────────────────────
+
+/**
+ * Drives device linking from the **new** (joining) device, which has no
+ * {@link AppCore} yet (docs/04 §4). Role is independent of who shows the code:
+ *
+ * - **Show a code:** {@link DeviceLinkNew.createPairing} → render the returned
+ *   string as a QR and/or copyable text → {@link DeviceLinkNew.awaitLink}.
+ * - **Scan/paste a code:** {@link DeviceLinkNew.acceptPairing} →
+ *   {@link DeviceLinkNew.awaitLink}.
+ *
+ * The existing device approves via {@link AppCore.linkSendBundle}.
+ *
+ * @category Device linking
+ */
+export class DeviceLinkNew {
+  /** @internal */ readonly _native: native.DeviceLinkNew;
+
+  constructor() {
+    this._native = new native.DeviceLinkNew();
+  }
+
+  /**
+   * This (new) device shows the pairing code. Returns the pairing string.
+   * `mailboxServer` defaults to the built-in mailbox host when omitted.
+   */
+  async createPairing(mailboxServer?: string): Promise<string> {
+    return this._native.createPairing(mailboxServer);
+  }
+
+  /** This (new) device scanned/pasted the existing device's pairing code. */
+  async acceptPairing(code: string): Promise<void> {
+    await this._native.acceptPairing(code);
+  }
+
+  /**
+   * Complete the link: receive the sealed bundle and register this device.
+   * Blocks until the existing device approves or the attempt times out.
+   */
+  async awaitLink(dbPath: string, dbKey: string): Promise<AppCore> {
+    return new AppCore(await this._native.awaitLink(dbPath, dbKey));
   }
 }
 

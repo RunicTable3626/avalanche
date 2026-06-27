@@ -1323,3 +1323,212 @@ async fn info_returns_server_name() {
     assert!(body["server_name"].is_string());
     assert_eq!(body["privacy_policy_url"], Value::Null);
 }
+
+// ── Provisioning mailbox + device-link tests ─────────────────────────────────
+
+/// Create a provisioning session and return its id.
+async fn create_provisioning_session(app: &axum::Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/provisioning/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    body["session_id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn provisioning_session_put_get_handshake() {
+    let app = routes::router().with_state(test_state().await);
+    let session_id = create_provisioning_session(&app).await;
+
+    // GET before any PUT → 404.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/provisioning/{session_id}/handshake"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // PUT the handshake slot.
+    let put_body = serde_json::json!({ "ciphertext": BASE64_STANDARD.encode([7u8; 33]) });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/provisioning/{session_id}/handshake"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&put_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // GET it back.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/provisioning/{session_id}/handshake"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        BASE64_STANDARD.decode(body["ciphertext"].as_str().unwrap()).unwrap(),
+        vec![7u8; 33]
+    );
+}
+
+#[tokio::test]
+async fn provisioning_unknown_slot_returns_400() {
+    let app = routes::router().with_state(test_state().await);
+    let session_id = create_provisioning_session(&app).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/provisioning/{session_id}/not-a-slot"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn provisioning_put_missing_session_returns_404() {
+    let app = routes::router().with_state(test_state().await);
+    let put_body = serde_json::json!({ "ciphertext": BASE64_STANDARD.encode([1u8; 4]) });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/provisioning/does-not-exist/handshake")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&put_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn provisioning_oversize_slot_returns_400() {
+    let app = routes::router().with_state(test_state().await);
+    let session_id = create_provisioning_session(&app).await;
+    // 17 KiB > MAX_SLOT_BYTES (16 KiB).
+    let put_body = serde_json::json!({ "ciphertext": BASE64_STANDARD.encode(vec![0u8; 17 * 1024]) });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/provisioning/{session_id}/bundle"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&put_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn link_device_bad_base64_rotation_key_returns_400() {
+    let app = routes::router().with_state(test_state().await);
+    let body = serde_json::json!({
+        "did": "did:plc:linktest00000000001",
+        "new_device_id": 2,
+        "new_identity_key": BASE64_STANDARD.encode([1u8; 33]),
+        "new_registration_id": 5,
+        "nonce": "n",
+        "rotation_key_signature": BASE64_STANDARD.encode([0u8; 8]),
+        "rotation_key": "!!!not base64!!!",
+        "signed_prekey": { "id": 1, "public_key": BASE64_STANDARD.encode([2u8; 32]), "signature": BASE64_STANDARD.encode([3u8; 64]) },
+        "one_time_prekeys": [],
+        "kyber_prekey": { "id": 1, "public_key": BASE64_STANDARD.encode([5u8; 32]), "signature": BASE64_STANDARD.encode([6u8; 64]) },
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/devices/link")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn link_device_bad_signature_returns_401() {
+    use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+
+    let app = routes::router().with_state(test_state().await);
+
+    // A real P-256 rotation key, but a signature over the WRONG payload, so
+    // verification fails before any PLC lookup is attempted.
+    let signing_key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let rotation_key = signing_key
+        .verifying_key()
+        .to_encoded_point(true)
+        .as_bytes()
+        .to_vec();
+    let sig: Signature = signing_key.sign(b"this is not the link payload");
+
+    let body = serde_json::json!({
+        "did": "did:plc:linktest00000000002",
+        "new_device_id": 2,
+        "new_identity_key": BASE64_STANDARD.encode([1u8; 33]),
+        "new_registration_id": 5,
+        "nonce": "n",
+        "rotation_key_signature": BASE64_STANDARD.encode(sig.to_der().as_bytes()),
+        "rotation_key": BASE64_STANDARD.encode(&rotation_key),
+        "signed_prekey": { "id": 1, "public_key": BASE64_STANDARD.encode([2u8; 32]), "signature": BASE64_STANDARD.encode([3u8; 64]) },
+        "one_time_prekeys": [],
+        "kyber_prekey": { "id": 1, "public_key": BASE64_STANDARD.encode([5u8; 32]), "signature": BASE64_STANDARD.encode([6u8; 64]) },
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/devices/link")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

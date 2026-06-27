@@ -52,6 +52,12 @@ extension AppCoreProtocol {
 
     func syncStorage() throws {}
 
+    // MARK: - Device linking, existing-device side (docs/04-multi-device.md §4)
+
+    func linkCreatePairing(mailboxServer: String?) throws -> String { "" }
+    func linkAcceptPairing(code: String) throws {}
+    func linkSendBundle() throws {}
+
     // MARK: - Messaging
 
     func sendDm(recipientDid: String, plaintext: Data, sentAtMs: Int64) throws {}

@@ -125,7 +125,7 @@ Before closing any branch that adds or changes Desktop UI:
 4. Add to `ActnetService` interface in Kotlin and stub in `MockActnetService.kt`
 5. Call from `AppState.swift` via `Task.detached`
 6. Call from `AppViewModel.kt` via `withContext(Dispatchers.IO)`
-7. Add Tauri command in `desktop/src-tauri/src/lib.rs` with `#[specta::specta]` — types flow automatically to TS via `bindings.ts` (regenerated on debug build). Update `AvalancheService` interface + `MockAvalancheService` + `DevServerAvalancheService` if the signature changed. No manual typed wrapper needed; the generated `commands.*` in `bindings.ts` handle the invoke call.
+7. Add Tauri command in `desktop/src-tauri/src/lib.rs` with `#[specta::specta]`, then **run `make desktop-bindings`** to regenerate `desktop/src/bindings.ts` (it is checked in, not generated at build time — a plain `cargo tauri dev` does **not** regenerate it; codegen only runs behind the `codegen` feature). Commit the regenerated `bindings.ts` with your change — CI fails if it drifts from the command surface. Update `AvalancheService` interface + `MockAvalancheService` + `DevServerAvalancheService` if the signature changed. No manual typed wrapper needed; the generated `commands.*` in `bindings.ts` handle the invoke call.
 
 ---
 

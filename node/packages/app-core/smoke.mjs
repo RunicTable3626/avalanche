@@ -26,6 +26,8 @@ for (const method of [
   "isGroupMember",
   "leaveServer",
   "deleteIdentity",
+  "reconnectNow",
+  "setAppActive",
 ]) {
   if (typeof AppCore.prototype[method] !== "function") {
     console.error(`unexpected: AppCore.prototype.${method} is not a function`);

@@ -1009,6 +1009,30 @@ export class AppCore {
   }
 
   /**
+   * Opportunistically retry/validate connectivity now: wakes the reconnect
+   * loop if it's backing off, and probes a live socket for silent death.
+   * Cheap and infallible. Call on any signal that connectivity may have
+   * changed (foreground, network change, user action).
+   *
+   * @category Connection
+   */
+  reconnectNow(): void {
+    this._native.reconnectNow();
+  }
+
+  /**
+   * Tell the core whether the app is foreground-active. Gates the WebSocket
+   * keepalive (foreground-only, for battery); a transition to active also
+   * probes the connection. Bots can leave this untouched — the keepalive
+   * defaults on.
+   *
+   * @category Connection
+   */
+  setAppActive(active: boolean): void {
+    this._native.setAppActive(active);
+  }
+
+  /**
    * Block (off the event loop) until the connection state differs from
    * `last`, then return the new value. Typically used in a long-running
    * `while` loop to drive a UI indicator.

@@ -25,6 +25,7 @@ extension AppCoreProtocol {
     func homeServer() -> String { "" }
     func setDisplayName(displayName: String) throws {}
     func contactDisplayName(did: String) throws -> String { "" }
+    func cachedDisplayNames(dids: [String]) throws -> [String: String] { [:] }
     func refreshContactProfile(did: String) throws -> Bool { false }
     func primeContactProfile(did: String, displayName: String, profileKey: Data) throws {}
     func listContacts() throws -> [ContactRowFfi] { [] }

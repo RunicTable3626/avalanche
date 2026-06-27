@@ -1081,6 +1081,45 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The set of DIDs whose display name a batch of conversation summaries will
+    /// render: the DM peer for each DM, and for each group its last-message
+    /// sender plus the actor/target of a system-event preview. Used to warm
+    /// `displayNameCache` from local storage before the rows are built. Pure and
+    /// side-effect-free so it can run off the main actor.
+    nonisolated private static func displayNameDidsToWarm(summaries: [ConversationSummaryFfi], accountId: String) -> [String] {
+        var dids: Set<String> = []
+        for s in summaries {
+            if Self.groupId(from: s.conversationId) != nil {
+                if let last = s.lastMessage {
+                    if !last.senderDid.isEmpty { dids.insert(last.senderDid) }
+                    // System-event previews resolve actor/target DIDs (e.g.
+                    // "Alice made Bob an admin"), so warm those too.
+                    if last.kind > 0 {
+                        let m = Message(
+                            id: last.id,
+                            conversationId: last.conversationId,
+                            senderAccountId: last.senderDid,
+                            body: last.body,
+                            sentAtMs: last.sentAtMs,
+                            editedAtMs: nil,
+                            readAtMs: nil,
+                            deliveryStatus: .sent,
+                            kind: Int(last.kind),
+                            metadata: last.metadata
+                        )
+                        if let ev = m.groupEvent {
+                            if !ev.actorDid.isEmpty { dids.insert(ev.actorDid) }
+                            if !ev.targetDid.isEmpty { dids.insert(ev.targetDid) }
+                        }
+                    }
+                }
+            } else if let recipientDid = Self.recipientDid(from: s.conversationId, accountId: accountId) {
+                dids.insert(recipientDid)
+            }
+        }
+        return Array(dids)
+    }
+
     /// Load persisted messages from SQLCipher for a conversation.
     /// Derive the conversation list from each account's `message_history`
     /// via a single indexed query. Sorted newest-first; titles are resolved
@@ -1098,17 +1137,15 @@ final class AppState: ObservableObject {
             for (accountId, core) in pairs {
                 group.addTask {
                     let rows = (try? core.loadConversations()) ?? []
-                    // Pre-resolve DM peer names from the local store (a fast
-                    // SQLCipher read, no network) before publishing the list.
-                    // Otherwise the row title falls back to the raw `did:local:…`
-                    // and only updates once the async resolver runs, causing a
-                    // visible flash on cold launch.
-                    var localNames: [String: String] = [:]
-                    for s in rows {
-                        guard let rid = Self.recipientDid(from: s.conversationId, accountId: accountId) else { continue }
-                        let name = (try? core.contactDisplayName(did: rid)) ?? ""
-                        if !name.isEmpty { localNames[rid] = name }
-                    }
+                    // Warm the display-name cache from local storage (no network)
+                    // for every DID these rows will render — DM peers, plus group
+                    // last-message senders and system-event actor/target DIDs.
+                    // Otherwise those previews fall back to the raw DID / "Unknown"
+                    // and only correct once the async resolver runs, causing a
+                    // visible flash on cold launch. One bulk FFI call, done off the
+                    // main actor alongside the conversation load (both blocking reads).
+                    let dids = Self.displayNameDidsToWarm(summaries: rows, accountId: accountId)
+                    let localNames = (try? core.cachedDisplayNames(dids: dids)) ?? [:]
                     return (accountId, rows, localNames)
                 }
             }
@@ -1215,7 +1252,9 @@ final class AppState: ObservableObject {
 
     /// Parse the group_id out of a conversation ID of the form
     /// `group-<groupIdB64>`. Returns nil for non-group IDs.
-    private static func groupId(from conversationId: String) -> String? {
+    /// `nonisolated` (pure string parsing) so the conversation-load task group
+    /// can call it off the main actor.
+    nonisolated private static func groupId(from conversationId: String) -> String? {
         let prefix = "group-"
         guard conversationId.hasPrefix(prefix) else { return nil }
         return String(conversationId.dropFirst(prefix.count))

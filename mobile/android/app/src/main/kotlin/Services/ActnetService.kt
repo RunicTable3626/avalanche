@@ -171,6 +171,7 @@ interface AppCoreProtocol {
     @Throws(AppErrorFfi::class) fun homeServer(): String
     @Throws(AppErrorFfi::class) fun setDisplayName(displayName: String)
     @Throws(AppErrorFfi::class) fun contactDisplayName(did: String): String
+    @Throws(AppErrorFfi::class) fun cachedDisplayNames(dids: List<String>): Map<String, String>
     @Throws(AppErrorFfi::class) fun refreshContactProfile(did: String): Boolean
     @Throws(AppErrorFfi::class) fun primeContactProfile(did: String, displayName: String, profileKey: ByteArray)
     @Throws(AppErrorFfi::class) fun listContacts(): List<ContactRowFfi>
@@ -364,6 +365,7 @@ class LiveAppCoreProtocol(private val core: AppCore) : AppCoreProtocol {
     override fun homeServer(): String = core.homeServer()
     override fun setDisplayName(displayName: String) = core.setDisplayName(displayName)
     override fun contactDisplayName(did: String): String = core.contactDisplayName(did)
+    override fun cachedDisplayNames(dids: List<String>): Map<String, String> = core.cachedDisplayNames(dids)
     override fun refreshContactProfile(did: String): Boolean = core.refreshContactProfile(did)
     override fun primeContactProfile(did: String, displayName: String, profileKey: ByteArray) =
         core.primeContactProfile(did, displayName, profileKey)
@@ -577,6 +579,7 @@ open class MockAppCoreProtocol : AppCoreProtocol {
     override fun homeServer(): String = ""
     override fun setDisplayName(displayName: String) {}
     override fun contactDisplayName(did: String): String = ""
+    override fun cachedDisplayNames(dids: List<String>): Map<String, String> = emptyMap()
     override fun refreshContactProfile(did: String): Boolean = false
     override fun primeContactProfile(did: String, displayName: String, profileKey: ByteArray) {}
     override fun listContacts(): List<ContactRowFfi> = emptyList()

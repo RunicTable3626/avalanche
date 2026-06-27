@@ -237,6 +237,15 @@ final class MockAppCore: AppCoreProtocol, @unchecked Sendable {
         return contactDisplayNames[did] ?? ""
     }
 
+    func cachedDisplayNames(dids: [String]) throws -> [String: String] {
+        lock.lock(); defer { lock.unlock() }
+        var out: [String: String] = [:]
+        for did in dids {
+            if let name = contactDisplayNames[did], !name.isEmpty { out[did] = name }
+        }
+        return out
+    }
+
     func refreshContactProfile(did: String) throws -> Bool {
         // Mock: nothing to refresh from.
         false

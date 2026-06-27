@@ -73,6 +73,10 @@ class MockAppCore(
         contactDisplayNames[did] ?: ""
     }
 
+    override fun cachedDisplayNames(dids: List<String>): Map<String, String> = lock.withLock {
+        dids.mapNotNull { did -> contactDisplayNames[did]?.takeIf { it.isNotEmpty() }?.let { did to it } }.toMap()
+    }
+
     override fun refreshContactProfile(did: String): Boolean = false
 
     override fun primeContactProfile(did: String, displayName: String, profileKey: ByteArray) {

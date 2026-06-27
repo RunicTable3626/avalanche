@@ -1398,24 +1398,22 @@ class AppViewModel(
         data class AccountSummaries(
             val accountId: String,
             val summaries: List<uniffi.app_core.ConversationSummaryFfi>,
-            // recipientDid -> locally-known display name, resolved up front so the
-            // first render shows names instead of raw DIDs.
+            // did -> locally-known display name, resolved up front so the first
+            // render shows names instead of raw DIDs / "Unknown".
             val localNames: Map<String, String>,
         )
 
         val summariesPerAccount: List<AccountSummaries> = pairs.map { (accountId, core) ->
             withContext(Dispatchers.IO) {
                 val rows = runCatching { core.loadConversations() }.getOrElse { emptyList() }
-                // Pre-resolve DM peer names from the local store (a fast SQLCipher
-                // read, no network) before publishing the list. Otherwise the row
-                // title falls back to the raw `did:local:…` and only updates once
-                // the async resolver runs, causing a visible flash on cold launch.
-                val localNames = mutableMapOf<String, String>()
-                for (s in rows) {
-                    val rid = recipientDidFromConversationId(s.conversationId, accountId) ?: continue
-                    val name = runCatching { core.contactDisplayName(did = rid) }.getOrElse { "" }
-                    if (name.isNotEmpty()) localNames[rid] = name
-                }
+                // Warm the display-name cache from local storage (no network) for
+                // every DID these rows will render — DM peers, plus group
+                // last-message senders and system-event actor/target DIDs.
+                // Otherwise those previews fall back to the raw DID / "Unknown"
+                // and only correct once the async resolver runs, causing a visible
+                // flash on cold launch. One bulk FFI call.
+                val dids = displayNameDidsToWarm(rows, accountId)
+                val localNames = runCatching { core.cachedDisplayNames(dids) }.getOrElse { emptyMap() }
                 AccountSummaries(accountId, rows, localNames)
             }
         }
@@ -1512,6 +1510,46 @@ class AppViewModel(
         for ((groupId, accountId) in groupsNeedingRefresh) {
             refreshGroupTitle(groupId = groupId, accountId = accountId)
         }
+    }
+
+    /**
+     * The set of DIDs whose display name a batch of conversation summaries will
+     * render: the DM peer for each DM, and for each group its last-message
+     * sender plus the actor/target of a system-event preview. Used to warm
+     * [displayNameCache] from local storage before the rows are built.
+     * Mirrors iOS AppState.displayNameDidsToWarm(summaries:accountId:).
+     */
+    private fun displayNameDidsToWarm(
+        summaries: List<uniffi.app_core.ConversationSummaryFfi>,
+        accountId: String,
+    ): List<String> {
+        val dids = mutableSetOf<String>()
+        for (s in summaries) {
+            if (groupIdFromConversationId(s.conversationId) != null) {
+                val last = s.lastMessage ?: continue
+                if (last.senderDid.isNotEmpty()) dids.add(last.senderDid)
+                // System-event previews resolve actor/target DIDs (e.g.
+                // "Alice made Bob an admin"), so warm those too.
+                if (last.kind.toInt() > 0) {
+                    val m = Message(
+                        id = last.id,
+                        conversationId = last.conversationId,
+                        senderAccountId = last.senderDid,
+                        body = last.body,
+                        sentAtMs = last.sentAtMs,
+                        kind = last.kind.toInt(),
+                        metadata = last.metadata,
+                    )
+                    m.groupEvent?.let { ev ->
+                        if (ev.actorDid.isNotEmpty()) dids.add(ev.actorDid)
+                        if (ev.targetDid.isNotEmpty()) dids.add(ev.targetDid)
+                    }
+                }
+            } else {
+                recipientDidFromConversationId(s.conversationId, accountId)?.let { dids.add(it) }
+            }
+        }
+        return dids.toList()
     }
 
     /** Parse the recipient DID out of a DM conversation ID. Returns null for non-DM IDs. */

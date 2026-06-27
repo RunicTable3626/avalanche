@@ -21,6 +21,26 @@
   align-items: center;
   justify-content: space-between;
 }
+.chats-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chats-new-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-accent);
+  cursor: pointer;
+}
+.chats-new-btn:hover {
+  background: var(--color-divider);
+}
 .chats-unread-badge {
   background: var(--color-error);
   color: #fff;

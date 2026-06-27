@@ -8,7 +8,6 @@ import {
 } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { load as loadStore } from "@tauri-apps/plugin-store";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Account, Conversation, InviteInfo, ServerInfo } from "../models";
 import { displayHost } from "../lib/format";
 import { DeliveryStatus, type Message } from "../models/Message";
@@ -139,13 +138,22 @@ export function AppProvider(props: { children: JSX.Element }) {
   // Load-once guards
   const loadedConversations = { value: false };
   const loadedMessages: Set<string> = new Set();
+  // Conversation ids created in-memory (e.g. an incoming welcome DM) that aren't
+  // backed by a row in the local DB. loadConversationsFromStore preserves only
+  // these across a reload — NOT arbitrary DB-absent entries, which would
+  // resurrect conversations the DB intentionally dropped (e.g. left groups).
+  // NOTE: app-core does not persist *incoming* messages, so a received-DM
+  // conversation never appears in a DB summary and stays pending for the whole
+  // session (and is lost on app restart — see the incoming-message handler).
+  // The drop-on-DB-appearance path below still matters for any conversation that
+  // does get persisted (e.g. once an outgoing reply is saved).
+  const pendingConversations: Set<string> = new Set();
 
   // Event loop lifecycle
   let eventLoopRunning = false;
   let connLoopRunning = false;
   let eventLoopTimeout: ReturnType<typeof setTimeout> | undefined;
   let connLoopTimeout: ReturnType<typeof setTimeout> | undefined;
-  let unlistenEvents: UnlistenFn | null = null;
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -358,10 +366,9 @@ export function AppProvider(props: { children: JSX.Element }) {
   }
 
   function resetSession() {
-    // Notify the Rust backend to drop the old AppCore handle and cancel the
-    // background event loop before clearing frontend state.  This prevents
-    // the stale Arc<AppCore> from being reused by a subsequent startEventLoop
-    // call (see T38 / clear_session).
+    // Drop the Rust AppCore handle so the old reconnect task + WS connection
+    // die on drop.  The TS-owned polling loop has already been stopped by
+    // stopPolling() above, so clear_session doesn't need to cancel any thread.
     service().clearSession().catch(() => {});
     // Block restoreAccounts from re-entering while we clear persisted state.
     // Otherwise SplashView.onMount fires restoreAccounts before persistAccounts([])
@@ -380,6 +387,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     );
     loadedConversations.value = false;
     loadedMessages.clear();
+    pendingConversations.clear();
     // Reset the reactive display-name cache so components get a reactive
     // update on logout/mode-switch.
     setDisplayNameCache(reconcile({}));
@@ -476,10 +484,19 @@ export function AppProvider(props: { children: JSX.Element }) {
       };
     });
 
-    const sorted = [...convs].sort(
+    const dbIds = new Set(convs.map((c) => c.id));
+    // A pending conversation that now appears in the DB is fully persisted —
+    // stop tracking it so it follows normal DB-driven lifecycle from here on.
+    for (const id of dbIds) pendingConversations.delete(id);
+    // Preserve only still-unpersisted in-memory conversations. Other DB-absent
+    // entries (e.g. a group the DB dropped after leaving) are intentionally let go.
+    const preserved = store.conversations.filter(
+      (c) => !dbIds.has(c.id) && pendingConversations.has(c.id)
+    );
+    const merged = [...convs, ...preserved].sort(
       (a, b) => (b.lastMessageDate ?? 0) - (a.lastMessageDate ?? 0)
     );
-    setStore("conversations", sorted);
+    setStore("conversations", merged);
   }
 
   function loadMessagesFromStore(conversationId: string, _accountId: string) {
@@ -769,15 +786,9 @@ export function AppProvider(props: { children: JSX.Element }) {
                 m.sentAtMs ?? Date.now()
               );
             } else {
-              // TODO(bug): in-memory conversations disappear when a
-              // subsequent loadConversations reload replaces the list with
-              // DB results.  Messages are not yet persisted at this point
-              // (saveMessage is fire-and-forget), so the conversation (e.g.
-              // the adminbot welcome DM) vanishes from the sidebar.
-              //
-              // Conversation not in the list yet — create it in-memory.
-              // Reloading from the DB won't help because the message hasn't
-              // been persisted yet (saveMessage is best-effort, async).
+              // Conversation not in the list yet — create it in-memory and
+              // mark it pending so the merge in loadConversationsFromStore
+              // preserves it across reloads until its message lands in the DB.
               const isGroup = !!m.groupId;
               const serverUrl = getServerUrl(accountId);
               const newConv: Conversation = {
@@ -794,6 +805,7 @@ export function AppProvider(props: { children: JSX.Element }) {
                 isRequest: false,
                 isBlocked: false,
               };
+              pendingConversations.add(conversationId);
               setStore("conversations", (prev) => [newConv, ...prev]);
             }
           }
@@ -990,54 +1002,25 @@ export function AppProvider(props: { children: JSX.Element }) {
     if (eventLoopRunning) return;
     eventLoopRunning = true;
 
-    if (store.serviceMode === ServiceMode.DevServer) {
-      // The Rust thread (dedicated std::thread) calls next_events() in a
-      // loop, which decrypts live WebSocket messages and emits them as
-      // "avalanche-event" events.  We listen for those events here.
-      // receiveMessages() is a REST inbox fetch — it does NOT return live
-      // push events, so we don't poll it.
-      listen<IncomingEvent[]>("avalanche-event", (ev) => {
-        if (!eventLoopRunning) return;
-        handleIncomingEvents(ev.payload);
-      }).then((fn) => {
+    // Unified async polling loop.  `nextEvents()` blocks until decrypted
+    // events arrive (WebSocket push via app-core's channel), then drains the
+    // batch.  The Tauri command is async — it parks on the tokio runtime, so
+    // the JS event loop stays responsive.  Both DevServer and Mock mode use
+    // the same pattern; the ordering race is gone because the consumer owns
+    // the cadence.
+    const loop = async () => {
+      if (!eventLoopRunning) return;
+      try {
+        const events = await service().nextEvents();
+        handleIncomingEvents(events);
+        if (eventLoopRunning) void loop();
+      } catch {
         if (eventLoopRunning) {
-          unlistenEvents = fn;
-          // Listener active — now safe to start the decrypt thread.
-          void service().startEventLoop().catch((e) => {
-            console.error("startEventLoop failed:", e);
-          });
-          // Drain any messages that arrived in the REST inbox gap between
-          // the last poll and the event channel being established.
-          // receiveMessages() is a REST inbox fetch, not live push — it
-          // covers the window where messages were queued server-side before
-          // the WebSocket event channel was connected (see CLAUDE.md §Debugging).
-          void service().receiveMessages().catch((e) => {
-            console.warn("receiveMessages drain failed:", e);
-          });
-        } else {
-          fn();
+          eventLoopTimeout = setTimeout(() => void loop(), 1000);
         }
-      }).catch((e: unknown) => {
-        console.warn("avalanche-event listener registration failed:", e);
-      });
-    } else {
-      // Mock mode: existing polling pattern.  MockService.nextEvents() parks
-      // its Promise when there are no events, so this loop is effectively
-      // parked until an echo-reply arrives.
-      const loop = async () => {
-        if (!eventLoopRunning) return;
-        try {
-          const events = await service().nextEvents();
-          handleIncomingEvents(events);
-          if (eventLoopRunning) void loop();
-        } catch {
-          if (eventLoopRunning) {
-            eventLoopTimeout = setTimeout(() => void loop(), 1000);
-          }
-        }
-      };
-      void loop();
-    }
+      }
+    };
+    void loop();
   }
 
   function startConnectionLoop() {
@@ -1097,10 +1080,6 @@ export function AppProvider(props: { children: JSX.Element }) {
     if (connLoopTimeout) {
       clearTimeout(connLoopTimeout);
       connLoopTimeout = undefined;
-    }
-    if (unlistenEvents) {
-      unlistenEvents();
-      unlistenEvents = null;
     }
   }
 

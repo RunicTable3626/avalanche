@@ -4,11 +4,9 @@
 // All FFI types are now derived directly on app-core via the "specta" feature —
 // no more manual ffi_types.rs mirror.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use app_core::AppCore;
-use tauri::Emitter;
 
 // Desktop-specific convenience type (not in app-core).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
@@ -22,11 +20,6 @@ struct AccountResult {
 
 struct AppState {
     app: Mutex<Option<Arc<AppCore>>>,
-    /// Generation counter for the background event loop. Incremented every time
-    /// `start_event_loop` is called or `delete_identity` / `leave_server` need
-    /// to cancel a running loop. The spawned thread captures its generation at
-    /// creation and exits when the global counter no longer matches.
-    event_loop_gen: Arc<AtomicU64>,
 }
 
 fn get_app(state: &tauri::State<'_, AppState>) -> Result<std::sync::Arc<AppCore>, String> {
@@ -54,7 +47,6 @@ pub fn run() {
             recover_from_blob,
             send_dm,
             send_group_message,
-            receive_messages,
             next_events,
             save_message,
             load_conversations,
@@ -106,7 +98,6 @@ pub fn run() {
             send_delete,
             load_reactions,
             load_message_revisions,
-            start_event_loop,
         ]);
 
     #[cfg(feature = "codegen")]
@@ -123,7 +114,6 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(AppState {
             app: Mutex::new(None),
-            event_loop_gen: Arc::new(AtomicU64::new(0)),
         })
         .invoke_handler(builder.invoke_handler())
         .run(tauri::generate_context!())
@@ -221,20 +211,20 @@ fn send_group_message(
         .map_err(|e| e.to_string())
 }
 
+/// Async so it runs off the main thread. `app_core.next_events()` blocks until
+/// decrypted events arrive (WebSocket push via app-core's MPSC channel), so it
+/// must not run on the main thread — that would freeze the WebView. We clone the
+/// `Arc<AppCore>` out of `State` *before* awaiting (a `State` reference cannot be
+/// held across an await point) and run the blocking call on the blocking pool.
 #[tauri::command]
 #[specta::specta]
-fn receive_messages(state: tauri::State<'_, AppState>) -> Result<Vec<app_core::DecryptedMessage>, String> {
-    get_app(&state)?
-        .receive_messages()
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-#[specta::specta]
-fn next_events(state: tauri::State<'_, AppState>) -> Result<Vec<app_core::IncomingEvent>, String> {
-    get_app(&state)?
-        .next_events()
-        .map_err(|e| e.to_string())
+async fn next_events(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<app_core::IncomingEvent>, String> {
+    let app = get_app(&state)?;
+    tauri::async_runtime::spawn_blocking(move || app.next_events().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -430,20 +420,15 @@ fn unblock_contact(state: tauri::State<'_, AppState>, did: String) -> Result<(),
 #[tauri::command]
 #[specta::specta]
 fn leave_server(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let result = get_app(&state)?
+    get_app(&state)?
         .leave_server()
-        .map_err(|e| e.to_string());
-    // Cancel the background event loop; the server connection is closed.
-    state.event_loop_gen.fetch_add(1, Ordering::SeqCst);
-    result
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
 fn delete_identity(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let result = get_app(&state)?.delete_identity().map_err(|e| e.to_string());
-    // Cancel the background event loop before dropping the AppCore handle.
-    state.event_loop_gen.fetch_add(1, Ordering::SeqCst);
     // Clear session state regardless of result — identity is gone either way.
     *state.app.lock().map_err(|e| format!("lock poisoned: {}", e))? = None;
     result
@@ -451,16 +436,13 @@ fn delete_identity(state: tauri::State<'_, AppState>) -> Result<(), String> {
 
 // ── Session management ─────────────────────────────────────────────────────────
 
-/// Clears the active session: cancels the background event loop and drops the
-/// AppCore handle. Called by the frontend on logout / mode-switch so the old
-/// `Arc<AppCore>` is not reused by a subsequent `start_event_loop` call from a
-/// stale or cleared state.
+/// Drops the `Arc<AppCore>` handle so `get_app` returns "no account". Called by
+/// the frontend on logout / mode-switch. The TS-owned polling loop has already
+/// been stopped, so there is no background thread to cancel — this just releases
+/// the core so the old reconnect task + WS connection die on drop.
 #[tauri::command]
 #[specta::specta]
 fn clear_session(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    // Cancel the background event loop by bumping the generation counter,
-    // then drop the AppCore handle so `get_app` returns "no account".
-    state.event_loop_gen.fetch_add(1, Ordering::SeqCst);
     *state.app.lock().map_err(|e| format!("lock poisoned: {}", e))? = None;
     Ok(())
 }
@@ -501,15 +483,23 @@ fn connection_state(state: tauri::State<'_, AppState>) -> Result<app_core::Conne
     Ok(get_app(&state)?.connection_state())
 }
 
+/// Async + `spawn_blocking` for the same reason as `next_events`: this parks on
+/// `ffi_runtime().block_on(rx.changed().await)` until the connection state
+/// changes, so it must not run on the main thread or it freezes the WebView.
+/// `startConnectionLoop` long-polls this concurrently with the event loop.
 #[tauri::command]
 #[specta::specta]
-fn wait_for_connection_state_change(
+async fn wait_for_connection_state_change(
     state: tauri::State<'_, AppState>,
     last: app_core::ConnectionState,
 ) -> Result<app_core::ConnectionState, String> {
-    get_app(&state)?
-        .wait_for_connection_state_change(last)
-        .map_err(|e| e.to_string())
+    let app = get_app(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.wait_for_connection_state_change(last)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Groups ────────────────────────────────────────────────────────────────────
@@ -789,51 +779,3 @@ fn load_message_revisions(
         .map_err(|e| e.to_string())
 }
 
-// ── Background event loop ─────────────────────────────────────────────────────
-
-/// Spawns a dedicated OS thread that calls `next_events()` in a loop and
-/// emits every batch to the frontend via `app_handle.emit("avalanche-event", …)`.
-///
-/// A generation counter (`event_loop_gen`) prevents duplicate loops: each
-/// invocation bumps the counter and the spawned thread captures its generation.
-/// When `delete_identity` or `leave_server` bump the counter, the old thread
-/// sees the mismatch and exits. If the frontend calls `startEventLoop()` again
-/// (e.g. after logout + re-login), a new thread with a fresh generation starts.
-///
-/// Uses `std::thread::spawn` (not tokio) because this is a synchronous Tauri
-/// command — no tokio handle is guaranteed on the calling thread — and the
-/// spawned thread runs a pure blocking loop with no async I/O.
-#[tauri::command]
-#[specta::specta]
-fn start_event_loop(
-    state: tauri::State<'_, AppState>,
-    app_handle: tauri::AppHandle,
-) -> Result<(), String> {
-    let app = get_app(&state)?;
-    let handle = app_handle.clone();
-
-    // Bump the generation counter so any previous event loop exits, then
-    // capture the new generation for this invocation.
-    let my_gen = state.event_loop_gen.fetch_add(1, Ordering::SeqCst) + 1;
-    let gen = Arc::clone(&state.event_loop_gen);
-
-    std::thread::spawn(move || {
-        while gen.load(Ordering::SeqCst) == my_gen {
-            match app.next_events() {
-                Ok(events) => {
-                    if !events.is_empty() {
-                        if let Err(e) = handle.emit("avalanche-event", &events) {
-                            eprintln!("[start_event_loop] emit failed: {e}");
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[start_event_loop] next_events error: {e}");
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-            }
-        }
-    });
-
-    Ok(())
-}

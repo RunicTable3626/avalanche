@@ -256,13 +256,6 @@ async function handleAdminEvent(
 
   await inviteToAdminGroups(core, did);
 
-  // TODO(bug): the DM chat with adminbot sometimes randomly disappears from
-  // the conversation list a few minutes after testbot is initialized.  The
-  // welcome DM is sent and the conversation appears, but a subsequent
-  // loadConversations reload (triggered by incoming events from testbot)
-  // wipes it — likely because the DM was only created in-memory and not yet
-  // persisted to the local database at the time of the reload.
-  //
   // Send a 1:1 welcome DM. Goes over the same sealed-sender channel the
   // GroupContext invite opens, so it works regardless of whether the
   // recipient has accepted any group invite yet.

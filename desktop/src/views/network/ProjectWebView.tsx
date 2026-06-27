@@ -11,8 +11,9 @@ export async function openProjectWindow(
 ): Promise<boolean> {
   const label = `project-${crypto.randomUUID().slice(0, 8)}`;
   // Pass the token via hash fragment rather than query string so it is
-  // never sent in Referer headers or visible in server access logs.
-  // The project page reads it from `window.location.hash`.
+  // never sent to the server, written to access logs, or leaked in Referer
+  // headers / browser history. The project page reads it from
+  // `window.location.hash`.
   const url = `${project.url}#token=${encodeURIComponent(token)}`;
 
   // TODO(Day 4): intercept navigation to go.theavalanche.net and close the

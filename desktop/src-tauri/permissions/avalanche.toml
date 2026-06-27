@@ -10,7 +10,6 @@ commands.allow = [
   "recover_from_blob",
   "send_dm",
   "send_group_message",
-  "receive_messages",
   "next_events",
   "save_message",
   "load_conversations",
@@ -61,6 +60,5 @@ commands.allow = [
   "send_delete",
   "load_reactions",
   "load_message_revisions",
-  "start_event_loop",
   "clear_session",
 ]

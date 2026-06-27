@@ -33,6 +33,22 @@
   font-weight: 500;
   color: var(--color-text-secondary);
 }
+.conv-header-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.conv-header-info:hover {
+  background: var(--color-divider);
+}
 .conv-header-avatar {
   width: 32px;
   height: 32px;

@@ -8,12 +8,14 @@ import {
   Switch,
   Match,
 } from "solid-js";
+import { FiUsers } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
 import type { Conversation, Message } from "../../models";
 import { initials } from "../../lib/format";
 import MessageBubble from "../../components/MessageBubble";
 import ComposeMessageView from "../../components/ComposeMessageView";
 import EditHistorySheet from "../../components/EditHistorySheet";
+import GroupDetailView from "../../components/GroupDetailView";
 import DisappearingMessagesPicker from "../../components/DisappearingMessagesPicker";
 import "./ConversationView.css";
 
@@ -40,6 +42,7 @@ export default function ConversationView(props: Props) {
 
   const [editingMessage, setEditingMessage] = createSignal<Message | null>(null);
   const [historyMessage, setHistoryMessage] = createSignal<Message | null>(null);
+  const [showGroupDetail, setShowGroupDetail] = createSignal(false);
   const [timerSecs, setTimerSecs] = createSignal(0);
 
   const isDm = () => !props.conversation.isGroup && !!props.conversation.recipientDid;
@@ -49,9 +52,10 @@ export default function ConversationView(props: Props) {
   createEffect(() => {
     loadMessagesFromStore(props.conversation.id, props.conversation.accountId);
     loadReactions(props.conversation.id);
-    // Cancel any in-progress edit/history when switching conversations.
+    // Cancel any in-progress edit/history/detail when switching conversations.
     setEditingMessage(null);
     setHistoryMessage(null);
+    setShowGroupDetail(false);
     // Load the disappearing-messages timer for DMs (groups manage their own
     // timer in the group detail view).
     if (isDm()) {
@@ -104,6 +108,16 @@ export default function ConversationView(props: Props) {
             <span class="conv-header-timer-label">Disappearing</span>
             <DisappearingMessagesPicker seconds={timerSecs()} onChange={changeTimer} />
           </div>
+        </Show>
+        <Show when={props.conversation.isGroup}>
+          <button
+            class="conv-header-info"
+            onClick={() => setShowGroupDetail(true)}
+            aria-label="Group info"
+            title="Group info"
+          >
+            <FiUsers size={18} />
+          </button>
         </Show>
       </div>
       <div class="messages-list scrollbar-thin">
@@ -189,6 +203,12 @@ export default function ConversationView(props: Props) {
             onClose={() => setHistoryMessage(null)}
           />
         )}
+      </Show>
+      <Show when={showGroupDetail()}>
+        <GroupDetailView
+          conversation={props.conversation}
+          onClose={() => setShowGroupDetail(false)}
+        />
       </Show>
     </div>
   );

@@ -1,5 +1,12 @@
 "$schema" = "https://schema.tauri.app/config/2"
 
+# SECURITY: this set exposes the full app-core native surface. It is safe only
+# because the `default` capability binds it to `windows = ["main"]` +
+# `local = true` (see capabilities/default.json), so ephemeral `project-*`
+# webviews showing remote project content do NOT inherit these commands. Do not
+# broaden that capability's window scope to a glob, or add a `remote` block,
+# without re-reviewing this — that is what would hand the native surface to
+# remote content.
 [[permission]]
 identifier = "allow-all"
 description = "Allow all avalanche custom commands"

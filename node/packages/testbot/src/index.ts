@@ -332,9 +332,10 @@ async function runBotLoop(
 //                       ANTHROPIC_DEFAULT_HAIKU_MODEL overrides this if set.
 
 /**
- * Ask Claude Haiku for the next reply. An API key is required (enforced at
- * startup in `main`). On an API error or request failure, the bot falls back to
- * echoing the user's last message so the conversation still progresses.
+ * Ask Claude Haiku for the next reply. If no API key is configured the bot runs
+ * in echo mode (echoes the user's last message) so local dev needs zero setup;
+ * on an API error or request failure it likewise falls back to echoing, so the
+ * conversation always progresses.
  */
 async function generateResponse(
   env: Env,
@@ -342,8 +343,9 @@ async function generateResponse(
   userDisplayName: string | undefined,
 ): Promise<string> {
   const apiKey = env.anthropicApiKey ?? env.anthropicAuthToken;
-  // `main` fail-fasts when neither key is set; this is just a type guard.
-  if (!apiKey) throw new Error("testbot: no Anthropic API key configured");
+  // No key configured → echo mode (warned once at startup in `main`). Keeps
+  // local dev / `make dev-all` working with zero required configuration.
+  if (!apiKey) return echoResponse(conversation);
 
   const model = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
     ?? process.env.ANTHROPIC_MODEL
@@ -449,11 +451,11 @@ function main(): void {
   initLogging(env.logLevel);
 
   if (!env.anthropicApiKey && !env.anthropicAuthToken) {
-    console.error(
-      "testbot: no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN configured. " +
-        "Set one in .env (see .env.example) - the bot no longer echoes as a fallback.",
+    console.warn(
+      "testbot: no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN configured — " +
+        "running in echo mode (replies echo your message). Set one in .env " +
+        "(see .env.example) for AI replies. Local dev / `make dev-all` needs no key.",
     );
-    process.exit(1);
   }
 
   const server = createServer((req, res) => {

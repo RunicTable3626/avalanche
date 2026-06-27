@@ -485,6 +485,16 @@ pub enum IncomingEvent {
     MessagesExpired {
         conversation_ids: Vec<String>,
     },
+    /// A single conversation's stored content changed locally and the UI should
+    /// re-read just that conversation (its open timeline + chat-list preview).
+    /// Emitted when a `SyncSent`/`SyncRead` transcript from another of my own
+    /// devices (docs/04 §5.4) is applied over the live WS path — a message I
+    /// sent, an edit/delete/reaction I made, or read-state I cleared elsewhere.
+    /// Unlike `StorageSynced` this names the affected conversation, so the UI
+    /// refreshes one timeline instead of rebuilding everything.
+    ConversationUpdated {
+        conversation_id: String,
+    },
 }
 
 /// Admin-only events surfaced to a separate queue, drained by

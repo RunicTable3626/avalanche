@@ -1984,7 +1984,27 @@ class AppViewModel(
                         groupsWithNewEvents.add(ev.event.groupId)
                         needsConversationReload = true
                     }
-                    is IncomingEvent.StorageSynced -> needsConversationReload = true
+                    is IncomingEvent.StorageSynced -> {
+                        // A background storage sync applied remote durable state
+                        // (e.g. a group key synced from another device, or an
+                        // updated contact/profile). This never touches message
+                        // history, so just rebuild the chat list — newly-synced
+                        // groups/contacts appear without a restart.
+                        needsConversationReload = true
+                    }
+                    is IncomingEvent.ConversationUpdated -> {
+                        // A `SyncSent`/`SyncRead` transcript from another of my
+                        // own devices (docs/04 §5.4) changed exactly this
+                        // conversation's stored content (a message I sent, an
+                        // edit/delete/reaction I made, or read-state I cleared).
+                        // Re-read just this timeline so it surfaces live, and
+                        // refresh the chat-list preview.
+                        reloadMessagesIfLoaded(
+                            conversationId = ev.conversationId,
+                            accountId = accountId,
+                        )
+                        needsConversationReload = true
+                    }
                     is IncomingEvent.MessageEdited -> {
                         applyInboundEdit(
                             conversationId = ev.conversationId,

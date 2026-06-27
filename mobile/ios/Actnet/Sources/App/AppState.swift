@@ -1660,9 +1660,18 @@ final class AppState: ObservableObject {
                     needsConversationReload = true
                 case .storageSynced:
                     // A background storage sync applied remote durable state
-                    // (e.g. a group key synced from another device). The store
-                    // is updated; rebuild the chat list so it shows without a
-                    // restart.
+                    // (e.g. a group key synced from another device, or an
+                    // updated contact/profile). This never touches message
+                    // history, so just rebuild the chat list — newly-synced
+                    // groups/contacts appear without a restart.
+                    needsConversationReload = true
+                case let .conversationUpdated(conversationId):
+                    // A `SyncSent`/`SyncRead` transcript from another of my own
+                    // devices (docs/04 §5.4) changed exactly this conversation's
+                    // stored content (a message I sent, an edit/delete/reaction I
+                    // made, or read-state I cleared). Re-read just this timeline
+                    // so it surfaces live, and refresh the chat-list preview.
+                    reloadMessagesIfLoaded(conversationId: conversationId, accountId: accountId)
                     needsConversationReload = true
                 case let .messageEdited(conversationId, authorDid, sentAtMs, newBody, editedAtMs):
                     applyInboundEdit(conversationId: conversationId, authorDid: authorDid, sentAtMs: sentAtMs, newBody: newBody, editedAtMs: editedAtMs)

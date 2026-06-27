@@ -528,6 +528,16 @@ impl From<IncomingEvent> for IncomingEventJs {
                 group_invite: None,
                 group_metadata: None,
             },
+            // A single conversation's stored content changed (a SyncSent/SyncRead
+            // transcript from another of my devices). Bots don't render
+            // conversation timelines, so surface a bare kind for parity.
+            IncomingEvent::ConversationUpdated { .. } => Self {
+                kind: "conversationUpdated".into(),
+                message: None,
+                receipt: None,
+                group_invite: None,
+                group_metadata: None,
+            },
         }
     }
 }

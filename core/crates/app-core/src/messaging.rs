@@ -1516,14 +1516,17 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
         Some(Body::SyncSent(sync)) => {
             // A transcript from another of my own devices (docs/04 §5.4).
             // Honored only when the authenticated sender is me. The store is
-            // updated in place; surface a refresh so the UI rebuilds the
-            // conversation (same contract as a storage-sync pull).
+            // updated in place; emit a `ConversationUpdated` naming the affected
+            // conversation so the UI re-reads just that one timeline (+ its list
+            // preview) instead of rebuilding everything.
             let inner = core.inner.lock().await;
             if decrypted.sender_did == inner.did {
                 let changed = apply_sync_sent(&inner.store, &inner.did, sync).await;
                 drop(inner);
-                if changed {
-                    let _ = core.event_tx.send(IncomingEvent::StorageSynced);
+                if let Some(conversation_id) = changed {
+                    let _ = core
+                        .event_tx
+                        .send(IncomingEvent::ConversationUpdated { conversation_id });
                 }
             }
         }
@@ -1532,8 +1535,10 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
             if decrypted.sender_did == inner.did {
                 let changed = apply_sync_read(&inner.store, &inner.did, sync).await;
                 drop(inner);
-                if changed {
-                    let _ = core.event_tx.send(IncomingEvent::StorageSynced);
+                for conversation_id in changed {
+                    let _ = core
+                        .event_tx
+                        .send(IncomingEvent::ConversationUpdated { conversation_id });
                 }
             }
         }
@@ -1557,16 +1562,15 @@ fn dm_conv_id(my_did: &str, peer_did: &str) -> String {
 /// `ContentMessage` and applies its inner body to the named conversation,
 /// attributed as outgoing (authored by `my_did`). Text lands as a new outgoing
 /// history row; reactions/edits/deletes reuse the same store ops as a peer's but
-/// keyed on my own DID. Returns true if local state changed (so the caller can
-/// emit a refresh). Takes the store directly (no client) so it's unit-testable.
+/// keyed on my own DID. Returns `Some(conversation_id)` if local state changed
+/// (so the caller can emit a scoped `ConversationUpdated` refresh), `None`
+/// otherwise. Takes the store directly (no client) so it's unit-testable.
 pub(crate) async fn apply_sync_sent(
     store: &store::DeviceStore,
     my_did: &str,
     sync: SyncSent,
-) -> bool {
-    let Some(target) = sync.target else {
-        return false;
-    };
+) -> Option<String> {
+    let target = sync.target?;
     let conv_id = match &target {
         sync_sent::Target::RecipientDid(did) => dm_conv_id(my_did, did),
         sync_sent::Target::GroupId(gid) => format!("group-{}", groups::b64(gid)),
@@ -1575,10 +1579,10 @@ pub(crate) async fn apply_sync_sent(
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("[sync] SyncSent wrapped a non-ContentMessage payload: {e}");
-            return false;
+            return None;
         }
     };
-    match content.body {
+    let changed = match content.body {
         Some(Body::Text(text)) => {
             // A message I sent from another device. Save it as an outgoing row
             // (authored by me, already "read" since I wrote it). The id is
@@ -1587,7 +1591,7 @@ pub(crate) async fn apply_sync_sent(
             let sent_at = sync.timestamp as i64;
             let msg = store::messages::HistoryMessage {
                 id: format!("synced-{conv_id}-{sent_at}"),
-                conversation_id: conv_id,
+                conversation_id: conv_id.clone(),
                 sender_did: my_did.to_string(),
                 body: text.body,
                 sent_at: Timestamp(sent_at),
@@ -1613,7 +1617,7 @@ pub(crate) async fn apply_sync_sent(
             } else {
                 store
                     .upsert_reaction(&store::messages::ReactionRow {
-                        conversation_id: conv_id,
+                        conversation_id: conv_id.clone(),
                         target_author: r.target_author,
                         target_sent_at,
                         reactor_did: my_did.to_string(),
@@ -1644,7 +1648,7 @@ pub(crate) async fn apply_sync_sent(
             // (FOR_ME is local-only and never emitted). Authorship-gated.
             if del.scope != delete_message::Scope::ForEveryone as i32 || del.target_author != my_did
             {
-                return false;
+                return None;
             }
             store
                 .tombstone_message(
@@ -1659,16 +1663,22 @@ pub(crate) async fn apply_sync_sent(
         // Other inner bodies (receipts, SKDMs, timer changes, nested sync)
         // aren't mirrored as transcripts; ignore defensively.
         _ => false,
-    }
+    };
+    changed.then_some(conv_id)
 }
 
 /// Apply an inbound `SyncRead` — read-state cleared on another of my own devices
 /// (docs/04 §5.4). The caller must have verified the sender is one of my
-/// devices. Marks local history read up to each mark's timestamp. Returns true
-/// if any row was newly marked.
-pub(crate) async fn apply_sync_read(store: &store::DeviceStore, my_did: &str, sync: SyncRead) -> bool {
+/// devices. Marks local history read up to each mark's timestamp. Returns the
+/// conversation ids whose read-state actually changed (so the caller can emit a
+/// scoped `ConversationUpdated` per affected conversation); empty if none did.
+pub(crate) async fn apply_sync_read(
+    store: &store::DeviceStore,
+    my_did: &str,
+    sync: SyncRead,
+) -> Vec<String> {
     let now = Timestamp::now();
-    let mut changed = false;
+    let mut changed = Vec::new();
     for mark in sync.marks {
         let Some(conversation) = mark.conversation else {
             continue;
@@ -1681,7 +1691,9 @@ pub(crate) async fn apply_sync_read(store: &store::DeviceStore, my_did: &str, sy
             .mark_messages_read(&conv_id, Timestamp(mark.up_to_timestamp as i64), now)
             .await
         {
-            changed = changed || n > 0;
+            if n > 0 {
+                changed.push(conv_id);
+            }
         }
     }
     changed
@@ -1839,8 +1851,11 @@ mod tests {
             content: inner.encode_to_vec(),
         };
 
-        assert!(apply_sync_sent(&store, me, mk_sync()).await);
         let conv = format!("dm-{me}-{peer}");
+        assert_eq!(
+            apply_sync_sent(&store, me, mk_sync()).await.as_deref(),
+            Some(conv.as_str())
+        );
         let msgs = store.load_messages(&conv, Timestamp(10_000)).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].sender_did, me); // attributed as outgoing (me)
@@ -1871,8 +1886,11 @@ mod tests {
             target: Some(sync_sent::Target::GroupId(gid.clone())),
             content: inner.encode_to_vec(),
         };
-        assert!(apply_sync_sent(&store, me, sync).await);
         let conv = format!("group-{}", crate::groups::b64(&gid));
+        assert_eq!(
+            apply_sync_sent(&store, me, sync).await.as_deref(),
+            Some(conv.as_str())
+        );
         let msgs = store.load_messages(&conv, Timestamp(10_000)).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].sender_did, me);
@@ -1902,7 +1920,10 @@ mod tests {
             target: Some(sync_sent::Target::RecipientDid(peer.into())),
             content: inner.encode_to_vec(),
         };
-        assert!(apply_sync_sent(&store, me, sync).await);
+        assert_eq!(
+            apply_sync_sent(&store, me, sync).await.as_deref(),
+            Some(conv.as_str())
+        );
         let reactions = store.load_reactions(&conv).await.unwrap();
         assert_eq!(reactions.len(), 1);
         assert_eq!(reactions[0].reactor_did, me); // I'm the reactor
@@ -1943,7 +1964,7 @@ mod tests {
                 up_to_timestamp: 500,
             }],
         };
-        assert!(apply_sync_read(&store, me, sync).await);
+        assert_eq!(apply_sync_read(&store, me, sync).await, vec![conv.clone()]);
         assert_eq!(store.unread_count(&conv, me).await.unwrap(), 0);
     }
 }

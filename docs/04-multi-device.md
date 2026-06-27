@@ -326,6 +326,16 @@ message ReadMark {
 }
 ```
 
+When a `SyncSent`/`SyncRead` arrives over the live WebSocket, the receiving device
+applies it to its local store (a new outgoing row, an edit/delete/reaction, or a
+read-mark) and then surfaces a **scoped** `ConversationUpdated { conversation_id }`
+event — the UI re-reads just that one conversation's timeline and refreshes its
+chat-list preview. This is deliberately *not* the coarse `StorageSynced` signal
+(which the Durable channel uses, §5.6): the apply path already knows exactly which
+conversation changed, so it names it rather than forcing a full list/timeline
+rebuild. The explicit poll path applies the same transcripts silently — the caller
+re-reads after draining — so no event is emitted there.
+
 ### 5.5 Transport
 
 A sync message is just a normal pairwise DM **to yourself** — encrypted under your

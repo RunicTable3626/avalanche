@@ -13,6 +13,10 @@ export interface Conversation {
   isGroup: boolean;
   isRequest: boolean;
   isBlocked: boolean;
+  // Group only: true once the user has left (or was removed). The conversation
+  // stays visible (read-only) instead of vanishing — the composer is replaced
+  // with a "no longer a member" notice, Signal-style.
+  hasLeft?: boolean;
 }
 
 export function groupConversationId(groupId: string): string {

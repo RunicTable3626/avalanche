@@ -83,6 +83,7 @@ interface AppContextValue {
   // Conversation selection (lifted so compose/group flows can open a chat)
   selectedConversationId: () => string | null;
   selectConversation: (id: string | null) => void;
+  reloadConversations: () => Promise<void>;
 
   // Track A — message actions
   reactionsFor: (conversation: Conversation, message: Message) => ReactionFfi[];
@@ -105,6 +106,7 @@ interface AppContextValue {
     hostingServerUrl: string,
     password: number[]
   ) => Promise<JoinResultFfi>;
+  leaveGroup: (conversation: Conversation) => Promise<void>;
 
   // Track D — safety + timers
   acceptRequest: (conversation: Conversation) => Promise<void>;
@@ -200,23 +202,14 @@ export function AppProvider(props: { children: JSX.Element }) {
   let reloadInFlight: Promise<void> | null = null;
   let reloadQueued = false;
   const loadedReactions: Set<string> = new Set();
-  // Conversation ids created in-memory (e.g. an incoming welcome DM) that aren't
-  // backed by a row in the local DB. loadConversationsFromStore preserves only
-  // these across a reload, NOT arbitrary DB-absent entries, which would resurrect
-  // conversations the DB intentionally dropped (e.g. left groups).
-  //
-  // Persistence is the frontend's responsibility; app-core does not auto-persist
-  // (the client owns local history). On this branch the incoming-message handler
-  // does not call saveMessage yet, so a received-DM conversation is held only
-  // here in memory and is lost on app restart. Day 4 wires up that persistence:
-  // once the handler saves received messages, the conversation shows up in the DB
-  // summaries on the next reload and this set just bridges the brief window until
-  // then. The drop-on-DB-appearance path below returns a conversation to the
-  // normal DB-driven lifecycle once it is persisted (e.g. once an outgoing reply
-  // saves).
-  //
-  // TODO: persist incoming messages in the receive handler (wired up in day 4;
-  // removes the session-only / lost-on-restart gap above).
+  // Conversation ids created in-memory (e.g. an incoming DM in a brand-new
+  // thread) that aren't yet backed by a row in the local DB.
+  // loadConversationsFromStore preserves only these across a reload, NOT
+  // arbitrary DB-absent entries, which would resurrect conversations the DB
+  // intentionally dropped. The incoming-message handler persists the received
+  // message (so the conversation appears in the DB summaries on the next
+  // reload), and this set bridges the brief gap until that reload runs; the
+  // drop-on-DB-appearance path below then hands it back to normal lifecycle.
   const pendingConversations: Set<string> = new Set();
 
   // Event loop lifecycle
@@ -624,6 +617,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     conversationId: string,
     text: string,
     senderAccountId: string,
+    expireTimerSecs: number,
     transportFn: (sentAtMs: number) => Promise<void>,
     errorMessage: string
   ) {
@@ -641,7 +635,10 @@ export function AppProvider(props: { children: JSX.Element }) {
       editCount: 0,
       isDeleted: false,
       kind: 0,
-      expireTimerSecs: 0,
+      // Stamp the sender's local copy with the same disappearing-messages timer
+      // the wire envelope carries, so app-core's reaper expires it too. Without
+      // this the sender's own messages never disappear (docs/03 §5).
+      expireTimerSecs,
     };
 
     setStore("messagesByConversation", conversationId, (prev) => [
@@ -649,11 +646,14 @@ export function AppProvider(props: { children: JSX.Element }) {
       optimistic,
     ]);
 
-    // Update conversation preview
+    // Update conversation preview. Clear any stale group system-event fields so
+    // ConversationRow renders this new message, not a prior "X joined" line.
     const convIdx = store.conversations.findIndex((c) => c.id === conversationId);
     if (convIdx >= 0) {
       setStore("conversations", convIdx, "lastMessage", text);
       setStore("conversations", convIdx, "lastMessageDate", sentAtMs);
+      setStore("conversations", convIdx, "lastMessageKind", 0);
+      setStore("conversations", convIdx, "lastMessageMetadata", undefined);
     }
 
     try {
@@ -681,7 +681,7 @@ export function AppProvider(props: { children: JSX.Element }) {
           deleted: false,
           kind: 0,
           metadata: null,
-          expireTimerSecs: 0,
+          expireTimerSecs,
           expireAtMs: null,
         })
         .catch((err: unknown) => {
@@ -705,10 +705,15 @@ export function AppProvider(props: { children: JSX.Element }) {
     recipientDid: string,
     senderAccountId: string
   ) {
+    // DM disappearing-messages timer is keyed by peer DID in app-core's store
+    // (save/load_conversation_expiry), so read it with recipientDid — not the
+    // full conversation id — to match what the wire envelope is stamped with.
+    const timer = (await service().getConversationTimer(recipientDid).catch(() => null)) ?? 0;
     await sendOptimistic(
       conversationId,
       text,
       senderAccountId,
+      timer,
       (sentAtMs) => service().sendDm(recipientDid, Array.from(new TextEncoder().encode(text)), sentAtMs),
       "Send failed"
     );
@@ -716,11 +721,14 @@ export function AppProvider(props: { children: JSX.Element }) {
 
   async function sendGroupMessage(conversation: Conversation, text: string) {
     if (!conversation.groupId) return;
+    const groupId = conversation.groupId;
+    const timer = (await service().groupExpirySeconds(groupId).catch(() => 0)) ?? 0;
     await sendOptimistic(
       conversation.id,
       text,
       conversation.accountId,
-      (sentAtMs) => service().sendGroupMessage(conversation.groupId!, Array.from(new TextEncoder().encode(text)), sentAtMs),
+      timer,
+      (sentAtMs) => service().sendGroupMessage(groupId, Array.from(new TextEncoder().encode(text)), sentAtMs),
       "Group send failed"
     );
   }
@@ -750,10 +758,19 @@ export function AppProvider(props: { children: JSX.Element }) {
         });
       // Send a read receipt to the DM partner so their bubbles flip to "read".
       // Receipts are 1:1 (a single recipient), so this applies to DMs only —
-      // a group has no single recipient. app-core itself refuses to ack reads
-      // to an un-accepted sender, so request conversations are handled there.
+      // a group has no single recipient. Suppress for un-accepted requests
+      // (opening to evaluate isn't acknowledgement) and for blocked contacts
+      // (never signal "read" to someone you cut off) — don't rely on app-core
+      // to gate it.
       const conv = store.conversations.find((c) => c.id === conversationId);
-      if (conv && !conv.isGroup && conv.recipientDid && newlyReadSentAt.length > 0) {
+      if (
+        conv &&
+        !conv.isGroup &&
+        !conv.isRequest &&
+        !conv.isBlocked &&
+        conv.recipientDid &&
+        newlyReadSentAt.length > 0
+      ) {
         const recipientDid = conv.recipientDid;
         void service()
           .sendReadReceipt(recipientDid, newlyReadSentAt)
@@ -788,6 +805,11 @@ export function AppProvider(props: { children: JSX.Element }) {
       isBlocked: false,
       lastMessageKind: 0,
     };
+    // Track as pending so a reload (e.g. a storageSynced event firing before
+    // the first message persists) doesn't drop this freshly-opened, selected
+    // conversation — loadConversationsFromStore only preserves DB-absent
+    // conversations that are in pendingConversations.
+    pendingConversations.add(convId);
     setStore("conversations", (prev) => [...prev, conv]);
     return conv;
   }
@@ -811,6 +833,9 @@ export function AppProvider(props: { children: JSX.Element }) {
       isBlocked: false,
       lastMessageKind: 0,
     };
+    // See findOrCreateDMConversation — a just-created group isn't in the DB
+    // summaries yet, so preserve it across reloads until its state syncs.
+    pendingConversations.add(convId);
     setStore("conversations", (prev) => [...prev, conv]);
     return conv;
   }
@@ -928,6 +953,16 @@ export function AppProvider(props: { children: JSX.Element }) {
           : m
       )
     );
+    // Keep the sidebar preview in sync when the edited message is the latest
+    // (the inbound messageEdited handler does the same for peers' edits).
+    const convIdx = store.conversations.findIndex((c) => c.id === conversation.id);
+    if (
+      convIdx >= 0 &&
+      store.conversations[convIdx]?.lastMessageDate === message.sentAtMs
+    ) {
+      const preview = trimmed.length > 100 ? trimmed.slice(0, 100) + "…" : trimmed;
+      setStore("conversations", convIdx, "lastMessage", preview);
+    }
     void service()
       .sendEdit(messageTargetFor(conversation), message.sentAtMs, trimmed, now)
       .catch((e: unknown) => {
@@ -1035,6 +1070,28 @@ export function AppProvider(props: { children: JSX.Element }) {
             : m
         )
       );
+      // Persist the now-sent message — the original failed send never wrote it
+      // to the DB, so without this the retried message is lost on next reload.
+      void service()
+        .saveMessage({
+          id: message.id,
+          conversationId: conversation.id,
+          senderDid: message.senderAccountId,
+          body: message.body,
+          sentAtMs,
+          editedAtMs: message.editedAtMs ?? null,
+          readAtMs: sentAtMs,
+          deliveryStatus: DeliveryStatus.sent,
+          editCount: message.editCount,
+          deleted: message.isDeleted,
+          kind: message.kind,
+          metadata: message.metadata ?? null,
+          expireTimerSecs: message.expireTimerSecs,
+          expireAtMs: null,
+        })
+        .catch((err: unknown) => {
+          console.warn("saveMessage after retry failed:", err);
+        });
     } catch (e) {
       setStore("messagesByConversation", conversation.id, (prev) =>
         (prev ?? []).map((m) =>
@@ -1080,6 +1137,25 @@ export function AppProvider(props: { children: JSX.Element }) {
     const result = await service().joinViaLink(masterKey, hostingServerUrl, password);
     await reloadConversations();
     return result;
+  }
+
+  async function leaveGroup(conversation: Conversation) {
+    if (!conversation.groupId) return;
+    try {
+      await service().leaveGroup(conversation.groupId);
+    } catch (e) {
+      // Don't flip the UI to the irreversible read-only "you left" state when
+      // the server-side leave didn't actually happen — the user is still a
+      // member and can keep participating.
+      console.warn("leaveGroup failed:", e);
+      throw e;
+    }
+    // Keep the conversation visible but read-only (Signal-style): mark it left
+    // and track it as pending so the next loadConversationsFromStore preserves
+    // it if app-core stops returning the left group.
+    const idx = store.conversations.findIndex((c) => c.id === conversation.id);
+    if (idx >= 0) setStore("conversations", idx, "hasLeft", true);
+    pendingConversations.add(conversation.id);
   }
 
   // ── Track D: message requests / blocking / timers ──────────────────────────
@@ -1243,8 +1319,15 @@ export function AppProvider(props: { children: JSX.Element }) {
           needsConversationReload = true;
           break;
         }
+        case "groupMetadataChanged": {
+          // app-core has already persisted a system row (e.g. "X made Y an
+          // admin") for this change. Refresh the group's timeline (if loaded)
+          // so it appears, then refresh the conversation list/preview.
+          const gm = ev as Extract<IncomingEvent, { type: "groupMetadataChanged" }>;
+          reloadMessagesIfLoaded(`group-${gm.event.groupId}`);
+          needsConversationReload = true;
+        }
         case "groupInvite":
-        case "groupMetadataChanged":
         case "storageSynced":
           needsConversationReload = true;
           break;
@@ -1314,6 +1397,32 @@ export function AppProvider(props: { children: JSX.Element }) {
       ...(prev ?? []),
       msg,
     ]);
+    // Persist the incoming message. app-core does NOT persist messages on the
+    // receive path (the client owns local history), so without this every
+    // received message is lost on app restart/refresh while sent messages
+    // (which are saved) survive. readAtMs stays null (unread) until the
+    // conversation is opened; the store starts the disappearing-messages
+    // countdown on read. Mirrors iOS AppState.
+    void service()
+      .saveMessage({
+        id: msg.id,
+        conversationId,
+        senderDid: m.senderDid,
+        body,
+        sentAtMs: msg.sentAtMs,
+        editedAtMs: null,
+        readAtMs: null,
+        deliveryStatus: msg.deliveryStatus,
+        editCount: 0,
+        deleted: false,
+        kind: 0,
+        metadata: null,
+        expireTimerSecs: m.expireTimerSecs,
+        expireAtMs: null,
+      })
+      .catch((err: unknown) => {
+        console.warn("saveMessage (incoming) failed:", err);
+      });
 
     // Update conversation preview, or create the conversation in-memory.
     const convIdx = store.conversations.findIndex((c) => c.id === conversationId);
@@ -1326,11 +1435,19 @@ export function AppProvider(props: { children: JSX.Element }) {
         "lastMessageDate",
         m.sentAtMs ?? Date.now()
       );
+      // Clear stale group system-event fields (see sendOptimistic).
+      setStore("conversations", convIdx, "lastMessageKind", 0);
+      setStore("conversations", convIdx, "lastMessageMetadata", undefined);
     } else {
-      // Conversation not in the list yet — create it in-memory and mark it
-      // pending so the merge in loadConversationsFromStore preserves it across
-      // reloads until its message lands in the DB.
+      // Conversation not in the list yet — create it in-memory. The incoming
+      // message is now persisted (above), so it will also show up in the DB
+      // summaries on the next reload; tracking it pending bridges the gap.
       const isGroup = !!m.groupId;
+      // A DM from a sender that didn't pass the message-request gate is a
+      // request (docs/12 §1). app-core reports the verdict but leaves
+      // persistence to us — flag it so the request banner shows and survives a
+      // refresh.
+      const isRequest = !isGroup && m.isRequest;
       const serverUrl = getServerUrl(accountId);
       const newConv: Conversation = {
         id: conversationId,
@@ -1343,11 +1460,18 @@ export function AppProvider(props: { children: JSX.Element }) {
         lastMessageDate: m.sentAtMs ?? Date.now(),
         lastMessageKind: 0,
         isGroup,
-        isRequest: false,
+        isRequest,
         isBlocked: false,
       };
       pendingConversations.add(conversationId);
       setStore("conversations", (prev) => [newConv, ...prev]);
+      if (isRequest) {
+        void service()
+          .setPendingRequest(m.senderDid, true)
+          .catch((e: unknown) => {
+            console.warn("setPendingRequest failed:", e);
+          });
+      }
     }
   }
 
@@ -1619,6 +1743,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     validateInvite,
     selectedConversationId,
     selectConversation: (id) => setSelectedConversationId(id),
+    reloadConversations,
     reactionsFor,
     loadReactions,
     toggleReaction,
@@ -1628,6 +1753,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     retryMessage,
     createGroupAndOpen,
     joinViaLink,
+    leaveGroup,
     acceptRequest,
     deleteRequest,
     reportAndBlock,

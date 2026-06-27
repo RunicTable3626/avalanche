@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.lifecycle.ViewModelProvider
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -194,14 +195,22 @@ fun AppNavGraph(
     val navController: NavHostController = rememberNavController()
     val isOnboarding by appViewModel.isOnboarding.collectAsState()
 
-    // React to isOnboarding changes, mirroring iOS RootView Group { if appState.isOnboarding … }
+    // Start on the destination implied by the *initial* onboarding state, which
+    // the ViewModel seeds synchronously from persisted accounts. Hardcoding
+    // SPLASH here would flash the splash for a frame on every logged-in launch
+    // before the effect below re-routes. Captured once so it doesn't change.
+    val startDestination = remember {
+        if (appViewModel.isOnboarding.value) Route.SPLASH else Route.MAIN
+    }
+
+    // React to later isOnboarding changes (login / logout), mirroring iOS
+    // RootView Group { if appState.isOnboarding … }. Skip navigating when we're
+    // already on the right destination — otherwise the first emission would pop
+    // and re-push the start destination, reintroducing the flicker.
     LaunchedEffect(isOnboarding) {
-        if (isOnboarding) {
-            navController.navigate(Route.SPLASH) {
-                popUpTo(0) { inclusive = true }
-            }
-        } else {
-            navController.navigate(Route.MAIN) {
+        val target = if (isOnboarding) Route.SPLASH else Route.MAIN
+        if (navController.currentDestination?.route != target) {
+            navController.navigate(target) {
                 popUpTo(0) { inclusive = true }
             }
         }
@@ -209,9 +218,7 @@ fun AppNavGraph(
 
     NavHost(
         navController = navController,
-        // Start on splash; the LaunchedEffect above immediately re-routes after
-        // restoreAccounts() resolves the correct starting state.
-        startDestination = Route.SPLASH,
+        startDestination = startDestination,
     ) {
 
         // ----------------------------------------------------------------

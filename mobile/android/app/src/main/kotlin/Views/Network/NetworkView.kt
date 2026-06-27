@@ -3,6 +3,7 @@ package net.theavalanche.app
 import android.annotation.SuppressLint
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -313,6 +314,11 @@ fun ProjectWebViewSheet(
     url: String,
     onDismiss: () -> Unit,
 ) {
+    // The sheet is shown via in-composable state (not a nav destination), so the
+    // system back button would otherwise pop the MAIN route and exit the app.
+    // Intercept it to mirror the "Done" button: dismiss back to the Network tab.
+    BackHandler { onDismiss() }
+
     Scaffold(
         topBar = {
             TopAppBar(

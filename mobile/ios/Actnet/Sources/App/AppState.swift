@@ -103,7 +103,14 @@ final class AppState: ObservableObject {
         }()
         self.serviceMode = resolved
         self._service = Self.makeService(mode: resolved)
-        self.isOnboarding = true
+        // Seed from a cheap synchronous check (UserDefaults read, no Secure
+        // Enclave or FFI): if we have persisted accounts we're almost certainly
+        // logged in, so start straight on the chats scaffold (MainTabView) while
+        // `restoreAccounts` finishes in the background — instead of stalling on
+        // the splash for the Secure Enclave unlock + per-account login. Only with
+        // no persisted accounts do we start on the splash. `restoreAccounts`
+        // flips this back if the restore actually yields no usable account.
+        self.isOnboarding = Self.loadPersistedAccounts().isEmpty
     }
 
     // MARK: - Deep linking
@@ -184,6 +191,9 @@ final class AppState: ObservableObject {
 
         guard let dbKey = try? SecureEnclaveKeyManager.dbPassphrase() else {
             print("Failed to retrieve DB encryption key, cannot restore accounts")
+            // We optimistically started on MainTabView; with no usable accounts,
+            // fall back to the splash/onboarding flow.
+            isOnboarding = accounts.isEmpty
             return
         }
 
@@ -252,6 +262,11 @@ final class AppState: ObservableObject {
 
             startMessagePolling()
             Task { await PushManager.requestPermissionAndRegister(appState: self) }
+        } else {
+            // Persisted entries existed (so we started on MainTabView) but none
+            // produced a usable account — e.g. their DB files were gone. Fall
+            // back to the splash/onboarding flow.
+            isOnboarding = true
         }
     }
 

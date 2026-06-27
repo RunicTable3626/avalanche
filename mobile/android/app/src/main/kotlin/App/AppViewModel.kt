@@ -94,7 +94,14 @@ class AppViewModel(
     private val _accounts = MutableStateFlow<List<Account>>(emptyList())
     val accounts: StateFlow<List<Account>> = _accounts.asStateFlow()
 
-    private val _isOnboarding = MutableStateFlow(true)
+    // Seed from a cheap synchronous check (SharedPreferences read, no Keystore
+    // or FFI): if we have persisted accounts we're almost certainly logged in,
+    // so start straight on the chats scaffold (MAIN) while `restoreAccounts`
+    // finishes in the background — instead of stalling on the splash for the
+    // duration of the Keystore unlock + per-account login. Only when there are
+    // no persisted accounts do we start on the splash. `restoreAccounts` flips
+    // this back to onboarding if the restore actually yields no usable account.
+    private val _isOnboarding = MutableStateFlow(loadPersistedAccounts().isEmpty())
     val isOnboarding: StateFlow<Boolean> = _isOnboarding.asStateFlow()
 
     private val _conversations = MutableStateFlow<List<Conversation>>(emptyList())
@@ -396,6 +403,9 @@ class AppViewModel(
             }
             if (dbKey == null) {
                 AppLog.error("restore", "Failed to retrieve DB encryption key, cannot restore accounts")
+                // We optimistically started on MAIN; with no usable accounts,
+                // fall back to the splash/onboarding flow.
+                _isOnboarding.value = _accounts.value.isEmpty()
                 return@launch
             }
 
@@ -468,6 +478,11 @@ class AppViewModel(
                 if (_serviceMode.value != ServiceMode.MOCK) {
                     PushManager.requestPermissionAndRegister(appViewModel = this@AppViewModel)
                 }
+            } else {
+                // Persisted entries existed (so we started on MAIN) but none
+                // produced a usable account — e.g. their DB files were gone.
+                // Fall back to the splash/onboarding flow.
+                _isOnboarding.value = true
             }
         }
     }

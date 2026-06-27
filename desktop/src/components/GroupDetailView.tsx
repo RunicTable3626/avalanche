@@ -98,6 +98,9 @@ export default function GroupDetailView(props: Props) {
     try {
       await app.service().setGroupTitle(gid, trimmed);
       await reload();
+      // Refresh the conversation list so the sidebar + header title update too;
+      // reload() only refreshes this modal's local summary.
+      await app.reloadConversations();
     } catch (e) {
       console.warn("setGroupTitle failed:", e);
     }
@@ -142,12 +145,15 @@ export default function GroupDetailView(props: Props) {
   }
 
   async function leave() {
+    // Marks the conversation read-only (hasLeft) and keeps it visible instead
+    // of deleting it — ConversationView swaps the composer for a notice. Only
+    // closes on success; a failed leave keeps the modal open (still a member).
     try {
-      await app.service().leaveGroup(gid);
-    } catch (e) {
-      console.warn("leaveGroup failed:", e);
+      await app.leaveGroup(props.conversation);
+      props.onClose();
+    } catch {
+      // leaveGroup already logged; stay open so the user sees they're still in.
     }
-    props.onClose();
   }
 
   return (

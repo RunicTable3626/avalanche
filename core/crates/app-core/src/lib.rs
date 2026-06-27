@@ -2427,6 +2427,50 @@ impl AppCore {
         }).map_err(AppErrorFfi::from)
     }
 
+    /// Bulk, local-only display-name lookup for a set of DIDs. For each DID,
+    /// applies the same name-source priority as `list_contacts` — the
+    /// encrypted-profile name (humans) first, then the cached server account
+    /// record (bots) — and includes only the DIDs that resolve to a non-empty
+    /// name. Performs no network I/O and records no throttle state, so the UI
+    /// can warm its in-memory name cache off the conversation list on launch
+    /// without server round-trips. DIDs with no locally-cached name are simply
+    /// omitted from the returned map (the caller leaves them to the async,
+    /// network-capable resolver).
+    pub fn cached_display_names(
+        &self,
+        dids: Vec<String>,
+    ) -> Result<std::collections::HashMap<String, String>, AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            let mut out = std::collections::HashMap::with_capacity(dids.len());
+            for did in dids {
+                let mut name = inner
+                    .store
+                    .load_contact_profile(&did)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.display_name)
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    name = inner
+                        .store
+                        .load_account_info(&did)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|c| c.display_name)
+                        .unwrap_or_default();
+                }
+                if !name.is_empty() {
+                    out.insert(did, name);
+                }
+            }
+            Ok::<_, AppError>(out)
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
     /// Re-fetch a contact's encrypted profile and update the cache if the
     /// decrypted name changed. Call this when the user opens a conversation
     /// — it's the primary change-detection path.

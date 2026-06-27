@@ -1,16 +1,19 @@
 [versions]
 agp = "9.2.1"
-coreKtx = "1.10.1"
+coreKtx = "1.19.0"
 junit = "4.13.2"
-lifecycleRuntimeKtx = "2.9.4"
-activityCompose = "1.8.0"
-kotlin = "2.2.10"
-composeBom = "2026.02.01"
-navigationCompose = "2.9.5"
-coroutines = "1.10.2"
-kotlinxSerialization = "1.8.1"
-camerax = "1.4.2"
+lifecycleRuntimeKtx = "2.11.0"
+activityCompose = "1.13.0"
+kotlin = "2.4.0"
+composeBom = "2026.06.00"
+navigationCompose = "2.9.8"
+coroutines = "1.11.0"
+kotlinxSerialization = "1.11.0"
+camerax = "1.6.1"
 zxing = "4.3.0"
+jna = "5.19.1"
+googleServices = "4.4.2"
+firebaseBom = "33.7.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -34,8 +37,12 @@ androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", 
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxing" }
+jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
+firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

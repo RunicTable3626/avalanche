@@ -98,12 +98,28 @@ pub(crate) fn ffi_runtime() -> &'static tokio::runtime::Runtime {
 pub fn init_logging(filter: String) {
     use tracing_subscriber::{fmt, EnvFilter};
     let env_filter = EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt()
-        .with_env_filter(env_filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .with_target(true)
-        .try_init();
+
+    // Android discards a native process's stderr — logcat only surfaces messages
+    // written through the Android log API — so route tracing to logcat there.
+    // Everywhere else (iOS/Xcode, desktop) stderr is captured as before.
+    #[cfg(target_os = "android")]
+    {
+        let _ = fmt()
+            .with_env_filter(env_filter)
+            .with_writer(paranoid_android::AndroidLogMakeWriter::new("Actnet".to_owned()))
+            .with_ansi(false)
+            .with_target(true)
+            .try_init();
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .with_target(true)
+            .try_init();
+    }
 }
 
 /// A Project available on the homeserver.
@@ -2222,6 +2238,31 @@ impl AppCore {
         }).map_err(AppErrorFfi::from)
     }
 
+    /// Deregister this device's push token (e.g. on logout). Retires the stored
+    /// pseudonym with both the relay and the homeserver so the relay stops
+    /// mapping the device token to this account, then clears local push state.
+    ///
+    /// Best-effort against the network: a relay/server failure still clears the
+    /// local state and returns Ok, since the caller is tearing the account down
+    /// anyway and the relay GC reaps any stranded pseudonym. A no-op (Ok) when
+    /// no push state is registered.
+    pub fn unregister_push_token(&self, relay_url: String) -> Result<(), AppErrorFfi> {
+        ffi_runtime().block_on(async {
+            let inner = self.inner.lock().await;
+            let Some(state) = inner.store.load_push_state().await.map_err(AppError::Store)? else {
+                return Ok::<_, AppError>(());
+            };
+            let _ = inner
+                .client
+                .unregister_push_with_relay(&relay_url, &state.pseudonym)
+                .await;
+            let _ = inner.client.unregister_push_pseudonym(&state.pseudonym).await;
+            inner.store.clear_push_state().await.map_err(AppError::Store)?;
+            Ok::<_, AppError>(())
+        })
+        .map_err(AppErrorFfi::from)
+    }
+
     /// Update the recovery blob on the server (e.g. after joining a new server).
     /// `prf_output` is the 32-byte WebAuthn PRF output; the blob-encryption
     /// key is derived from it via HKDF.
@@ -2708,6 +2749,11 @@ pub struct InviteInfo {
     /// The new client primes its contact_profiles cache with this so the
     /// auto-DM can show the inviter's name from the very first frame.
     pub inviter_profile_key: Option<Vec<u8>>,
+    /// Operator's privacy policy URL for `server_url`, resolved server-side as
+    /// part of invite validation (same source as `GET /v1/info`). `None` when
+    /// the operator configured none. Onboarding screens read this directly
+    /// instead of making a separate server call.
+    pub privacy_policy_url: Option<String>,
 }
 
 /// Parse and validate an invite token.
@@ -2750,6 +2796,7 @@ pub fn validate_invite(token: String) -> Result<InviteInfo, AppErrorFfi> {
             // compact token format; these stay None until a wire key is defined.
             inviter_display_name: None,
             inviter_profile_key: None,
+            privacy_policy_url: resp.privacy_policy_url.filter(|s| !s.is_empty()),
         })
     }).map_err(AppErrorFfi::from)
 }

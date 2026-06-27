@@ -1,9 +1,13 @@
 # Android Implementation Plan
 
-iOS is the reference implementation. This document tracks what needs to be built
-to reach functional parity and how to maintain it going forward.
+iOS is the reference implementation. This document tracks parity between the two
+apps and the remaining gaps. See `mobile/CLAUDE.md` for the parity rule and workflow.
 
-See `mobile/CLAUDE.md` for the parity rule and workflow.
+**Status legend:** `[x]` implemented · `[~]` partial / stubbed · `[ ]` not started
+
+The app is essentially at file-for-file parity with iOS. The one missing source
+file is the passkey ceremony (`PasskeyManager`); the remaining gaps are listed
+under [Known gaps](#known-gaps).
 
 ---
 
@@ -18,241 +22,233 @@ See `mobile/CLAUDE.md` for the parity rule and workflow.
 | Async | Coroutines + Flow | async/await + Task |
 | Camera (QR) | CameraX + ZXing (`zxing-android-embedded`) | AVFoundation + VisionKit |
 | WebView | Android WebView | WKWebView |
-| Rust bridge | UniFFI-generated Kotlin bindings (AAR) | UniFFI-generated Swift bindings (XCFramework) |
+| Rust bridge | UniFFI Kotlin in `mobile/android/Generated/` + `libapp_core.so` in `jniLibs/`, loaded via **JNA** (not an AAR) | UniFFI Swift bindings (XCFramework) |
+| Push | FCM (Firebase Cloud Messaging) → relay | APNs → relay |
 | Persistence (metadata) | SharedPreferences (JSON) | UserDefaults (JSON) |
 | Local crypto DB | SQLCipher via UniFFI Rust core | SQLCipher via UniFFI Rust core |
+| DB-key storage | Android Keystore (`KeystoreKeyManager`) | Secure Enclave (`SecureEnclaveKeyManager`) |
+
+The Rust core is consumed directly (generated Kotlin as a source dir + per-ABI
+`libapp_core.so`), **not** packaged as an AAR. Both `Generated/` and `jniLibs/`
+are gitignored build artifacts produced by `make android-bindings`.
 
 ---
 
 ## Project Structure
 
+Flat package `net.theavalanche.app` (the source layout under `kotlin/` is grouped
+into folders but the package is intentionally flat — see the inspection-profile note
+in `.gitignore`).
+
 ```
-mobile/android/
-├── app/
-│   ├── src/main/
-│   │   ├── kotlin/app/actnet/
-│   │   │   ├── ActnetApplication.kt
-│   │   │   ├── MainActivity.kt
-│   │   │   ├── models/
-│   │   │   │   ├── Account.kt
-│   │   │   │   ├── Conversation.kt
-│   │   │   │   ├── Message.kt
-│   │   │   │   ├── InviteToken.kt
-│   │   │   │   └── ProjectInfo.kt
-│   │   │   ├── viewmodels/
-│   │   │   │   └── AppViewModel.kt
-│   │   │   ├── services/
-│   │   │   │   ├── ActnetService.kt
-│   │   │   │   ├── MockActnetService.kt
-│   │   │   │   └── DevServerActnetService.kt
-│   │   │   └── ui/
-│   │   │       ├── theme/
-│   │   │       ├── navigation/
-│   │   │       ├── onboarding/
-│   │   │       │   ├── SplashScreen.kt
-│   │   │       │   ├── QRScannerScreen.kt
-│   │   │       │   ├── InviteLinkEntryScreen.kt
-│   │   │       │   ├── IdentityPickerScreen.kt
-│   │   │       │   ├── JoiningServerScreen.kt
-│   │   │       │   └── NewAccountScreen.kt
-│   │   │       ├── chats/
-│   │   │       │   ├── ChatsScreen.kt
-│   │   │       │   ├── ConversationRow.kt
-│   │   │       │   ├── ConversationScreen.kt
-│   │   │       │   ├── MessageBubble.kt
-│   │   │       │   ├── ComposeDialog.kt
-│   │   │       │   └── RecoveryKeyBanner.kt
-│   │   │       ├── calls/
-│   │   │       │   └── CallsScreen.kt
-│   │   │       ├── network/
-│   │   │       │   ├── NetworkScreen.kt
-│   │   │       │   └── ProjectWebScreen.kt
-│   │   │       └── common/
-│   │   │           ├── AccountAvatar.kt
-│   │   │           └── DevSettingsSheet.kt
-│   │   └── AndroidManifest.xml
-│   ├── libs/
-│   │   └── app_core.aar
-│   └── build.gradle.kts
-├── build.gradle.kts
-└── settings.gradle.kts
+mobile/android/app/src/main/kotlin/
+├── App/
+│   ├── ActnetApplication.kt
+│   ├── ActnetFirebaseMessagingService.kt   # FCM receiver (Android-only)
+│   ├── AppViewModel.kt
+│   ├── MainActivity.kt                      # hosts AppNavGraph (the NavHost)
+│   ├── NotificationPresenter.kt
+│   ├── PreviewSupport.kt                    # rememberPreviewAppViewModel (Android-only)
+│   ├── PushManager.kt
+│   └── RootView.kt                          # leftover shell; routing lives in MainActivity
+├── Models/                                  # Account, Conversation, Message, InviteToken, ProjectInfo
+├── Services/                                # ActnetService, Mock-, DevServer-, PublicServerInfo
+├── Theme/                                   # Theme.kt, Type.kt
+├── Utils/                                   # AppLog, AvalancheColors, Base64URL, KeystoreKeyManager
+└── Views/
+    ├── Chats/      # ChatsView, ConversationRow, ConversationView, MessageBubble,
+    │               # ComposeMessageView, NameGroupView, GroupDetailView,
+    │               # EditHistorySheet, RecipientTokenField, RecoveryKeyBanner
+    ├── Common/     # AccountAvatar, ContactAvatar, CutCornerRectangle, Hexagon,
+    │               # DisappearingMessagesPicker, LogViewerView, MainTabView,
+    │               # OfflineBanner, QRCodeCameraView
+    ├── Network/    # NetworkView, ProjectWebView
+    ├── Onboarding/ # Splash, QRScanner, InviteLinkEntry, IdentityPicker, JoiningServer,
+    │               # NewAccount, PasskeyExplainer, RecoveryExplainer, RecoveryConsole,
+    │               # RecoveryPhraseSetup
+    └── Settings/   # AccountsView, AddAccountView, BlockedContactsView,
+                    # IdentityDetailView, ServerDetailView
 ```
 
 ---
 
 ## Parity Map
 
-Every row maps an iOS file to its Android equivalent. Update status as work lands.
-
 ### App Shell
 
 | iOS | Android | Status |
 |---|---|---|
-| `ActnetApp.swift` | `MainActivity.kt` + `ActnetApplication.kt` | `[ ]` |
-| `RootView.swift` | Root composable in `NavGraph.kt` | `[ ]` |
-| `AppState.swift` | `AppViewModel.kt` | `[ ]` |
+| `ActnetApp.swift` | `MainActivity.kt` + `ActnetApplication.kt` | `[x]` |
+| `RootView.swift` | `AppNavGraph` in `MainActivity.kt` (`RootView.kt` is a superseded shell) | `[x]` |
+| `AppState.swift` | `AppViewModel.kt` | `[x]` |
+| `NotificationPresenter.swift` | `NotificationPresenter.kt` | `[x]` |
+| `PushManager.swift` + AppDelegate push hooks | `PushManager.kt` + `ActnetFirebaseMessagingService.kt` | `[x]` (FCM wired; not yet exercised on a device) |
 
 ### Models
 
 | iOS | Android | Status |
 |---|---|---|
-| `Account.swift` (Account, ServerInfo) | `Account.kt` | `[ ]` |
-| `Conversation.swift` | `Conversation.kt` | `[ ]` |
-| `Message.swift` (Message, DeliveryStatus) | `Message.kt` | `[ ]` |
-| `InviteToken.swift` | `InviteToken.kt` | `[ ]` |
-| `ProjectInfo.swift` | `ProjectInfo.kt` | `[ ]` |
+| `Account.swift` (Account, ServerInfo) | `Account.kt` | `[x]` |
+| `Conversation.swift` | `Conversation.kt` | `[x]` |
+| `Message.swift` (Message, DeliveryStatus) | `Message.kt` | `[x]` |
+| `InviteToken.swift` | `InviteToken.kt` | `[x]` |
+| `ProjectInfo.swift` | `ProjectInfo.kt` | `[x]` |
 
 ### Services
 
 | iOS | Android | Status |
 |---|---|---|
-| `ActnetService.swift` protocol | `ActnetService.kt` interface | `[ ]` |
-| `MockActnetService.swift` | `MockActnetService.kt` | `[ ]` |
-| `DevServerActnetService.swift` | `DevServerActnetService.kt` | `[ ]` |
-| UniFFI `AppCore` / `AppCoreProtocol` | UniFFI-generated `AppCore` (from AAR) | `[ ]` |
+| `ActnetService.swift` protocol | `ActnetService.kt` interface | `[x]` |
+| `AppCoreProtocol+Defaults.swift` | folded into `ActnetService.kt` (`AppCoreProtocol` defaults + `LiveAppCoreProtocol`) | `[x]` |
+| `MockActnetService.swift` | `MockActnetService.kt` | `[x]` (cannot fabricate `PreparedAccount` — see gaps) |
+| `DevServerActnetService.swift` | `DevServerActnetService.kt` | `[x]` |
+| `PublicServerInfo.swift` | `PublicServerInfo.kt` | `[x]` |
+| `PasskeyManager.swift` | — (Credential Manager) | `[ ]` **missing** |
+| UniFFI `AppCore` / `AppCoreProtocol` | UniFFI-generated `AppCore` (`Generated/`, via JNA) | `[x]` |
 
 ### Onboarding
 
 | iOS | Android | Status |
 |---|---|---|
-| `SplashView.swift` | `SplashScreen.kt` | `[ ]` |
-| `QRScannerView.swift` | `QRScannerScreen.kt` | `[ ]` |
-| `InviteLinkEntryView.swift` | `InviteLinkEntryScreen.kt` | `[ ]` |
-| `IdentityPickerView.swift` | `IdentityPickerScreen.kt` | `[ ]` |
-| `JoiningServerView.swift` | `JoiningServerScreen.kt` | `[ ]` |
-| `NewAccountView.swift` | `NewAccountScreen.kt` | `[ ]` |
+| `SplashView.swift` | `SplashView.kt` | `[x]` |
+| `QRScannerView.swift` | `QRScannerView.kt` | `[x]` |
+| `InviteLinkEntryView.swift` | `InviteLinkEntryView.kt` | `[x]` |
+| `IdentityPickerView.swift` | `IdentityPickerView.kt` | `[x]` |
+| `JoiningServerView.swift` | `JoiningServerView.kt` | `[x]` (existing-account join path is functional) |
+| `NewAccountView.swift` | `NewAccountView.kt` | `[x]` (avatar photo picker stubbed) |
+| `PasskeyExplainerView.swift` | `PasskeyExplainerView.kt` | `[~]` UI done; passkey ceremony stubbed |
+| `RecoveryExplainerView.swift` | `RecoveryExplainerView.kt` | `[~]` UI done; Credential Manager call stubbed |
+| `RecoveryConsoleView.swift` | `RecoveryConsoleView.kt` | `[~]` passkey-with-DID path only; PLC homeserver resolution stubbed |
+| `RecoveryPhraseSetupView.swift` | `RecoveryPhraseSetupView.kt` | `[x]` |
 
 ### Navigation
 
 | iOS | Android | Status |
 |---|---|---|
-| `MainTabView.swift` | `MainScreen.kt` with bottom nav | `[ ]` |
+| `MainTabView.swift` | `MainTabView.kt` (Chats + Network bottom nav) | `[x]` |
+| NavigationStack + sheets | `AppNavGraph` in `MainActivity.kt` | `[x]` |
 
-### Chats Tab
-
-| iOS | Android | Status |
-|---|---|---|
-| `ChatsView.swift` | `ChatsScreen.kt` | `[ ]` |
-| `ConversationRow.swift` | `ConversationRow.kt` | `[ ]` |
-| `ConversationView.swift` | `ConversationScreen.kt` | `[ ]` |
-| `MessageBubble.swift` | `MessageBubble.kt` | `[ ]` |
-| `ComposeMessageView.swift` | `ComposeDialog.kt` | `[ ]` |
-| `RecoveryKeyBanner.swift` | `RecoveryKeyBanner.kt` | `[ ]` |
-
-### Calls Tab
+### Chats
 
 | iOS | Android | Status |
 |---|---|---|
-| `CallsView.swift` | `CallsScreen.kt` | `[ ]` |
+| `ChatsView.swift` | `ChatsView.kt` | `[x]` (recovery-key banner check hardcoded `false` — needs FFI) |
+| `ConversationRow.swift` | `ConversationRow.kt` | `[x]` |
+| `ConversationView.swift` | `ConversationView.kt` | `[x]` |
+| `MessageBubble.swift` | `MessageBubble.kt` | `[x]` |
+| `ComposeMessageView.swift` | `ComposeMessageView.kt` | `[x]` |
+| `NameGroupView.swift` | `NameGroupView.kt` | `[x]` |
+| `GroupDetailView.swift` | `GroupDetailView.kt` | `[x]` |
+| `EditHistorySheet.swift` | `EditHistorySheet.kt` | `[x]` |
+| `RecipientTokenField.swift` | `RecipientTokenField.kt` | `[x]` (currently unused; composer uses its own chip field) |
+| `RecoveryKeyBanner.swift` | `RecoveryKeyBanner.kt` | `[x]` |
 
-### Network Tab
+### Network
 
 | iOS | Android | Status |
 |---|---|---|
-| `NetworkView.swift` | `NetworkScreen.kt` | `[ ]` |
-| `ProjectWebView.swift` | `ProjectWebScreen.kt` | `[ ]` |
+| `NetworkView.swift` | `NetworkView.kt` | `[x]` |
+| `ProjectWebView.swift` | `ProjectWebView.kt` | `[x]` |
+
+### Settings
+
+| iOS | Android | Status |
+|---|---|---|
+| `AccountsView.swift` | `AccountsView.kt` | `[x]` |
+| `AddAccountView.swift` | `AddAccountView.kt` | `[x]` |
+| `BlockedContactsView.swift` | `BlockedContactsView.kt` | `[x]` |
+| `IdentityDetailView.swift` | `IdentityDetailView.kt` | `[x]` |
+| `ServerDetailView.swift` | `ServerDetailView.kt` | `[x]` |
 
 ### Common
 
 | iOS | Android | Status |
 |---|---|---|
-| `AccountAvatar.swift` | `AccountAvatar.kt` | `[ ]` |
-| `DevSettingsView.swift` | `DevSettingsSheet.kt` | `[ ]` |
+| `AccountAvatar.swift` | `AccountAvatar.kt` | `[x]` |
+| `ContactAvatar.swift` | `ContactAvatar.kt` | `[x]` |
+| `CutCornerRectangle.swift` | `CutCornerRectangle.kt` | `[x]` |
+| `Hexagon.swift` | `Hexagon.kt` | `[x]` |
+| `DisappearingMessagesPicker.swift` | `DisappearingMessagesPicker.kt` | `[x]` |
+| `LogViewerView.swift` | `LogViewerView.kt` | `[x]` |
+| `OfflineBanner.swift` | `OfflineBanner.kt` | `[x]` |
+| `QRCodeCameraView.swift` | `QRCodeCameraView.kt` | `[x]` |
+
+### Utils
+
+| iOS | Android | Status |
+|---|---|---|
+| `AppLog.swift` | `AppLog.kt` | `[x]` |
+| `AvalancheColors.swift` | `AvalancheColors.kt` | `[x]` |
+| `Base64URL.swift` | `Base64URL.kt` | `[x]` |
+| `SecureEnclaveKeyManager.swift` | `KeystoreKeyManager.kt` (wired into login/createAccount/recovery) | `[x]` |
 
 ### State Behaviors (AppViewModel mirrors AppState)
 
 | Behavior | Status |
 |---|---|
-| Account restoration on launch | `[ ]` |
-| `createAccount(serverUrl, serverName, displayName)` | `[ ]` |
-| `joinServer(serverUrl, serverName, existingAccountId)` | `[ ]` |
-| `switchMode(mode)` | `[ ]` |
-| `sendMessage(...)` — optimistic + core | `[ ]` |
-| `markAllMessagesRead(conversationId, accountId)` | `[ ]` |
-| `loadMessagesFromStore(conversationId, accountId)` | `[ ]` |
-| `findOrCreateDMConversation(recipientDid, accountId)` | `[ ]` |
-| WebSocket loop per account (coroutine, reconnect on error) | `[ ]` |
-| `handleIncomingMessage()` — auto-create conversation, persist | `[ ]` |
-| `applyDeliveryStatusUpdates()` | `[ ]` |
-| `fetchProjects(serverUrl)` | `[ ]` |
-| `requestProjectToken(accountId, projectUrl)` | `[ ]` |
-| Conversation persistence (SharedPreferences) | `[ ]` |
-| `unreadCount(for:)` | `[ ]` |
+| Account restoration on launch | `[x]` |
+| `createAccount(...)` / `prepareAccount` / `finishAccountRegistration` | `[x]` |
+| `joinServer(...)` / `leaveServer(...)` | `[x]` |
+| `switchMode(mode)` | `[x]` |
+| `sendMessage(...)` / `sendGroupMessage(...)` — optimistic + core | `[x]` |
+| `addOptimisticMessage(...)` | `[x]` |
+| `editMessage` / `deleteMessage` / edit-history | `[x]` |
+| `toggleReaction` / `reactions` | `[x]` |
+| Disappearing-messages timer (`setConversationTimer` / group expiry) | `[x]` |
+| `markAllMessagesRead` / `markMessagesReadUpTo` / read receipts | `[x]` |
+| `loadMessagesFromStore` / `loadConversationsFromStore` | `[x]` |
+| Block / unblock / report; message-request gate | `[x]` |
+| Group create / invite / join / approve / roles / leave | `[x]` |
+| WebSocket loop per account (coroutine, reconnect on error) | `[x]` |
+| `handleIncomingMessage()` — auto-create conversation, persist, notify | `[x]` |
+| `applyDeliveryStatusUpdates()` | `[x]` |
+| `fetchProjects()` / `requestProjectToken()` | `[x]` |
+| Conversation persistence (SharedPreferences) | `[x]` |
+| `unreadCount(...)` + notification badge | `[x]` |
+| Push token registration (`registerPushToken` via FCM) | `[x]` (runtime-untested) |
+| `recoverAccount(...)` from relay blob | `[~]` (works given a DID; phrase-only path needs PLC resolution) |
 
 ---
 
-## Implementation Phases
+## Known gaps
 
-### Phase 1 — Gradle project + Rust bindings
+Highest-impact first:
 
-- Create `mobile/android/` Gradle project (Kotlin DSL, AGP 8.x, Compose BOM, min SDK 26)
-- Add `make android-bindings` Makefile target: cross-compile `app-core` for `aarch64-linux-android` + `x86_64-linux-android`, generate Kotlin bindings via UniFFI, package as AAR in `mobile/android/app/libs/`
-- `ActnetApplication.kt` and `MainActivity.kt` stubs
-- `AndroidManifest.xml` with INTERNET and CAMERA permissions
+1. **Passkey ceremony (Credential Manager).** No `PasskeyManager` equivalent.
+   `PasskeyExplainerView` / `RecoveryExplainerView` stub the `androidx.credentials`
+   create/get with the PRF extension. This **dead-ends the new-account onboarding
+   path** (nav is wired through to the passkey step, but "Create Passkey" does
+   nothing) and blocks passkey-based recovery.
+2. **PLC homeserver resolution.** `resolveHomeserverFromPlc(did)` in
+   `RecoveryConsoleView` is stubbed, so phrase-based recovery can't find a DID's
+   homeserver. Passkey recovery (DID embedded) is the only path, and it needs #1.
+3. **`hasRecoveryKey` banner check.** Hardcoded `false` in `ChatsView`; needs a new
+   Rust FFI method (full cross-platform cycle).
+4. **Avatar photo picker.** `NewAccountView` has a stub where iOS lets the user pick
+   an avatar image. Avatars display fine; selection is missing.
+5. **Push: runtime-untested + no cold-process sync.** FCM is wired but never
+   exercised on a device. A wakeup delivered to a killed process defers to the next
+   app launch rather than syncing headlessly (`onMessageReceived` only drains when
+   an `AppViewModel` is live).
+6. **Mock `PreparedAccount`.** The mock service can't fabricate a `PreparedAccount`
+   (UniFFI native-pointer object), so two-stage-creation previews/tests can't use
+   the mock; they need the live service.
 
-**Done when:** `./gradlew assembleDebug` succeeds and `AppCore` is importable.
+## Build status
 
-### Phase 2 — Models + AppViewModel
-
-- All data classes (Account, Conversation, Message, DeliveryStatus, InviteToken, ProjectInfo)
-- `ActnetService` interface, `MockActnetService`, `DevServerActnetService`
-- `AppViewModel` with all StateFlow fields and methods from the behaviors table
-- SharedPreferences JSON persistence
-
-**Done when:** unit tests cover createAccount, sendMessage, markAllMessagesRead, handleIncomingMessage using mock service.
-
-### Phase 3 — Navigation skeleton
-
-- Material 3 theme
-- `NavGraph.kt` with all destinations
-- Bottom navigation: Calls / Chats / Network
-- Root routing: onboarding vs. main based on `isOnboarding`
-
-**Done when:** app launches, can tap through all destinations (screens can be stubs).
-
-### Phase 4 — Onboarding screens
-
-- `SplashScreen.kt`: logo, scan QR button, enter link button, dev settings icon
-- `QRScannerScreen.kt`: CameraX + ZXing (`zxing-android-embedded`), parse `actnet://` or `https://…/invite/…` — ZXing chosen over ML Kit to avoid Google Play Services dependency (works on de-Googled Android)
-- `InviteLinkEntryScreen.kt`: text field, parse on submit
-- `IdentityPickerScreen.kt`: existing accounts list or straight to NewAccount
-- `JoiningServerScreen.kt`: existing account display, join button
-- `NewAccountScreen.kt`: display name field, avatar placeholder, continue button
-
-**Done when:** can scan QR or enter link, create account against dev server, land in Chats.
-
-### Phase 5 — Chats tab
-
-- `AccountAvatar.kt`: initial letter circle, real image if avatarData set
-- `RecoveryKeyBanner.kt`: yellow banner, stubbed dismissed like iOS
-- `ChatsScreen.kt`: sorted list, gear + compose icons, empty state
-- `ConversationRow.kt`: avatar, title, last message, timestamp, unread badge
-- `ConversationScreen.kt`: message list, scroll to first unread/bottom, mark read, compose bar
-- `MessageBubble.kt`: right/left alignment, delivery indicator icons, timestamp, "Edited" label
-- `ComposeDialog.kt`: account picker (multi-account), recipient DID field
-
-**Done when:** can send and receive messages in real time; delivery status updates; unread clears on open.
-
-### Phase 6 — Network + Calls tabs
-
-- `NetworkScreen.kt`: servers as section headers, projects with name + description
-- `ProjectWebScreen.kt`: WebView with project URL + auth token
-- `CallsScreen.kt`: empty state placeholder
-
-### Phase 7 — Dev settings + polish
-
-- `DevSettingsSheet.kt`: mode selector, server URL, account/conversation counts
-- Keyboard handling in ConversationScreen (IME insets)
-- WebSocket reconnect on network loss
-
----
-
-## Open Questions
-
-1. **NDK setup.** Need `cargo-ndk` and Android NDK installed. Document exact steps in `mobile/CLAUDE.md` once resolved.
-2. **AAR packaging.** Exact `uniffi-bindgen` invocation + AAR assembly steps TBD.
-3. **SQLCipher on Android.** Verify `libsqlcipher.so` is bundled correctly via the NDK build.
+Phases 1–6 of the original plan (Gradle + bindings, models + AppViewModel,
+navigation, onboarding screens, Chats, Network) are complete. Phase 7 (polish) is
+largely done: keyboard/IME insets, WebSocket reconnect, log viewer, notifications,
+and Keystore-backed DB keys all landed. The runtime/build chain (`make
+android-bindings` + `./gradlew assembleDebug`) is green; the app launches past the
+FFI boundary on the emulator.
 
 ## Deferred / Known Limitations
 
-- **SharedPreferences metadata exposure.** The identity list (own DIDs, display names, server URLs, DB filename) is stored in SharedPreferences as plain JSON. It is protected by Android's app sandbox and file-based encryption (FBE), but not by a user-controlled key. An attacker with sandbox-level access (e.g. a backup extraction or physical access with ADB on a debug build) gets enough to link the device to specific orgs. Message content and the contact graph are not exposed — they live inside the per-identity SQLCipher DBs. The fix would be a small `manifest.db` keyed from the Android Keystore (analogous to the Secure-Enclave-keyed approach sketched for iOS in `docs/02-todos-deferred.md`). Deferred because the sensitivity of the leaked metadata is low relative to the implementation cost.
+- **SharedPreferences metadata exposure.** The identity list (own DIDs, display
+  names, server URLs, DB filename) is stored in SharedPreferences as plain JSON,
+  protected only by the app sandbox + file-based encryption, not a user-controlled
+  key. Message content and the contact graph are *not* exposed — those live in the
+  per-identity SQLCipher DBs, which are now keyed from the Android Keystore
+  (`KeystoreKeyManager`). The remaining fix would be a small `manifest.db` keyed from
+  the Keystore for the metadata too. Deferred: low sensitivity relative to cost.

@@ -14,55 +14,89 @@ The design centers on Signal-quality encrypted messaging — a unified inbox of 
 
 ## Getting started
 
-### Prerequisites
+If you want to develop iOS, you'll need a Mac; but should be able to do everything else on any platform.
 
-We currently do development on MacOS, with Rust, Docker and Xcode:
+### Install prerequisites (Mac specific)
 
 - [OrbStack](https://orbstack.dev/) (our recommended Docker server, but plain old Docker is ok too)
 - [Rust](https://rustup.rs/) (stable)
-- [Xcode](https://developer.apple.com/xcode/) 16+ (for the iOS app)
-- [XcodeGen](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`
+- Node 26+ (via `fnm` or `nvm`, with Temporal pre-installed)[^nodev]
+- [Xcode](https://developer.apple.com/xcode/) 16+
+- Homebrew, to install dev tools used by our build commands: XcodeGen and qrencode — `brew install xcodegen qrencode fnm`
+- [Android Studio](https://developer.android.com/studio) — it bundles the SDK
+  Manager, a JDK, and an emulator.
+- Use Android Studio's **SDK Manager** to install:
+  - **SDK Platforms** tab → the latest stable Android SDK platform.
+  - **SDK Tools** tab → **NDK (Side by side)**. (Also you'll want to ensure
+    Build Tools, Platform Tools and an emulator are installed.)
+- Rust Android targets: `rustup target add aarch64-linux-android x86_64-linux-android`
+- [cargo-ndk](https://github.com/bbqsrc/cargo-ndk): `cargo install cargo-ndk`
+- [Tailscale](https://tailscale.com/) (recommended)
+
+[^nodev]: The build requires Node 26+ *with Temporal*. This version is quite new as of this writing, and for some reason Homebrew's packaging does not include Temporal even though it is included by default for most Node 26 builds. You can install it via a Node version manager like fnm. You can check if it's installed by typing: `node -e "console.log(typeof Temporal)"` and seeing whether you get `object` (yes) or `undefined` (no).
+
+
+### Install prerequisites (other platforms)
+
+- A Docker server of your choice
+- [Rust](https://rustup.rs/) (stable)
+- Node 26+ with Temporal[^nodev]
+- [Android Studio](https://developer.android.com/studio)
+- Dev tools used by our build commands: qrencode (install with your package manager)
+- Use Android Studio's **SDK Manager** to install:
+  - **SDK Platforms** tab → the latest stable Android SDK platform.
+  - **SDK Tools** tab → **NDK (Side by side)**. (Also you'll want to ensure
+    Build Tools, Platform Tools and an emulator are installed.)
+- Rust Android targets: `rustup target add aarch64-linux-android x86_64-linux-android`
+- [cargo-ndk](https://github.com/bbqsrc/cargo-ndk): `cargo install cargo-ndk`
+- [Tailscale](https://tailscale.com/) (recommended)
+
+### Set up your local environment
+
+We highly recommend setting up and enabling Tailscale on your laptop and any devices you intend to test with.[^tailscale]
+
+[^tailscale]: We use Tailscale to make it so you don't need to mess around with `localhost` vs other IP addresses on your local network, nor do you need to make sure your phone and laptop are on the same wifi -- your Tailscale laptop URL is stable and reachable cross-network. If you prefer to skip tailscale and use localhost, that works too.
+
+In your `.env` (copy `.env.example` first if you haven't), set:
+
+* SERVER_URL to your Tailscale url for your laptop `http://<host>.tail<NNNNN>.ts.net:3000`
+* ANTHROPIC_API_KEY (optional) if you have a Claude account and want testbot to respond with AI. (This costs pennies to run and is nice to have to make your demos feel real!)
 
 ### Run the backend
 
 ```bash
-make dev-all   # starts Postgres, applies migrations, launches homeserver + relay + testbot
+make dev-all   # starts all services locally + launches homeserver + relay + testbot
 ```
 
-This runs the homeserver on `localhost:3000` and the [testbot](docs/21-chatbot-project.md) on `localhost:3001`. To make the testbot respond with AI instead of echoing, copy `.env.example` to `.env` and add your [Anthropic API key](https://console.anthropic.com/).
+This uses Docker to install a few dev prereqs including a Postgres database server, then runs the homeserver on port 3000, and builds and launches some Node-based default projects (testbot and adminbot) that connect to it.
 
-### Run the iOS app on simulator
+### Run the iOS app
 
 ```bash
 make ios       # build Rust → XCFramework, generate Swift bindings, generate Xcode project
 ```
 
-Then open `mobile/ios/Actnet/Actnet.xcodeproj` in Xcode, select an iPhone simulator, and run.
+Then open `mobile/ios/Actnet/Actnet.xcodeproj` in Xcode, select an iPhone simulator or device, and run.
 
-On first launch, switch to **Dev Server** mode in settings, then create an account pointing at `http://localhost:3000`.
+If you're running on a real device[^appledev], plug your device in and enable developer mode: **Settings → Privacy & Security → Developer Mode** and trust the laptop when prompted. First-time device prep takes a few minutes.
 
-### Run on a real device
+[^appledev]: Note: I think Apple requires a paid developer account to run on real devices.
 
-You'll need Tailscale on both your phone and laptop, signed in to the same tailnet. Create a free Tailscale account and install the app on both. Your laptop will get a DNS name like `<host>.tail<NNNNN>.ts.net`.
+### Run the Android app
 
-In your `.env` (copy `.env.example` first if you haven't), set:
-
+```bash
+make android   # cross-compile Rust core → libapp_core.so per ABI,
+               # generate Kotlin bindings, then build the debug APK
 ```
-SERVER_URL=http://<host>.tail<NNNNN>.ts.net:3000
-```
 
-Then plug your iOS device into your laptop. On the phone, enable **Settings → Privacy & Security → Developer Mode** and trust the laptop when prompted. In Xcode, pick the connected device as the run target and launch. First-time device prep takes a few minutes.
+Then open `mobile/android` in Android Studio, trigger Gradle to sync, then pick an emulator or device, and run.
 
-On first launch, switch to **Dev Server** mode in the app's settings — the app currently defaults to mock mode.
+If you're running on a real device, enable developer mode (**Settings → About phone → tap Build number seven times**), turn on **USB debugging** under Developer options, plug in, and trust the laptop when prompted.
 
-To sign up, run `make dev-invite` (install `qrencode` first with `brew install qrencode`) and scan the QR with your phone's camera.
+### Create your first account
+
+To create your first account, type `make dev-invite` and then use the running app to paste or scan the invite token.
 
 ## Docs
 
-- [00 — Design](docs/00-design.md) — goals, architecture, threat model, and first-party Project designs
-- [01 — Technical implementation](docs/01-technical-implementation.md) — tech stack, cryptographic approach, repository structure, and staged build plan
-- [10 — Server implementation](docs/10-server-implementation.md) — homeserver PostgreSQL schema and implementation plan
-- [11 — Core API sketch](docs/11-core-api-sketch.md) — API design for the `crypto` and `store` crates
-- [20 — Project security](docs/20-project-security.md) — security model for Projects (auth, webviews, bots)
-- [21 — Chatbot project](docs/21-chatbot-project.md) — design and implementation plan for the first Project
-- [30 — Mobile UX](docs/30-mobile-ux.md) — mobile app UX: signup flows, navigation, multi-account
+There's a wealth of documentation to keep reading. Start with [00 — Design](docs/00-design.md) — goals, architecture, threat model, and Projects.

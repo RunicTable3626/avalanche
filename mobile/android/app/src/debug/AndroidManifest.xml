@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Debug-only manifest overlay.
+
+    Local dev servers (homeserver / relay / test bot) are reached over plain
+    HTTP, which Android blocks by default on API 28+ ("CLEARTEXT communication
+    not permitted by network security policy"). This overlay flips cleartext on
+    for the *debug* build only — it is merged into debug APKs and never reaches
+    the release build, so production stays HTTPS-only.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application
+        android:usesCleartextTraffic="true"
+        tools:replace="android:usesCleartextTraffic" />
+
+</manifest>

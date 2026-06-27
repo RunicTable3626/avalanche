@@ -36,7 +36,14 @@ export default function NewConversationView(props: Props) {
   });
 
   function addChip(did: string) {
-    setChips((prev) => (prev.includes(did) ? prev : [...prev, did]));
+    // Only DIDs are valid recipients — names are picked from the contact list
+    // below. This stops a free-typed name (e.g. "Alice") from being committed
+    // as a chip and creating a DM keyed on a non-DID string that can't send.
+    // TODO(parity): accept go.theavalanche.net contact links (/conversation/<did>,
+    // /i/<token>) like iOS RecipientTokenField; for now require a raw DID.
+    const v = did.trim();
+    if (!v.startsWith("did:")) return;
+    setChips((prev) => (prev.includes(v) ? prev : [...prev, v]));
   }
 
   function removeChip(did: string) {

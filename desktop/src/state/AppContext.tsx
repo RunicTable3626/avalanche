@@ -153,14 +153,21 @@ export function AppProvider(props: { children: JSX.Element }) {
   let eventLoopRunning = false;
   let connLoopRunning = false;
   let eventLoopTimeout: ReturnType<typeof setTimeout> | undefined;
-  let connLoopTimeout: ReturnType<typeof setTimeout> | undefined;
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
-  /** Centralized access to the active account ID. */
+  /**
+   * The single account whose session this context drives today. Multi-account
+   * is not yet implemented on desktop.
+   *
+   * NOTE: the eventual multi-account model is NOT a "currently active" identity
+   * the user switches between — all identities share one inbox (per the mobile
+   * design). So this helper is a stopgap, not a forward-compatible abstraction:
+   * when multi-account lands, callers that assume a single active account will
+   * need to fan out over `store.accounts` / merge per-account state rather than
+   * just swap which account this returns.
+   */
   function getActiveAccountId(): string {
-    // TODO: multi-account — iterate store.accounts and use the one matching the
-    // currently-selected identity once account switching is implemented.
     // TODO(robustness): return `null` instead of `""` so callers can
     // distinguish "no account" from a valid empty-string DID. An empty
     // string as sentinel could collide with real data in edge cases
@@ -1023,6 +1030,14 @@ export function AppProvider(props: { children: JSX.Element }) {
     void loop();
   }
 
+  // Mirror iOS `connectionStateLoop` (AppState.swift:1427): seed from the
+  // current snapshot, then block on `waitForConnectionStateChange` and copy
+  // each state the core emits into `connectionStates[accountId]`. The Rust
+  // core owns reconnection and surfaces its progress as `reconnecting` /
+  // `connected` states, so this loop is a thin mirror — connectivity churn
+  // flows through as ConnectionState values, NOT as JS-side retries. A throw
+  // means the core/session is gone, which is terminal (we deliberately do not
+  // layer a second backoff scheme on top of the core's own reconnect logic).
   function startConnectionLoop() {
     if (connLoopRunning) return;
     const accountId = getActiveAccountId();
@@ -1033,32 +1048,26 @@ export function AppProvider(props: { children: JSX.Element }) {
     if (!accountId) return;
     connLoopRunning = true;
 
-    const BACKOFF_MS = 1000;
-    const BACKOFF_CAP_MS = 30000;
-    let failCount = 0;
-
-    const loop = async (last: ConnectionState, delayMs: number) => {
-      if (!connLoopRunning) return;
-      try {
-        const next = await service().waitForConnectionStateChange(last);
-        failCount = 0;
-        setStore("connectionStates", accountId, next);
-        if (connLoopRunning) void loop(next, BACKOFF_MS);
-      } catch {
-        if (connLoopRunning) {
-          failCount++;
-          const nextDelay = Math.min(delayMs * 2, BACKOFF_CAP_MS);
-          connLoopTimeout = setTimeout(() => void loop(last, nextDelay), delayMs);
+    const loop = async (last: ConnectionState) => {
+      while (connLoopRunning) {
+        let next: ConnectionState;
+        try {
+          next = await service().waitForConnectionStateChange(last);
+        } catch {
+          connLoopRunning = false;
+          break;
         }
+        if (!connLoopRunning) break;
+        last = next;
+        setStore("connectionStates", accountId, next);
       }
     };
 
     void service()
       .connectionState()
       .then((state) => {
-        failCount = 0;
         setStore("connectionStates", accountId, state);
-        void loop(state, BACKOFF_MS);
+        void loop(state);
       })
       .catch(() => {
         connLoopRunning = false;
@@ -1076,10 +1085,6 @@ export function AppProvider(props: { children: JSX.Element }) {
     if (eventLoopTimeout) {
       clearTimeout(eventLoopTimeout);
       eventLoopTimeout = undefined;
-    }
-    if (connLoopTimeout) {
-      clearTimeout(connLoopTimeout);
-      connLoopTimeout = undefined;
     }
   }
 

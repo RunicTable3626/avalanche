@@ -10,7 +10,13 @@ export const commands = {
 	recoverFromBlob: (serverUrl: string, did: string, prfOutput: number[], dbPath: string, dbKey: string, displayName: string) => typedError<AccountResult, string>(__TAURI_INVOKE("recover_from_blob", { serverUrl, did, prfOutput, dbPath, dbKey, displayName })),
 	sendDm: (recipientDid: string, plaintext: number[], sentAtMs: number) => typedError<null, string>(__TAURI_INVOKE("send_dm", { recipientDid, plaintext, sentAtMs })),
 	sendGroupMessage: (groupId: string, plaintext: number[], sentAtMs: number) => typedError<null, string>(__TAURI_INVOKE("send_group_message", { groupId, plaintext, sentAtMs })),
-	receiveMessages: () => typedError<DecryptedMessage[], string>(__TAURI_INVOKE("receive_messages")),
+	/**
+	 *  Async so it runs off the main thread. `app_core.next_events()` blocks until
+	 *  decrypted events arrive (WebSocket push via app-core's MPSC channel), so it
+	 *  must not run on the main thread — that would freeze the WebView. We clone the
+	 *  `Arc<AppCore>` out of `State` *before* awaiting (a `State` reference cannot be
+	 *  held across an await point) and run the blocking call on the blocking pool.
+	 */
 	nextEvents: () => typedError<IncomingEvent[], string>(__TAURI_INVOKE("next_events")),
 	saveMessage: (msg: StoredMessageFfi) => typedError<null, string>(__TAURI_INVOKE("save_message", { msg })),
 	loadConversations: () => typedError<ConversationSummaryFfi[], string>(__TAURI_INVOKE("load_conversations")),
@@ -33,10 +39,23 @@ export const commands = {
 	unblockContact: (did: string) => typedError<null, string>(__TAURI_INVOKE("unblock_contact", { did })),
 	leaveServer: () => typedError<null, string>(__TAURI_INVOKE("leave_server")),
 	deleteIdentity: () => typedError<null, string>(__TAURI_INVOKE("delete_identity")),
+	/**
+	 *  Drops the `Arc<AppCore>` handle so `get_app` returns "no account". Called by
+	 *  the frontend on logout / mode-switch. The TS-owned polling loop has already
+	 *  been stopped, so there is no background thread to cancel — this just releases
+	 *  the core so the old reconnect task + WS connection die on drop.
+	 */
+	clearSession: () => typedError<null, string>(__TAURI_INVOKE("clear_session")),
 	fetchProjects: () => typedError<ProjectInfoFfi[], string>(__TAURI_INVOKE("fetch_projects")),
 	requestProjectToken: (projectUrl: string) => typedError<string, string>(__TAURI_INVOKE("request_project_token", { projectUrl })),
 	validateInvite: (token: string) => typedError<InviteInfo, string>(__TAURI_INVOKE("validate_invite", { token })),
 	connectionState: () => typedError<ConnectionState, string>(__TAURI_INVOKE("connection_state")),
+	/**
+	 *  Async + `spawn_blocking` for the same reason as `next_events`: this parks on
+	 *  `ffi_runtime().block_on(rx.changed().await)` until the connection state
+	 *  changes, so it must not run on the main thread or it freezes the WebView.
+	 *  `startConnectionLoop` long-polls this concurrently with the event loop.
+	 */
 	waitForConnectionStateChange: (last: ConnectionState) => typedError<ConnectionState, string>(__TAURI_INVOKE("wait_for_connection_state_change", { last })),
 	createGroup: (title: string, description: string, expirySeconds: number) => typedError<CreatedGroupFfi, string>(__TAURI_INVOKE("create_group", { title, description, expirySeconds })),
 	fetchGroupState: (groupId: string) => typedError<GroupSummaryFfi, string>(__TAURI_INVOKE("fetch_group_state", { groupId })),

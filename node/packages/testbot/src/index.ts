@@ -1,16 +1,16 @@
-// actnet testbot — the first demo Project on the platform.
+// actnet testbot - the first demo Project on the platform.
 //
 // A standalone HTTP service that serves a tiny web UI and spins up AI chatbot
 // accounts on demand. Each bot is a full Signal-protocol participant: it
 // registers on the homeserver, holds its own identity keys, and sends/receives
-// encrypted DMs via `@actnet/app-core`. Bots converse using Claude Haiku
-// (falling back to an echo when no API key is configured).
+// encrypted DMs via `@actnet/app-core`. Bots converse using Claude Haiku; an
+// Anthropic key is required (configured via `.env` - see `loadDotenv`).
 //
 // Lifecycle / state:
 //   - All bot state is in-memory: the `botsByUser` registry dies when the
 //     service restarts. Each bot's SQLCipher store is a throwaway file under
 //     the OS temp dir (app-core has no in-memory store binding for node), so
-//     restarting the service abandons every bot identity — matching the
+//     restarting the service abandons every bot identity - matching the
 //     original Rust testbot's ephemeral semantics.
 //   - Each bot runs one `for await` event loop over its own AppCore. Node is
 //     single-threaded, so a bot processes its messages sequentially with no
@@ -21,7 +21,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { AppCore, initLogging, type SendTarget } from "@actnet/app-core";
 
@@ -38,6 +39,34 @@ interface Env {
   logLevel: string;
   sharedSecret?: string;
   basePath: string;
+}
+
+/**
+ * Load the repo-root `.env` into `process.env` before reading config, so the
+ * bot picks up its `ANTHROPIC_*` credentials regardless of how it's launched:
+ * `npm start` (cwd = package dir), `dev.py`, or directly from the repo root.
+ *
+ * Walks up from this module looking for the nearest `.env`. Uses Node's
+ * built-in parser (`process.loadEnvFile`), which strips the `export ` prefix
+ * the repo's `.env` uses and does NOT override variables already present in the
+ * real environment - so an explicit shell/systemd value still wins, matching
+ * dev.py's `setdefault` rule. A missing `.env` is non-fatal (the vars may be
+ * supplied directly by the environment, e.g. in production).
+ */
+function loadDotenv(): void {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    const candidate = join(dir, ".env");
+    try {
+      process.loadEnvFile(candidate);
+      console.log(`testbot: loaded env from ${candidate}`);
+      return;
+    } catch {
+      const parent = dirname(dir);
+      if (parent === dir) return; // reached filesystem root, no .env found
+      dir = parent;
+    }
+  }
 }
 
 function readEnv(): Env {
@@ -149,9 +178,8 @@ const indexHtml = (basePath: string) => `<!DOCTYPE html>
     <button id="textme" onclick="textMe()">Text Me</button>
     <div id="status"></div>
     <script>
-        const params = new URLSearchParams(window.location.search);
-        const hashParams = new URLSearchParams(window.location.hash.slice(1));
-        const token = hashParams.get('token') ?? params.get('token');
+        const params = new URLSearchParams(window.location.hash.slice(1));
+        const token = params.get('token');
 
         async function textMe() {
             const btn = document.getElementById('textme');
@@ -174,8 +202,8 @@ const indexHtml = (basePath: string) => `<!DOCTYPE html>
                     return;
                 }
                 const data = await resp.json();
-                status.textContent = 'Bot ' + data.bot.did + ' sent you a DM! Check your Chats tab.';
-                btn.disabled = false;
+                status.textContent = 'Bot created! Opening conversation...';
+                window.location.href = 'https://go.theavalanche.net/conversation/' + data.bot.did;
             } catch (e) {
                 status.textContent = 'Error: ' + e.message;
                 btn.disabled = false;
@@ -197,7 +225,7 @@ interface ConversationMessage {
  * launch its background message loop. Returns the bot's public handle.
  */
 async function spawnBot(env: Env, userDid: string): Promise<BotInfo> {
-  // Throwaway SQLCipher store in a temp dir — the bot identity is meant to die
+  // Throwaway SQLCipher store in a temp dir - the bot identity is meant to die
   // with the process. Empty passphrase is fine for a disposable store.
   const dbPath = join(mkdtempSync(join(tmpdir(), "actnet-testbot-")), "store.db");
   // Present the bootstrap secret (as a plain-member token, no project) so the
@@ -284,9 +312,29 @@ async function runBotLoop(
 
 // ── Claude API ───────────────────────────────────────────────────────────────
 
+// This bot talks to an Anthropic-compatible `/v1/messages` endpoint. To point
+// it at real Claude models (rather than a compatible provider), set these in
+// your `.env` (see `loadDotenv` / `.env.example`):
+//
+//   ANTHROPIC_BASE_URL  The API host. For Claude, use https://api.anthropic.com
+//                       (the default if unset). The bot always POSTs to
+//                       `${ANTHROPIC_BASE_URL}/v1/messages`. Point this at a
+//                       compatible provider (e.g. DeepSeek's Anthropic-compatible
+//                       endpoint) only if you're not using first-party Claude.
+//   ANTHROPIC_API_KEY   Your Claude API key, created in the Anthropic Console
+//                       (console.anthropic.com -> Settings -> API keys). Sent as
+//                       the `x-api-key` header below. ANTHROPIC_AUTH_TOKEN is an
+//                       alternative bearer credential (e.g. for proxies/gateways).
+//   ANTHROPIC_MODEL     The model ID. Use an exact ID, no date suffix. Current
+//                       Claude IDs: claude-opus-4-8 (most capable),
+//                       claude-sonnet-4-6 (balanced), claude-haiku-4-5 (fastest /
+//                       cheapest -- this bot's default tier via HAIKU_MODEL).
+//                       ANTHROPIC_DEFAULT_HAIKU_MODEL overrides this if set.
+
 /**
- * Ask Claude Haiku for the next reply. With no API key configured, falls back
- * to echoing the user's last message so the demo still works offline.
+ * Ask Claude Haiku for the next reply. An API key is required (enforced at
+ * startup in `main`). On an API error or request failure, the bot falls back to
+ * echoing the user's last message so the conversation still progresses.
  */
 async function generateResponse(
   env: Env,
@@ -294,22 +342,22 @@ async function generateResponse(
   userDisplayName: string | undefined,
 ): Promise<string> {
   const apiKey = env.anthropicApiKey ?? env.anthropicAuthToken;
-  if (!apiKey) return echoResponse(conversation);
+  // `main` fail-fasts when neither key is set; this is just a type guard.
+  if (!apiKey) throw new Error("testbot: no Anthropic API key configured");
 
   const model = process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL
     ?? process.env.ANTHROPIC_MODEL
     ?? HAIKU_MODEL;
 
   let systemPrompt =
-    "You are a friendly chatbot on the Avalanche platform. The user you are " +
-    "chatting with is already using the Avalanche app -- do not tell them to " +
-    "install or download anything. Keep your responses concise and " +
-    "conversational. Be supportive and helpful.";
+    "You are a friendly chatbot on the Avalanche platform. Keep your responses " +
+    "concise and conversational. You're chatting with an activist - be " +
+    "supportive and helpful.";
   if (userDisplayName) {
-    // Sanitize: strip/replace characters that break JSON or enable prompt
-    // injection.  Control chars, curly quotes, and em dashes are common in
+    // Sanitize: strip/replace characters that break JSON or trip strict
+    // providers (control chars, en/em dashes, curly quotes) - common in
     // display names set from mobile keyboards.
-    const safe = userDisplayName.replace(/[ --–—‘’“”]/g, "'");
+    const safe = userDisplayName.replace(/[\u0000-\u001f\u007f-\u009f\u2013\u2014\u2018\u2019\u201c\u201d]/g, "'");
     systemPrompt += ` The user's display name is ${safe}.`;
   }
 
@@ -330,9 +378,8 @@ async function generateResponse(
       }),
     });
     if (!resp.ok) {
-      const errBody = await resp.text();
-      console.error(`testbot: claude API error ${resp.status}: ${errBody}`);
-      return `(API error ${resp.status}: ${errBody.slice(0, 200)})`;
+      console.error(`testbot: claude API error ${resp.status}: ${await resp.text()}`);
+      return echoResponse(conversation);
     }
     const body = (await resp.json()) as { content?: Array<{ type?: string; text?: string; thinking?: string }> };
     // Some models (deepseek-v4-*) return a "thinking" block first; skip
@@ -343,7 +390,7 @@ async function generateResponse(
     const text = textBlock?.text ?? thinkingBlock?.thinking;
     if (!text) {
       console.error("testbot: unexpected API response shape:", JSON.stringify(body).slice(0, 200));
-      return "(Unexpected API response — check logs)";
+      return "(Unexpected API response - check logs)";
     }
     return text;
   } catch (e) {
@@ -352,7 +399,7 @@ async function generateResponse(
   }
 }
 
-/** Offline fallback: echo the user's most recent message. */
+/** Fallback when the API errors or is unreachable: echo the user's last message. */
 function echoResponse(conversation: ConversationMessage[]): string {
   const lastUser = [...conversation].reverse().find((m) => m.role === "user");
   return `(echo) You said: ${lastUser?.content ?? "..."}`;
@@ -397,11 +444,16 @@ async function handleRequest(env: Env, req: IncomingMessage, res: ServerResponse
 }
 
 function main(): void {
+  loadDotenv();
   const env = readEnv();
   initLogging(env.logLevel);
 
   if (!env.anthropicApiKey && !env.anthropicAuthToken) {
-    console.warn("testbot: ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN not set — bots will echo messages instead of using Claude");
+    console.error(
+      "testbot: no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN configured. " +
+        "Set one in .env (see .env.example) - the bot no longer echoes as a fallback.",
+    );
+    process.exit(1);
   }
 
   const server = createServer((req, res) => {

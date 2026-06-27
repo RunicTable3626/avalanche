@@ -38,14 +38,29 @@ There is no main/renderer process split. The app has two layers:
 **Rust backend** (`src-tauri/src/lib.rs`):
 - Links against `app-core` directly — no Node.js intermediary
 - Exposes methods as Tauri commands (`#[tauri::command]`)
-- Manages WebSocket loops, metadata persistence via `tauri-plugin-store`
+- Manages metadata persistence via `tauri-plugin-store`
 
 **Solid frontend** (`src/`, runs in a WebView sandbox):
 - Runs Solid — no direct native access
 - Calls Rust via `invoke('command_name', args)`
-- Receives push events via Tauri event system
+- Polls for decrypted events via Tauri commands (TS-owned loop, no background thread)
 
 All Rust core calls flow: `Solid → invoke() → src-tauri/src/lib.rs → app-core → Rust`.
+
+### Architectural invariant: TS owns the event loop
+
+`startEventLoop()` in `AppContext.tsx` polls `nextEvents()` in a loop. The
+Tauri command blocks on the Rust side (`ffi_runtime().block_on`) and returns
+via IPC when events arrive — the JS event loop stays responsive. Each poll
+parks one blocking-pool thread for the duration of the call (the event loop and
+the connection-state loop run concurrently, so steady state is two), but each
+loop serializes its own calls — no unbounded fan-out. Events queue in
+app-core's MPSC channel between polls. No registration race — the consumer
+initiates every fetch.
+
+- ❌ Never spawn a thread/task in `lib.rs` to call `next_events()`
+- ❌ Never `app_handle.emit(…)` events or `listen(…)` in the frontend
+- ❌ Never add generation counters or cancellation tokens to `AppState`
 
 ---
 
@@ -58,8 +73,9 @@ cd desktop && cargo tauri build  # package for current platform
 
 FFI constraints:
 - Tauri commands are async-capable — use `async fn` for Rust calls that block
-- WebSocket loops run in the Rust backend via Tauri's async runtime
-- Push events to the frontend via `app_handle.emit('event-name', payload)`
+- Event polling runs in the TS frontend via a loop calling `nextEvents()` — the
+  Tauri command blocks on the Rust side but returns via IPC when events arrive,
+  so the JS event loop stays responsive
 
 ---
 
@@ -159,8 +175,8 @@ interface **and** present in the `ctx` object literal. (This crashed the entire
 invite/QR onboarding path once.)
 
 ### Background loops: idempotent start, tear down before swapping state
-`startEventLoop`/`startConnectionLoop` (and `startPolling`) must guard against
-re-entry (`if (running) return;`) — they're called from more than one place
+`startPolling` (which starts the event + connection loops) must guard against
+re-entry (`if (running) return;`) — it's called from more than one place
 (`restoreAccounts` and `createAccount`), and a double start runs duplicate loops that
 process every incoming event twice. When switching accounts/service, call
 `stopPolling`/`resetSession` **before** swapping the `service()` signal, or the
@@ -198,18 +214,6 @@ must be a Solid store/signal, not a plain `Map`. A non-reactive cache never prop
 the resolved value to the UI and re-fires the fetch every render. Back such caches with
 reactive state and guard against duplicate in-flight fetches per key.
 
-### Optimistic updates need an id-reconciliation story
-Optimistic messages use a client-generated id. Before DevServer/real-backend mode is
-wired, the incoming-event handler must reconcile/de-duplicate the server-delivered copy
-of an outgoing message against its optimistic entry (client id vs server id) — otherwise
-it appears twice. Leave a `// TODO:` at the append site until that path exists.
-
-### Enum comparisons must encode the real ordering
-Don't `>`-compare enum members whose numeric values aren't in semantic order. E.g.
-`DeliveryStatus` is `sending0/sent1/delivered2/read3/failed4` — `failed` is terminal,
-not "more advanced than read." Use an explicit rank/compare for progression, and treat
-terminal states (`failed`) separately rather than by numeric magnitude.
-
 ### Distinguish "no connection" from "connected"
 Aggregate/derived connection state must not default to `connected` when there are zero
 connections (e.g. no account yet, or just after logout) — return a non-connected state
@@ -217,52 +221,14 @@ so the UI doesn't show a green indicator before any connection exists.
 
 ### Debugging best practices (from the Day 3 trenches)
 
-#### Event loop: dedicated thread, never the Tauri sync pool
+#### Event polling: TS-owned loop, not a Rust background thread
 
-`AppCore::next_events()` blocks until events arrive. Always call it from
-`start_event_loop`'s dedicated `std::thread` — never invoke it as a sync Tauri
-command from the frontend. A blocking sync command occupies a Tauri thread-pool
-thread; if all threads block on `next_events()`, the entire command surface
-freezes.
-
-```typescript
-// ✅ Right: dedicated OS thread
-void service().startEventLoop();
-
-// ❌ Wrong: starves the pool — all sync commands queue behind this
-setInterval(() => void service().nextEvents(), 2000);
-```
-
-#### `receiveMessages()` is a REST inbox fetch, NOT live push
-
-`AppCore::receive_messages()` calls `client.fetch_messages()` — it polls the
-server's REST inbox. It does NOT return live WebSocket messages. Live events
-flow through `next_events()` → event channel → `handle.emit()` → frontend
-listener. The two APIs are not interchangeable. **Always read the implementation
-before wiring an API — names lie.**
-
-#### Ordering: listen before starting the decrypt thread
-
-The Rust thread emits `avalanche-event` events. If the thread starts before
-the frontend listener is registered, events are silently dropped. Register
-the consumer first, confirm it's active, then start the producer.
-
-```
-// ① Register listener
-listen("avalanche-event", handler).then((fn) => {
-    // ② Listener active — now safe to start the decrypt thread
-    service().startEventLoop();
-    // ③ Drain any messages that arrived in the gap
-    service().receiveMessages();
-});
-```
-
-#### Incoming DMs need in-memory conversation creation
-
-When a live message arrives for a conversation not yet in the store, reloading
-from the database won't help — the message hasn't been persisted yet (save is
-best-effort, async). Create the conversation entry in-memory directly, or the
-message silently disappears.
+`nextEvents()` blocks on the Rust side until decrypted events arrive, then
+returns via IPC. The TS side calls it in a loop, which parks one blocking-pool
+thread per in-flight call (the connection-state loop adds a second). Each loop
+serializes its own calls. Do not reintroduce a Rust background thread or
+`app_handle.emit(…)` — the loop is the single unified path for both DevServer
+and Mock mode.
 
 #### Unicode in prompts breaks JSON
 

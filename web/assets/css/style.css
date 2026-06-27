@@ -133,6 +133,8 @@ a:hover { text-decoration: underline; }
   margin: 1rem 0;
 }
 .prose a { text-decoration: underline; text-underline-offset: 2px; }
+/* Buttons inside prose content should look like the homepage buttons (no underline). */
+.prose a.btn { text-decoration: none; }
 
 .byline { color: var(--ink-faint); font-size: 0.9rem; margin-bottom: 1.5rem; }
 .back { margin-top: 2.5rem; }

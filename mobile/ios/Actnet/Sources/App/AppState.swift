@@ -29,6 +29,12 @@ final class AppState: ObservableObject {
     @Published var accounts: [Account] = []
     @Published var isOnboarding: Bool = true
     @Published var conversations: [Conversation] = []
+
+    /// False until the first conversation load completes. Lets the chats list
+    /// distinguish "still loading on launch" (show a spinner) from "genuinely no
+    /// conversations" (show the empty state) — without this they're both an empty
+    /// array and the empty state flashes during restore.
+    @Published var conversationsLoaded: Bool = false
     @Published var messagesByConversation: [String: [Message]] = [:]
     /// Reactions per conversation (docs/33), keyed by conversation id. Each
     /// reaction carries its target message's wire identity
@@ -252,6 +258,7 @@ final class AppState: ObservableObject {
                         serverUrl: account.servers.first?.id ?? ""
                     ))
                 }
+                conversationsLoaded = true
             } else {
                 // Conversation list is derived from message_history in
                 // SQLCipher — no parallel UserDefaults state. One indexed
@@ -275,6 +282,7 @@ final class AppState: ObservableObject {
         cancelAllListenerTasks()
         accounts.removeAll()
         conversations.removeAll()
+        conversationsLoaded = false
         messagesByConversation.removeAll()
         cores.removeAll()
         connectionStates.removeAll()
@@ -295,6 +303,7 @@ final class AppState: ObservableObject {
         // Reset state on mode switch
         accounts.removeAll()
         conversations.removeAll()
+        conversationsLoaded = false
         messagesByConversation.removeAll()
         cores.removeAll()
         connectionStates.removeAll()
@@ -979,21 +988,38 @@ final class AppState: ObservableObject {
         let pairs: [(String, any AppCoreProtocol)] = accounts.compactMap { acct in
             cores[acct.id].map { (acct.id, $0) }
         }
-        let summariesPerAccount = await withTaskGroup(of: (String, [ConversationSummaryFfi]).self) { group in
+        let summariesPerAccount = await withTaskGroup(of: (String, [ConversationSummaryFfi], [String: String]).self) { group in
             for (accountId, core) in pairs {
                 group.addTask {
                     let rows = (try? core.loadConversations()) ?? []
-                    return (accountId, rows)
+                    // Pre-resolve DM peer names from the local store (a fast
+                    // SQLCipher read, no network) before publishing the list.
+                    // Otherwise the row title falls back to the raw `did:local:…`
+                    // and only updates once the async resolver runs, causing a
+                    // visible flash on cold launch.
+                    var localNames: [String: String] = [:]
+                    for s in rows {
+                        guard let rid = Self.recipientDid(from: s.conversationId, accountId: accountId) else { continue }
+                        let name = (try? core.contactDisplayName(did: rid)) ?? ""
+                        if !name.isEmpty { localNames[rid] = name }
+                    }
+                    return (accountId, rows, localNames)
                 }
             }
-            var out: [(String, [ConversationSummaryFfi])] = []
+            var out: [(String, [ConversationSummaryFfi], [String: String])] = []
             for await result in group { out.append(result) }
             return out
         }
 
+        // Seed the in-memory cache so both the title computed below and any
+        // subsequent reads (e.g. ConversationRow) see the resolved names.
+        for (_, _, localNames) in summariesPerAccount {
+            for (did, name) in localNames { displayNameCache[did] = name }
+        }
+
         var newConvs: [Conversation] = []
         var groupsNeedingRefresh: [(groupId: String, accountId: String)] = []
-        for (accountId, summaries) in summariesPerAccount {
+        for (accountId, summaries, _) in summariesPerAccount {
             let serverUrl = accounts.first(where: { $0.id == accountId })?.servers.first?.id ?? ""
             for s in summaries {
                 let date = s.lastMessage.map {
@@ -1055,6 +1081,7 @@ final class AppState: ObservableObject {
         conversations = newConvs.sorted {
             ($0.lastMessageDate ?? .distantPast) > ($1.lastMessageDate ?? .distantPast)
         }
+        conversationsLoaded = true
 
         // Kick off async name resolution for any conversation still showing the raw DID.
         for conv in conversations {
@@ -1072,7 +1099,9 @@ final class AppState: ObservableObject {
 
     /// Parse the recipient DID out of a conversation ID of the form
     /// `dm-<accountDid>-<recipientDid>`. Returns nil for non-DM IDs.
-    private static func recipientDid(from conversationId: String, accountId: String) -> String? {
+    /// `nonisolated` (pure string parsing) so the conversation-load task group
+    /// can call it off the main actor.
+    nonisolated private static func recipientDid(from conversationId: String, accountId: String) -> String? {
         let prefix = "dm-\(accountId)-"
         guard conversationId.hasPrefix(prefix) else { return nil }
         return String(conversationId.dropFirst(prefix.count))

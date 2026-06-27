@@ -16,7 +16,12 @@ struct ChatsView: View {
     var body: some View {
         NavigationStack(path: $navigationPath) {
             Group {
-                if appState.conversations.isEmpty {
+                if appState.conversations.isEmpty && !appState.conversationsLoaded {
+                    // Initial load still in flight — show a spinner instead of the
+                    // empty state, so "No conversations yet" doesn't flash on launch.
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if appState.conversations.isEmpty {
                     ContentUnavailableView(
                         "No conversations yet",
                         systemImage: "message",

@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -67,6 +68,7 @@ fun ChatsView(
     onOpenCompose: () -> Unit = {},
 ) {
     val conversations by viewModel.conversations.collectAsState()
+    val conversationsLoaded by viewModel.conversationsLoaded.collectAsState()
     val navigateToConversation by viewModel.navigateToConversation.collectAsState()
 
     // Mirror iOS onChange(of: appState.navigateToConversation)
@@ -118,7 +120,16 @@ fun ChatsView(
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
-            if (sortedConversations.isEmpty()) {
+            if (sortedConversations.isEmpty() && !conversationsLoaded) {
+                // Initial load still in flight — show a spinner instead of the
+                // empty state, so "No conversations yet" doesn't flash on launch.
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(color = AvalancheColors.Muted)
+                }
+            } else if (sortedConversations.isEmpty()) {
                 // Mirrors iOS ContentUnavailableView
                 Column(
                     modifier = Modifier

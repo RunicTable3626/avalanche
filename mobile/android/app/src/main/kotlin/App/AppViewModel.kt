@@ -107,6 +107,15 @@ class AppViewModel(
     private val _conversations = MutableStateFlow<List<Conversation>>(emptyList())
     val conversations: StateFlow<List<Conversation>> = _conversations.asStateFlow()
 
+    /**
+     * False until the first conversation load completes. Lets the chats list
+     * distinguish "still loading on launch" (show a spinner) from "genuinely no
+     * conversations" (show the empty state) — without this they're both an empty
+     * list and the empty state flashes during restore.
+     */
+    private val _conversationsLoaded = MutableStateFlow(false)
+    val conversationsLoaded: StateFlow<Boolean> = _conversationsLoaded.asStateFlow()
+
     private val _messagesByConversation = MutableStateFlow<Map<String, List<Message>>>(emptyMap())
     val messagesByConversation: StateFlow<Map<String, List<Message>>> =
         _messagesByConversation.asStateFlow()
@@ -470,6 +479,7 @@ class AppViewModel(
                         )
                         _conversations.update { it + seeds }
                     }
+                    _conversationsLoaded.value = true
                 } else {
                     loadConversationsFromStore()
                 }
@@ -501,6 +511,7 @@ class AppViewModel(
         unresolvedDids.clear()
         isBotCache.clear()
         clearPersistedAccounts()
+        _conversationsLoaded.value = false
         _isOnboarding.value = true
     }
 
@@ -520,6 +531,7 @@ class AppViewModel(
         unresolvedDids.clear()
         isBotCache.clear()
         clearPersistedAccounts()
+        _conversationsLoaded.value = false
         _isOnboarding.value = true
     }
 
@@ -1264,12 +1276,36 @@ class AppViewModel(
             cores[acct.id]?.let { acct.id to it }
         }
 
-        data class AccountSummaries(val accountId: String, val summaries: List<uniffi.app_core.ConversationSummaryFfi>)
+        data class AccountSummaries(
+            val accountId: String,
+            val summaries: List<uniffi.app_core.ConversationSummaryFfi>,
+            // recipientDid -> locally-known display name, resolved up front so the
+            // first render shows names instead of raw DIDs.
+            val localNames: Map<String, String>,
+        )
 
         val summariesPerAccount: List<AccountSummaries> = pairs.map { (accountId, core) ->
             withContext(Dispatchers.IO) {
                 val rows = runCatching { core.loadConversations() }.getOrElse { emptyList() }
-                AccountSummaries(accountId, rows)
+                // Pre-resolve DM peer names from the local store (a fast SQLCipher
+                // read, no network) before publishing the list. Otherwise the row
+                // title falls back to the raw `did:local:…` and only updates once
+                // the async resolver runs, causing a visible flash on cold launch.
+                val localNames = mutableMapOf<String, String>()
+                for (s in rows) {
+                    val rid = recipientDidFromConversationId(s.conversationId, accountId) ?: continue
+                    val name = runCatching { core.contactDisplayName(did = rid) }.getOrElse { "" }
+                    if (name.isNotEmpty()) localNames[rid] = name
+                }
+                AccountSummaries(accountId, rows, localNames)
+            }
+        }
+
+        // Seed the in-memory cache so both the title computed below and any
+        // subsequent reads (e.g. ConversationRow) see the resolved names.
+        for (acctSummary in summariesPerAccount) {
+            for ((did, name) in acctSummary.localNames) {
+                displayNameCache[did] = name
             }
         }
 
@@ -1337,6 +1373,7 @@ class AppViewModel(
 
         val sorted = newConvs.sortedByDescending { it.lastMessageDate?.time ?: Long.MIN_VALUE }
         _conversations.value = sorted
+        _conversationsLoaded.value = true
 
         // Flush a notification tap that arrived before the list was ready
         // (cold-start launch): now that conversations exist, open the target.

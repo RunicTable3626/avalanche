@@ -455,6 +455,7 @@ export class MockAvalancheService implements AvalancheService {
       inviterDisplayName: null,
       postOnboardingRedirect: null,
       inviterProfileKey: null,
+      privacyPolicyUrl: null,
     };
   }
 

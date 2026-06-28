@@ -1,5 +1,4 @@
-import { createEffect, createSignal, Match, onCleanup, onMount, Switch } from "solid-js";
-import { listen } from "@tauri-apps/api/event";
+import { createEffect, createSignal, Match, Switch } from "solid-js";
 import { useApp } from "../../state/AppContext";
 import type { InviteInfo } from "../../models/InviteToken";
 import type { Account } from "../../models/Account";
@@ -39,31 +38,9 @@ export default function OnboardingFlow() {
     setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
   }
 
-  // TODO: "avalanche-deeplink" is NOT yet emitted by the backend — no deep-link
-  // plugin is wired in src-tauri/src/lib.rs. This listener is a placeholder
-  // for when the Rust side wires deep links. Likewise, setPendingInviteToken
-  // has no producer yet; the createEffect below is also a forward-looking stub.
-  onMount(() => {
-    let unlisten: (() => void) | undefined;
-    listen<string>("avalanche-deeplink", (ev) => {
-      void validateInvite(ev.payload)
-        .then((info) => {
-          // Deep-link success: root + identityPicker so Back returns to splash.
-          setStack([{ name: "splash" }, { name: "identityPicker", inviteInfo: info, inviteToken: ev.payload }]);
-        })
-        .catch(() => {
-          // Token invalid — land on link entry so the user can try manually.
-          // Stack is root + inviteLinkEntry so Back returns to splash.
-          setStack([{ name: "splash" }, { name: "inviteLinkEntry" }]);
-        });
-    })
-      .then((fn) => { unlisten = fn; })
-      .catch(() => { /* Tauri not available in pure browser mode */ });
-    onCleanup(() => unlisten?.());
-  });
-
-  // Consume pendingInviteToken set by AppContext (e.g. from a URL opened before
-  // the listener registered), then validate and navigate.
+  // Deep links are handled centrally in AppContext (handleDeepLink), which sets
+  // pendingInviteToken for invite tokens that need onboarding. The effect below
+  // consumes that token; there is no separate listener here.
   createEffect(() => {
     const token = store.pendingInviteToken;
     if (!token) return;

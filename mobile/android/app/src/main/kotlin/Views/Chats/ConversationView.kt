@@ -1,9 +1,14 @@
 package net.theavalanche.app
 
+import android.graphics.BitmapFactory
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.material.icons.filled.AddCircle
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -69,7 +74,8 @@ import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import uniffi.app_core.MessageTarget
+import uniffi.app_core.AttachmentFfi
+import uniffi.app_core.LinkPreviewFfi
 import uniffi.app_core.MessageRevisionFfi
 import java.util.UUID
 
@@ -122,6 +128,22 @@ fun ConversationView(
     // Whether we're still a member of this group (docs/53 §Leave). Non-members
     // keep the readable transcript but lose the composer. Always true for DMs.
     var isGroupMember by remember { mutableStateOf(true) }
+
+    // Staged composer attachments (docs/35): an image waiting to send (raw bytes,
+    // uploaded on Send) and/or a link-preview card generated as you type. Mirrors
+    // iOS ConversationView. `dismissedPreviewUrl` suppresses re-adding a preview
+    // the user x'd while that URL is still in the text.
+    var stagedImageData by remember { mutableStateOf<ByteArray?>(null) }
+    var stagedPreview by remember { mutableStateOf<LinkPreviewFfi?>(null) }
+    var stagedPreviewUrl by remember { mutableStateOf<String?>(null) }
+    var dismissedPreviewUrl by remember { mutableStateOf<String?>(null) }
+
+    fun clearStaged() {
+        stagedImageData = null
+        stagedPreview = null
+        stagedPreviewUrl = null
+        dismissedPreviewUrl = null
+    }
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -176,47 +198,54 @@ fun ConversationView(
         }
     }
 
-    // Photo attachment picker (docs/35): load the picked image, generate a
-    // thumbnail, and send it on the conversation's transport. Mirrors iOS.
+    // Photo attachment picker (docs/35): load the picked image and *stage* it in
+    // the composer; nothing is uploaded or sent until Send. Mirrors iOS.
     val context = LocalContext.current
     val photoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val caption = messageText
-        messageText = ""
         scope.launch {
             val data = withContext(kotlinx.coroutines.Dispatchers.IO) {
                 runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }
                     .getOrNull()
             } ?: return@launch
-            val (thumb, w, h) = makeAttachmentThumbnail(data)
-            val target = if (conversation.isGroup) {
-                MessageTarget.Group(groupId = conversation.groupId ?: "")
-            } else {
-                MessageTarget.Dm(recipientDid = conversation.recipientDid ?: "")
-            }
-            runCatching {
-                viewModel.sendAttachment(
-                    conversationId = conversation.id,
-                    target = target,
-                    senderAccountId = conversation.accountId,
-                    data = data,
-                    contentType = "image/jpeg",
-                    fileName = "photo.jpg",
-                    caption = caption,
-                    width = w,
-                    height = h,
-                    thumbnail = thumb,
-                )
-            }.onFailure { errorMessage = it.message }
+            stagedImageData = data
+        }
+    }
+
+    // Debounced link-preview generation (docs/35): ~0.6s after the last keystroke,
+    // if the text contains a new URL we haven't staged or dismissed, fetch its
+    // preview and stage it; clear the staged preview when the URL leaves the text.
+    // Mirrors iOS ConversationView.schedulePreviewFetch.
+    LaunchedEffect(messageText, editingMessage) {
+        if (editingMessage != null) return@LaunchedEffect
+        delay(600)
+        val url = firstUrlIn(messageText)
+        if (url == null) {
+            stagedPreview = null
+            stagedPreviewUrl = null
+            dismissedPreviewUrl = null
+            return@LaunchedEffect
+        }
+        if (url != dismissedPreviewUrl) dismissedPreviewUrl = null
+        if (url == stagedPreviewUrl || url == dismissedPreviewUrl) return@LaunchedEffect
+        val previews = viewModel.linkPreviews(messageText, conversation.accountId)
+        // Only adopt it if the text still ends on this same URL and it wasn't dismissed.
+        if (firstUrlIn(messageText) != url || url == dismissedPreviewUrl) return@LaunchedEffect
+        previews.firstOrNull()?.let {
+            stagedPreview = it
+            stagedPreviewUrl = url
         }
     }
 
     fun sendMessage() {
-        val text = messageText.trim()
-        if (text.isEmpty()) return
+        val text = messageText
+        val image = stagedImageData
+        val preview = stagedPreview
+        if (text.trim().isEmpty() && image == null && preview == null) return
         messageText = ""
+        clearStaged()
         errorMessage = null
 
         // Optimistically add to UI.
@@ -232,7 +261,9 @@ fun ConversationView(
             deliveryStatus = DeliveryStatus.SENDING,
         )
         // Insert into the UI immediately so the send feels instant (mirrors iOS).
-        // The real row replaces it once the send completes and the store reloads.
+        // addOptimisticMessage also bumps the chat-list row (incl. the staged
+        // image's attachment type, via the message's attachments — empty here, so
+        // sendComposed corrects it after upload).
         viewModel.addOptimisticMessage(message = optimistic, conversation = conversation)
 
         // Scroll-to-bottom is a UI nicety and must NEVER gate the send. Run it
@@ -248,43 +279,14 @@ fun ConversationView(
 
         scope.launch {
             try {
-                if (conversation.isGroup) {
-                    // Generate a link preview for the first URL (docs/35),
-                    // best-effort, before sending — same as the DM path.
-                    val previews = viewModel.linkPreviews(text, conversation.accountId)
-                    if (previews.isNotEmpty()) {
-                        viewModel.setMessagePreviews(conversation.id, messageId, previews)
-                    }
-                    viewModel.sendGroupMessage(
-                        conversation = conversation,
-                        text = text,
-                        messageId = messageId,
-                        sentAtMs = nowMs,
-                        previews = previews,
-                    )
-                } else {
-                    val recipientDid = conversation.recipientDid
-                    if (recipientDid == null) {
-                        errorMessage = "Cannot send: no recipient"
-                        return@launch
-                    }
-                    // Generate a link preview for the first URL (docs/35),
-                    // best-effort, before sending. Reflect it on the optimistic
-                    // row so the card shows immediately.
-                    val previews = viewModel.linkPreviews(text, conversation.accountId)
-                    if (previews.isNotEmpty()) {
-                        viewModel.setMessagePreviews(conversation.id, messageId, previews)
-                    }
-                    viewModel.sendMessage(
-                        conversationId = conversation.id,
-                        text = text,
-                        recipientDid = recipientDid,
-                        senderAccountId = conversation.accountId,
-                        messageId = messageId,
-                        sentAtMs = nowMs,
-                        previews = previews,
-                    )
-                }
+                viewModel.sendComposed(
+                    conversation = conversation,
+                    text = text,
+                    imageData = image,
+                    preview = preview,
+                    messageId = messageId,
+                    sentAtMs = nowMs,
+                )
             } catch (e: Exception) {
                 errorMessage = "Failed to send: ${e.message}"
             }
@@ -540,6 +542,15 @@ fun ConversationView(
                     messageText = messageText,
                     onMessageTextChange = { messageText = it },
                     editingMessage = editingMessage,
+                    stagedImageData = stagedImageData,
+                    stagedPreview = stagedPreview,
+                    previewLoader = { att -> viewModel.attachmentData(att, conversation.accountId) },
+                    onRemoveImage = { stagedImageData = null },
+                    onRemovePreview = {
+                        dismissedPreviewUrl = stagedPreviewUrl
+                        stagedPreview = null
+                        stagedPreviewUrl = null
+                    },
                     onSend = { sendMessage() },
                     onApplyEdit = { applyEdit() },
                     onCancelEdit = { cancelEdit() },
@@ -600,6 +611,11 @@ private fun Composer(
     messageText: String,
     onMessageTextChange: (String) -> Unit,
     editingMessage: Message?,
+    stagedImageData: ByteArray? = null,
+    stagedPreview: LinkPreviewFfi? = null,
+    previewLoader: suspend (AttachmentFfi) -> ByteArray? = { null },
+    onRemoveImage: () -> Unit = {},
+    onRemovePreview: () -> Unit = {},
     onSend: () -> Unit,
     onApplyEdit: () -> Unit,
     onCancelEdit: () -> Unit,
@@ -638,7 +654,43 @@ private fun Composer(
             }
         }
 
-        val canSend = messageText.trim().isNotEmpty()
+        // Staging strip (docs/35): pending image and/or link-preview card, each
+        // removable with an x. Hidden while editing.
+        if (editingMessage == null && (stagedImageData != null || stagedPreview != null)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .padding(top = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                if (stagedImageData != null) {
+                    val bmp = remember(stagedImageData) {
+                        BitmapFactory.decodeByteArray(stagedImageData, 0, stagedImageData.size)
+                    }
+                    Box {
+                        if (bmp != null) {
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = "Staged image",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.size(60.dp).clip(RoundedCornerShape(10.dp)),
+                            )
+                        }
+                        StagedRemoveButton(onClick = onRemoveImage, modifier = Modifier.align(Alignment.TopEnd))
+                    }
+                }
+                if (stagedPreview != null) {
+                    Box {
+                        LinkPreviewCard(preview = stagedPreview, isMe = true, loader = previewLoader)
+                        StagedRemoveButton(onClick = onRemovePreview, modifier = Modifier.align(Alignment.TopEnd))
+                    }
+                }
+            }
+        }
+
+        val canSend = messageText.trim().isNotEmpty() || stagedImageData != null || stagedPreview != null
 
         Row(
             modifier = Modifier
@@ -710,6 +762,26 @@ private fun Composer(
                 )
             }
         }
+    }
+}
+
+/** Small "x" overlay used to drop a staged composer attachment (docs/35). */
+@Composable
+private fun StagedRemoveButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .padding(2.dp)
+            .size(20.dp)
+            .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Close,
+            contentDescription = "Remove",
+            tint = Color.White,
+            modifier = Modifier.size(14.dp),
+        )
     }
 }
 

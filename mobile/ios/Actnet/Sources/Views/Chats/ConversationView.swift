@@ -27,8 +27,23 @@ struct ConversationView: View {
     /// keep the readable transcript but lose the composer. Always true for DMs.
     /// Loaded on appear and after leaving.
     @State private var isGroupMember = true
-    /// Selected photo to attach (docs/35); sent as soon as it's picked.
+    /// Photo picker selection (docs/35). On pick we *stage* the image in the
+    /// composer (below) rather than sending immediately.
     @State private var photoItem: PhotosPickerItem?
+    /// A staged image attachment waiting in the composer: the raw bytes (sent on
+    /// Send) plus a small decoded thumbnail for the inline chip. `nil` = none.
+    @State private var stagedImageData: Data?
+    @State private var stagedImageThumb: UIImage?
+    /// A staged link preview (docs/35) generated as you type a URL, shown as a
+    /// card in the composer until you send or remove it.
+    @State private var stagedPreview: LinkPreviewFfi?
+    /// The URL `stagedPreview` was built for, to avoid re-fetching the same one.
+    @State private var stagedPreviewURL: String?
+    /// A URL the user explicitly removed (x'd) — suppresses auto re-adding its
+    /// preview while that URL is still in the text.
+    @State private var dismissedPreviewURL: String?
+    /// In-flight debounced preview fetch, cancelled on each keystroke.
+    @State private var previewTask: Task<Void, Never>?
 
     private var messages: [Message] {
         appState.messagesByConversation[conversation.id] ?? []
@@ -253,6 +268,12 @@ struct ConversationView: View {
             .padding(.top, 6)
         }
 
+        // Staging strip (docs/35): pending image and/or link-preview card shown
+        // above the input while editing == nil, each removable with an x.
+        if editingMessage == nil, stagedImageData != nil || stagedPreview != nil {
+            stagingStrip
+        }
+
         HStack(spacing: 12) {
             // Attachment picker (docs/35) — hidden while editing a message.
             if editingMessage == nil {
@@ -268,12 +289,12 @@ struct ConversationView: View {
                 .lineLimit(1...5)
 
             Button {
-                if editingMessage != nil { applyEdit() } else { sendMessage() }
+                if editingMessage != nil { applyEdit() } else { send() }
             } label: {
                 Image(systemName: editingMessage != nil ? "checkmark.circle.fill" : "arrow.up.circle.fill")
                     .font(.title2)
             }
-            .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!canSend)
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -281,12 +302,61 @@ struct ConversationView: View {
             if !messages.isEmpty {
                 scrollPosition.scrollTo(edge: .bottom)
             }
+            schedulePreviewFetch()
         }
         .onChange(of: photoItem) {
             guard let item = photoItem else { return }
             photoItem = nil
-            sendPickedPhoto(item)
+            stagePickedPhoto(item)
         }
+    }
+
+    /// Send is enabled when there's text, a staged image, or a staged preview —
+    /// not just non-empty text (an image-only message is valid).
+    private var canSend: Bool {
+        !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || stagedImageData != nil
+            || stagedPreview != nil
+    }
+
+    /// The horizontal strip of staged attachments above the input.
+    @ViewBuilder private var stagingStrip: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if let stagedImageThumb {
+                ZStack(alignment: .topTrailing) {
+                    Image(uiImage: stagedImageThumb)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 60, height: 60)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    removeButton { clearStagedImage() }
+                }
+            }
+            if let stagedPreview {
+                ZStack(alignment: .topTrailing) {
+                    LinkPreviewCard(preview: stagedPreview, isMe: true) { att in
+                        await appState.attachmentData(att, accountId: conversation.accountId)
+                    }
+                    removeButton {
+                        dismissedPreviewURL = stagedPreviewURL
+                        clearStagedPreview()
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal)
+        .padding(.top, 6)
+    }
+
+    /// The small "x" overlay used to drop a staged item.
+    @ViewBuilder private func removeButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.body)
+                .foregroundStyle(.white, .black.opacity(0.5))
+        }
+        .padding(4)
     }
 
     /// The message-request gate (docs/12 §1): a stranger's first contact is
@@ -370,41 +440,82 @@ struct ConversationView: View {
         }
     }
 
-    /// Load the picked image, generate a thumbnail, and send it as an
-    /// attachment (docs/35) on the conversation's transport.
-    private func sendPickedPhoto(_ item: PhotosPickerItem) {
-        let caption = messageText
-        messageText = ""
+    /// Load the picked image and stage it in the composer (docs/35). Nothing is
+    /// uploaded or sent until Send; picking again replaces the staged image.
+    private func stagePickedPhoto(_ item: PhotosPickerItem) {
         Task {
             guard let data = try? await item.loadTransferable(type: Data.self) else { return }
-            let (thumb, w, h) = makeAttachmentThumbnail(data)
-            let target: MessageTarget = conversation.isGroup
-                ? .group(groupId: conversation.groupId ?? "")
-                : .dm(recipientDid: conversation.recipientDid ?? "")
-            do {
-                try await appState.sendAttachment(
-                    conversationId: conversation.id,
-                    target: target,
-                    senderAccountId: conversation.accountId,
-                    data: data,
-                    contentType: "image/jpeg",
-                    fileName: "photo.jpg",
-                    caption: caption,
-                    width: w,
-                    height: h,
-                    thumbnail: thumb
-                )
-                scrollPosition.scrollTo(edge: .bottom)
-            } catch {
-                errorMessage = error.localizedDescription
+            stagedImageData = data
+            // A small decoded thumbnail just for the composer chip; the full
+            // bytes (above) are what gets uploaded on Send.
+            stagedImageThumb = await Task.detached(priority: .userInitiated) {
+                decodeDownsampledImage(data, maxPixel: 240)
+            }.value
+        }
+    }
+
+    /// Debounced link-preview generation (docs/35): ~0.6s after the last
+    /// keystroke, if the text contains a new URL we haven't staged or dismissed,
+    /// fetch its preview and stage it. Clears the staged preview when the URL
+    /// leaves the text.
+    private func schedulePreviewFetch() {
+        guard editingMessage == nil else { return }
+        previewTask?.cancel()
+        let text = messageText
+        previewTask = Task {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            if Task.isCancelled { return }
+            let url = AppState.firstURL(in: text)?.absoluteString
+            // No URL in the text — drop any staged/dismissed preview state.
+            guard let url else {
+                clearStagedPreview()
+                dismissedPreviewURL = nil
+                return
+            }
+            // A different URL than the one we dismissed re-enables previews.
+            if url != dismissedPreviewURL { dismissedPreviewURL = nil }
+            // Already staged or explicitly dismissed — nothing to do.
+            if url == stagedPreviewURL || url == dismissedPreviewURL { return }
+            let previews = await appState.linkPreviews(for: text, accountId: conversation.accountId)
+            if Task.isCancelled { return }
+            // Only adopt it if the text still ends on this same URL and the user
+            // hasn't since dismissed it.
+            guard AppState.firstURL(in: messageText)?.absoluteString == url, url != dismissedPreviewURL else { return }
+            if let first = previews.first {
+                stagedPreview = first
+                stagedPreviewURL = url
             }
         }
     }
 
-    private func sendMessage() {
-        guard !messageText.isEmpty else { return }
+    private func clearStagedImage() {
+        stagedImageData = nil
+        stagedImageThumb = nil
+    }
+
+    private func clearStagedPreview() {
+        stagedPreview = nil
+        stagedPreviewURL = nil
+    }
+
+    private func clearStaged() {
+        clearStagedImage()
+        clearStagedPreview()
+        dismissedPreviewURL = nil
+        previewTask?.cancel()
+    }
+
+    /// Unified composer send (docs/35): ships the text plus any staged image and
+    /// link preview as one message via `AppState.sendComposed`. Inserts the
+    /// optimistic row + chat-list bump here, then clears the composer.
+    private func send() {
+        let trimmed = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || stagedImageData != nil || stagedPreview != nil else { return }
         let text = messageText
+        let image = stagedImageData
+        let preview = stagedPreview
         messageText = ""
+        clearStaged()
         errorMessage = nil
 
         // Optimistically add to UI.
@@ -427,9 +538,9 @@ struct ConversationView: View {
         // message, not a prior "X joined" / metadata line.
         if let idx = appState.conversations.firstIndex(where: { $0.id == conversation.id }) {
             appState.conversations[idx].lastMessage = text
-            // Plain text has no attachment — clear any prior attachment type so
-            // the preview doesn't keep its "📷 Photo" / "📎 Attachment" decoration.
-            appState.conversations[idx].lastMessageAttachmentContentType = nil
+            // Reflect the staged image's type so the row previews "📷 Photo"
+            // immediately; nil clears any prior attachment decoration.
+            appState.conversations[idx].lastMessageAttachmentContentType = image != nil ? "image/jpeg" : nil
             appState.conversations[idx].lastMessageDate = message.sentAt
             appState.conversations[idx].lastMessageSenderDid = conversation.accountId  // "You:"
             appState.conversations[idx].clearLastMessageEvent()
@@ -437,44 +548,14 @@ struct ConversationView: View {
 
         Task {
             do {
-                if conversation.isGroup {
-                    // Generate a link preview for the first URL (docs/35),
-                    // best-effort, before sending — same as the DM path.
-                    let previews = await appState.linkPreviews(for: text, accountId: conversation.accountId)
-                    if !previews.isEmpty,
-                       let idx = appState.messagesByConversation[conversation.id]?.firstIndex(where: { $0.id == messageId }) {
-                        appState.messagesByConversation[conversation.id]?[idx].previews = previews
-                    }
-                    try await appState.sendGroupMessage(
-                        conversation: conversation,
-                        text: text,
-                        messageId: messageId,
-                        sentAtMs: nowMs,
-                        previews: previews
-                    )
-                } else {
-                    guard let recipientDid = conversation.recipientDid else {
-                        errorMessage = "Cannot send: no recipient"
-                        return
-                    }
-                    // Generate a link preview for the first URL (docs/35),
-                    // best-effort, before sending. Reflect it on the optimistic
-                    // row so the card shows immediately.
-                    let previews = await appState.linkPreviews(for: text, accountId: conversation.accountId)
-                    if !previews.isEmpty,
-                       let idx = appState.messagesByConversation[conversation.id]?.firstIndex(where: { $0.id == messageId }) {
-                        appState.messagesByConversation[conversation.id]?[idx].previews = previews
-                    }
-                    try await appState.sendMessage(
-                        conversationId: conversation.id,
-                        text: text,
-                        recipientDid: recipientDid,
-                        senderAccountId: conversation.accountId,
-                        messageId: messageId,
-                        sentAtMs: nowMs,
-                        previews: previews
-                    )
-                }
+                try await appState.sendComposed(
+                    conversation: conversation,
+                    text: text,
+                    imageData: image,
+                    preview: preview,
+                    messageId: messageId,
+                    sentAtMs: nowMs
+                )
             } catch {
                 errorMessage = "Failed to send: \(error.localizedDescription)"
             }

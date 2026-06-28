@@ -1220,144 +1220,114 @@ class AppViewModel(
     // -----------------------------------------------------------------------
 
     /**
-     * Send a DM. Mirrors iOS AppState.sendMessage(conversationId:text:...).
+     * Unified composer send (docs/35): one message to a DM or group carrying
+     * optional [text], an optional already-picked image ([imageData]), and an
+     * optional link [preview]. Collapses the former sendMessage / sendGroupMessage
+     * / sendAttachment paths onto the core's single sendMessageWithAttachments
+     * entry point — which is wire-identical to a plain text send when attachments
+     * and previews are empty. Mirrors iOS AppState.sendComposed.
+     *
+     * The caller has already inserted the optimistic transcript row and bumped
+     * the chat list. This resolves the disappearing-messages timer, uploads the
+     * image (if any), grafts the pointer + preview onto the optimistic row,
+     * persists the sending -> sent / failed lifecycle, and sends.
      */
-    suspend fun sendMessage(
-        conversationId: String,
+    suspend fun sendComposed(
+        conversation: Conversation,
         text: String,
-        recipientDid: String,
-        senderAccountId: String,
+        imageData: ByteArray? = null,
+        imageContentType: String = "image/jpeg",
+        imageFileName: String? = "photo.jpg",
+        preview: LinkPreviewFfi? = null,
         messageId: String,
         sentAtMs: Long,
-        previews: List<LinkPreviewFfi> = emptyList(),
     ) {
-        val core = cores[senderAccountId] ?: return
-        val plaintext = text.toByteArray(Charsets.UTF_8)
-        val nowMs = sentAtMs
+        val core = cores[conversation.accountId] ?: return
+        val target = if (conversation.isGroup) {
+            MessageTarget.Group(groupId = conversation.groupId ?: "")
+        } else {
+            MessageTarget.Dm(recipientDid = conversation.recipientDid ?: "")
+        }
 
+        // Stamp the local copy with the conversation's disappearing-messages
+        // timer (docs/03 §5): group timer for groups, per-peer timer for DMs.
         val timer = withContext(Dispatchers.IO) {
-            runCatching { core.getConversationTimer(conversationId = recipientDid) }.getOrNull()
+            if (conversation.isGroup) {
+                conversation.groupId?.let { gid -> runCatching { core.groupExpirySeconds(groupId = gid) }.getOrNull() }
+            } else {
+                conversation.recipientDid?.let { rcpt -> runCatching { core.getConversationTimer(conversationId = rcpt) }.getOrNull() }
+            }
         } ?: 0u
 
-        // Persist as "sending" up front so failures are recoverable across launches.
-        val pending = StoredMessageFfi(
-            id = messageId,
-            conversationId = conversationId,
-            senderDid = senderAccountId,
-            body = text,
-            sentAtMs = nowMs,
-            editedAtMs = null,
-            readAtMs = nowMs,
-            deliveryStatus = DeliveryStatus.SENDING.code.toUByte(),
-            editCount = 0u,
-            deleted = false,
-            kind = 0L,
-            metadata = null,
-            expireTimerSecs = timer,
-            expireAtMs = null,
-            attachments = emptyList(),
-            previews = previews,
-        )
-        withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = pending) } }
+        val previews = preview?.let { listOf(it) } ?: emptyList()
 
         runCatching {
-            // A message carrying a link preview (docs/35) goes through the rich
-            // send so the preview rides the envelope; otherwise the plain DM path.
-            withContext(Dispatchers.IO) {
-                if (previews.isEmpty()) {
-                    core.sendDm(recipientDid = recipientDid, plaintext = plaintext, sentAtMs = nowMs)
-                } else {
-                    core.sendMessageWithAttachments(
-                        MessageTarget.Dm(recipientDid = recipientDid), text, emptyList(), previews, nowMs
-                    )
+            // Upload the staged image first (docs/35) so its pointer — carrying
+            // the inline thumbnail + URL — can ride this same message.
+            var attachments: List<AttachmentFfi> = emptyList()
+            if (imageData != null) {
+                val (thumb, w, h) = makeAttachmentThumbnail(imageData)
+                val pointer = withContext(Dispatchers.IO) {
+                    core.uploadAttachment(imageData, imageContentType, imageFileName, w, h, 0, thumb, 0)
+                }
+                attachments = listOf(pointer)
+            }
+
+            // Graft the attachment + preview onto the optimistic transcript row,
+            // and correct the chat-list preview's attachment type.
+            if (attachments.isNotEmpty() || previews.isNotEmpty()) {
+                _messagesByConversation.update { map ->
+                    val msgs = map[conversation.id] ?: return@update map
+                    map + (conversation.id to msgs.map {
+                        if (it.id == messageId) it.copy(
+                            attachments = if (attachments.isNotEmpty()) attachments else it.attachments,
+                            previews = if (previews.isNotEmpty()) previews else it.previews,
+                        ) else it
+                    })
                 }
             }
-            updateMessageStatus(
-                messageId = messageId,
-                conversationId = conversationId,
-                newStatus = DeliveryStatus.SENT
+            _conversations.update { list ->
+                list.map { c ->
+                    if (c.id == conversation.id) {
+                        c.copy(lastMessageAttachmentContentType = if (imageData != null) imageContentType else null)
+                    } else c
+                }
+            }
+
+            // Persist as "sending" up front so a failure is recoverable across launches.
+            val pending = StoredMessageFfi(
+                id = messageId, conversationId = conversation.id, senderDid = conversation.accountId,
+                body = text, sentAtMs = sentAtMs, editedAtMs = null, readAtMs = sentAtMs,
+                deliveryStatus = DeliveryStatus.SENDING.code.toUByte(), editCount = 0u, deleted = false,
+                kind = 0L, metadata = null, expireTimerSecs = timer, expireAtMs = null,
+                attachments = attachments, previews = previews,
             )
+            withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = pending) } }
+
+            withContext(Dispatchers.IO) {
+                core.sendMessageWithAttachments(target, text, attachments, previews, sentAtMs)
+            }
+            updateMessageStatus(messageId = messageId, conversationId = conversation.id, newStatus = DeliveryStatus.SENT)
             val sent = StoredMessageFfi(
-                id = messageId, conversationId = conversationId, senderDid = senderAccountId,
-                body = text, sentAtMs = nowMs, editedAtMs = null, readAtMs = nowMs,
+                id = messageId, conversationId = conversation.id, senderDid = conversation.accountId,
+                body = text, sentAtMs = sentAtMs, editedAtMs = null, readAtMs = sentAtMs,
                 deliveryStatus = DeliveryStatus.SENT.code.toUByte(), editCount = 0u, deleted = false,
                 kind = 0L, metadata = null, expireTimerSecs = timer, expireAtMs = null,
-                attachments = emptyList(), previews = previews,
+                attachments = attachments, previews = previews,
             )
             withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = sent) } }
         }.onFailure { error ->
-            AppLog.error("send", "DM to $recipientDid failed: ${error.message}")
-            updateMessageStatus(
-                messageId = messageId,
-                conversationId = conversationId,
-                newStatus = DeliveryStatus.FAILED
-            )
+            AppLog.error("send", "send to ${conversation.id} failed: ${error.message}")
+            updateMessageStatus(messageId = messageId, conversationId = conversation.id, newStatus = DeliveryStatus.FAILED)
             val failed = StoredMessageFfi(
-                id = messageId, conversationId = conversationId, senderDid = senderAccountId,
-                body = text, sentAtMs = nowMs, editedAtMs = null, readAtMs = nowMs,
+                id = messageId, conversationId = conversation.id, senderDid = conversation.accountId,
+                body = text, sentAtMs = sentAtMs, editedAtMs = null, readAtMs = sentAtMs,
                 deliveryStatus = DeliveryStatus.FAILED.code.toUByte(), editCount = 0u, deleted = false,
                 kind = 0L, metadata = null, expireTimerSecs = timer, expireAtMs = null,
                 attachments = emptyList(), previews = emptyList(),
             )
             withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = failed) } }
             throw error
-        }
-    }
-
-    /**
-     * Send an attachment (docs/35): encrypt+upload the blob via core, send a
-     * message carrying the pointer, and persist+show an optimistic local copy.
-     * Mirrors iOS AppState.sendAttachment.
-     */
-    suspend fun sendAttachment(
-        conversationId: String,
-        target: MessageTarget,
-        senderAccountId: String,
-        data: ByteArray,
-        contentType: String,
-        fileName: String?,
-        caption: String = "",
-        width: Int = 0,
-        height: Int = 0,
-        thumbnail: ByteArray = ByteArray(0),
-    ) {
-        val core = cores[senderAccountId] ?: return
-        val messageId = UUID.randomUUID().toString()
-        val nowMs = System.currentTimeMillis()
-        val pointer = withContext(Dispatchers.IO) {
-            core.uploadAttachment(data, contentType, fileName, width, height, 0, thumbnail, 0)
-        }
-        withContext(Dispatchers.IO) {
-            core.sendMessageWithAttachments(target, caption, listOf(pointer), emptyList(), nowMs)
-        }
-        val stored = StoredMessageFfi(
-            id = messageId, conversationId = conversationId, senderDid = senderAccountId,
-            body = caption, sentAtMs = nowMs, editedAtMs = null, readAtMs = nowMs,
-            deliveryStatus = DeliveryStatus.SENT.code.toUByte(), editCount = 0u, deleted = false,
-            kind = 0L, metadata = null, expireTimerSecs = 0u, expireAtMs = null,
-            attachments = listOf(pointer), previews = emptyList(),
-        )
-        withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = stored) } }
-        val optimistic = messageFromFfi(stored)
-        _messagesByConversation.update { map ->
-            val existing = map[conversationId] ?: return@update map
-            map + (conversationId to (existing + optimistic))
-        }
-        // Bump the chat-list row. Store the real body (the caption, possibly
-        // empty) and the attachment's type — a faithful mirror of what was
-        // persisted. The "📷 Photo" / "📎 Attachment" decoration is derived at
-        // render time (ChatsView), so it survives a restart instead of being a
-        // string that only ever lived in memory.
-        _conversations.update { list ->
-            list.map { c ->
-                if (c.id == conversationId) c.copy(
-                    lastMessage = caption,
-                    lastMessageAttachmentContentType = contentType,
-                    lastMessageSenderDid = senderAccountId,
-                    lastMessageDate = Date(nowMs),
-                ).clearLastMessageEvent()
-                else c
-            }
         }
     }
 
@@ -1948,7 +1918,7 @@ class AppViewModel(
                 val existing = map[conv.id] ?: emptyList()
                 map + (conv.id to (existing + optimistic))
             }
-            sendGroupMessage(
+            sendComposed(
                 conversation = conv,
                 text = firstMessage,
                 messageId = messageId,
@@ -1956,95 +1926,6 @@ class AppViewModel(
             )
         }
         return conv
-    }
-
-    /**
-     * Send a message into a group conversation.
-     * Mirrors iOS AppState.sendGroupMessage().
-     */
-    suspend fun sendGroupMessage(
-        conversation: Conversation,
-        text: String,
-        messageId: String,
-        sentAtMs: Long,
-        previews: List<LinkPreviewFfi> = emptyList(),
-    ) {
-        val groupId = conversation.groupId ?: return
-        val core = cores[conversation.accountId] ?: return
-        val plaintext = text.toByteArray(Charsets.UTF_8)
-
-        val timer = withContext(Dispatchers.IO) {
-            runCatching { core.groupExpirySeconds(groupId = groupId) }.getOrElse { 0u }
-        }
-
-        val pending = StoredMessageFfi(
-            id = messageId,
-            conversationId = conversation.id,
-            senderDid = conversation.accountId,
-            body = text,
-            sentAtMs = sentAtMs,
-            editedAtMs = null,
-            readAtMs = sentAtMs,
-            deliveryStatus = DeliveryStatus.SENDING.code.toUByte(),
-            editCount = 0u,
-            deleted = false,
-            kind = 0L,
-            metadata = null,
-            expireTimerSecs = timer,
-            expireAtMs = null,
-            attachments = emptyList(),
-            previews = previews,
-        )
-        withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = pending) } }
-
-        runCatching {
-            // A message carrying a link preview (docs/35) goes through the rich
-            // send so the preview rides the envelope; otherwise the plain group path.
-            withContext(Dispatchers.IO) {
-                if (previews.isEmpty()) {
-                    core.sendGroupMessage(
-                        groupId = groupId,
-                        plaintext = plaintext,
-                        sentAtMs = sentAtMs,
-                    )
-                } else {
-                    core.sendMessageWithAttachments(
-                        MessageTarget.Group(groupId = groupId), text, emptyList(), previews, sentAtMs
-                    )
-                }
-            }
-            updateMessageStatus(
-                messageId = messageId,
-                conversationId = conversation.id,
-                newStatus = DeliveryStatus.SENT
-            )
-            val sent = StoredMessageFfi(
-                id = messageId, conversationId = conversation.id,
-                senderDid = conversation.accountId, body = text, sentAtMs = sentAtMs,
-                editedAtMs = null, readAtMs = sentAtMs,
-                deliveryStatus = DeliveryStatus.SENT.code.toUByte(), editCount = 0u, deleted = false,
-                kind = 0L, metadata = null, expireTimerSecs = timer, expireAtMs = null,
-                attachments = emptyList(), previews = previews,
-            )
-            withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = sent) } }
-        }.onFailure { error ->
-            AppLog.error("send", "group send to $groupId failed: ${error.message}")
-            updateMessageStatus(
-                messageId = messageId,
-                conversationId = conversation.id,
-                newStatus = DeliveryStatus.FAILED
-            )
-            val failed = StoredMessageFfi(
-                id = messageId, conversationId = conversation.id,
-                senderDid = conversation.accountId, body = text, sentAtMs = sentAtMs,
-                editedAtMs = null, readAtMs = sentAtMs,
-                deliveryStatus = DeliveryStatus.FAILED.code.toUByte(), editCount = 0u, deleted = false,
-                kind = 0L, metadata = null, expireTimerSecs = timer, expireAtMs = null,
-                attachments = emptyList(), previews = emptyList(),
-            )
-            withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = failed) } }
-            throw error
-        }
     }
 
     // -----------------------------------------------------------------------

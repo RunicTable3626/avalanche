@@ -967,123 +967,112 @@ final class AppState: ObservableObject {
 
     // MARK: - Messaging
 
-    func sendMessage(conversationId: String, text: String, recipientDid: String, senderAccountId: String, messageId: String, sentAtMs: Int64, previews: [LinkPreviewFfi] = []) async throws {
-        guard let core = cores[senderAccountId] else { return }
-        let plaintext = Data(text.utf8)
-        let nowMs = sentAtMs
-        // Stamp the local copy with the same disappearing-messages timer the
-        // send path puts on the wire (docs/03 §5), so the sender's copy expires
-        // too. The DM timer is keyed by peer DID.
-        let timer = ((try? await Task.detached {
-            try core.getConversationTimer(conversationId: recipientDid)
-        }.value) ?? nil) ?? 0
+    /// Unified composer send (docs/35): one message to a DM or group carrying
+    /// optional `text`, an optional already-picked image (`imageData`), and an
+    /// optional link `preview`. Collapses the former `sendMessage` /
+    /// `sendGroupMessage` / `sendAttachment` paths onto the core's single
+    /// `sendMessageWithAttachments` entry point — which is wire-identical to a
+    /// plain text send when attachments and previews are empty (both produce a
+    /// `Body::Text` and, for DMs, curate the peer).
+    ///
+    /// The caller has already inserted the optimistic transcript row and bumped
+    /// the chat list. This resolves the disappearing-messages timer, uploads the
+    /// image (if any), grafts the resulting pointer + preview onto the optimistic
+    /// row, persists the sending → sent / failed lifecycle, and sends.
+    func sendComposed(
+        conversation: Conversation,
+        text: String,
+        imageData: Data? = nil,
+        imageContentType: String = "image/jpeg",
+        imageFileName: String? = "photo.jpg",
+        preview: LinkPreviewFfi? = nil,
+        messageId: String,
+        sentAtMs: Int64
+    ) async throws {
+        guard let core = cores[conversation.accountId] else { return }
+        let target: MessageTarget = conversation.isGroup
+            ? .group(groupId: conversation.groupId ?? "")
+            : .dm(recipientDid: conversation.recipientDid ?? "")
 
-        // Persist as "sending" up front so failures are recoverable across launches.
-        let pending = StoredMessageFfi(
-            id: messageId,
-            conversationId: conversationId,
-            senderDid: senderAccountId,
-            body: text,
-            sentAtMs: nowMs,
-            editedAtMs: nil,
-            readAtMs: nowMs,
-            deliveryStatus: UInt8(DeliveryStatus.sending.rawValue),
-            editCount: 0,
-            deleted: false,
-            kind: 0,
-            metadata: nil,
-            expireTimerSecs: timer,
-            expireAtMs: nil,
-            attachments: [],
-            previews: previews
-        )
-        try await Task.detached { try core.saveMessage(msg: pending) }.value
+        // Stamp the local copy with the conversation's disappearing-messages
+        // timer (docs/03 §5) so the sender's copy expires like everyone else's:
+        // the group timer for groups, the per-peer timer for DMs.
+        let timer: UInt32
+        if conversation.isGroup, let groupId = conversation.groupId {
+            timer = (try? await Task.detached { try core.groupExpirySeconds(groupId: groupId) }.value) ?? 0
+        } else if let recipientDid = conversation.recipientDid {
+            timer = ((try? await Task.detached {
+                try core.getConversationTimer(conversationId: recipientDid)
+            }.value) ?? nil) ?? 0
+        } else {
+            timer = 0
+        }
+
+        let previews = preview.map { [$0] } ?? []
 
         do {
-            // A message carrying a link preview (docs/35) goes through the rich
-            // send so the preview rides the envelope; otherwise the plain DM path.
-            try await Task.detached {
-                if previews.isEmpty {
-                    try core.sendDm(recipientDid: recipientDid, plaintext: plaintext, sentAtMs: nowMs)
-                } else {
-                    try core.sendMessageWithAttachments(
-                        target: .dm(recipientDid: recipientDid), body: text,
-                        attachments: [], previews: previews, sentAtMs: nowMs
+            // Upload the staged image first (docs/35) so its pointer — carrying
+            // the inline thumbnail + URL — can ride this same message and render
+            // in the optimistic bubble.
+            var attachments: [AttachmentFfi] = []
+            if let imageData {
+                let (thumb, w, h) = makeAttachmentThumbnail(imageData)
+                let pointer = try await Task.detached {
+                    try core.uploadAttachment(
+                        plaintext: imageData, contentType: imageContentType, fileName: imageFileName,
+                        width: w, height: h, durationMs: 0, thumbnail: thumb, flags: 0
                     )
-                }
+                }.value
+                attachments = [pointer]
+            }
+
+            // Graft the attachment + preview onto the optimistic transcript row
+            // so the bubble shows them immediately, and correct the chat-list
+            // preview's attachment type now that it's known.
+            if let idx = messagesByConversation[conversation.id]?.firstIndex(where: { $0.id == messageId }) {
+                if !attachments.isEmpty { messagesByConversation[conversation.id]?[idx].attachments = attachments }
+                if !previews.isEmpty { messagesByConversation[conversation.id]?[idx].previews = previews }
+            }
+            if let idx = conversations.firstIndex(where: { $0.id == conversation.id }) {
+                conversations[idx].lastMessageAttachmentContentType = imageData != nil ? imageContentType : nil
+            }
+
+            // Persist as "sending" up front so a failure is recoverable across launches.
+            let pending = StoredMessageFfi(
+                id: messageId, conversationId: conversation.id, senderDid: conversation.accountId,
+                body: text, sentAtMs: sentAtMs, editedAtMs: nil, readAtMs: sentAtMs,
+                deliveryStatus: UInt8(DeliveryStatus.sending.rawValue), editCount: 0, deleted: false,
+                kind: 0, metadata: nil, expireTimerSecs: timer, expireAtMs: nil,
+                attachments: attachments, previews: previews
+            )
+            try await Task.detached { try core.saveMessage(msg: pending) }.value
+
+            try await Task.detached {
+                try core.sendMessageWithAttachments(
+                    target: target, body: text, attachments: attachments, previews: previews, sentAtMs: sentAtMs
+                )
             }.value
-            updateMessageStatus(messageId: messageId, conversationId: conversationId, newStatus: .sent)
+            updateMessageStatus(messageId: messageId, conversationId: conversation.id, newStatus: .sent)
             let sent = StoredMessageFfi(
-                id: messageId, conversationId: conversationId, senderDid: senderAccountId,
-                body: text, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
-                deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil,
-                expireTimerSecs: timer, expireAtMs: nil, attachments: [], previews: previews
+                id: messageId, conversationId: conversation.id, senderDid: conversation.accountId,
+                body: text, sentAtMs: sentAtMs, editedAtMs: nil, readAtMs: sentAtMs,
+                deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false,
+                kind: 0, metadata: nil, expireTimerSecs: timer, expireAtMs: nil,
+                attachments: attachments, previews: previews
             )
             Task.detached { try? core.saveMessage(msg: sent) }
         } catch {
-            AppLog.error("send", "DM to \(recipientDid) failed: \(error.localizedDescription)")
-            updateMessageStatus(messageId: messageId, conversationId: conversationId, newStatus: .failed)
+            AppLog.error("send", "send to \(conversation.id) failed: \(error.localizedDescription)")
+            updateMessageStatus(messageId: messageId, conversationId: conversation.id, newStatus: .failed)
             let failed = StoredMessageFfi(
-                id: messageId, conversationId: conversationId, senderDid: senderAccountId,
-                body: text, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
-                deliveryStatus: UInt8(DeliveryStatus.failed.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil,
-                expireTimerSecs: timer, expireAtMs: nil, attachments: [], previews: []
+                id: messageId, conversationId: conversation.id, senderDid: conversation.accountId,
+                body: text, sentAtMs: sentAtMs, editedAtMs: nil, readAtMs: sentAtMs,
+                deliveryStatus: UInt8(DeliveryStatus.failed.rawValue), editCount: 0, deleted: false,
+                kind: 0, metadata: nil, expireTimerSecs: timer, expireAtMs: nil,
+                attachments: [], previews: []
             )
             Task.detached { try? core.saveMessage(msg: failed) }
             throw error
-        }
-    }
-
-    /// Send an attachment (docs/35): encrypt+upload the blob via core, send a
-    /// message carrying the pointer, and persist+show an optimistic local copy.
-    /// `target` selects DM vs group; `caption` is the optional message body.
-    func sendAttachment(
-        conversationId: String,
-        target: MessageTarget,
-        senderAccountId: String,
-        data: Data,
-        contentType: String,
-        fileName: String?,
-        caption: String = "",
-        width: Int32 = 0,
-        height: Int32 = 0,
-        thumbnail: Data = Data()
-    ) async throws {
-        guard let core = cores[senderAccountId] else { return }
-        let messageId = UUID().uuidString
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let pointer = try await Task.detached {
-            try core.uploadAttachment(
-                plaintext: data, contentType: contentType, fileName: fileName,
-                width: width, height: height, durationMs: 0, thumbnail: thumbnail, flags: 0
-            )
-        }.value
-        try await Task.detached {
-            try core.sendMessageWithAttachments(
-                target: target, body: caption, attachments: [pointer], previews: [], sentAtMs: nowMs
-            )
-        }.value
-        let stored = StoredMessageFfi(
-            id: messageId, conversationId: conversationId, senderDid: senderAccountId,
-            body: caption, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
-            deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false,
-            kind: 0, metadata: nil, expireTimerSecs: 0, expireAtMs: nil, attachments: [pointer], previews: []
-        )
-        try await Task.detached { try core.saveMessage(msg: stored) }.value
-        let optimistic = AppState.message(from: stored)
-        if messagesByConversation[conversationId] != nil {
-            messagesByConversation[conversationId]?.append(optimistic)
-        }
-        if let idx = conversations.firstIndex(where: { $0.id == conversationId }) {
-            // Store the real body (the caption, possibly empty) and the
-            // attachment's type — a faithful mirror of what was persisted. The
-            // "📷 Photo" / "📎 Attachment" decoration is derived at render time
-            // (ConversationRow), so it survives a restart instead of being a
-            // string that only ever lived in memory.
-            conversations[idx].lastMessage = caption
-            conversations[idx].lastMessageAttachmentContentType = contentType
-            conversations[idx].lastMessageSenderDid = senderAccountId
-            conversations[idx].lastMessageDate = optimistic.sentAt
         }
     }
 
@@ -1638,7 +1627,7 @@ final class AppState: ObservableObject {
                 deliveryStatus: .sending
             )
             messagesByConversation[conv.id, default: []].append(optimistic)
-            try await sendGroupMessage(
+            try await sendComposed(
                 conversation: conv,
                 text: body,
                 messageId: messageId,
@@ -1646,80 +1635,6 @@ final class AppState: ObservableObject {
             )
         }
         return conv
-    }
-
-    /// Send a message into a group conversation. Mirrors `sendMessage` for
-    /// DMs: persist as `sending`, dispatch over FFI, update status on
-    /// success / failure.
-    func sendGroupMessage(
-        conversation: Conversation,
-        text: String,
-        messageId: String,
-        sentAtMs: Int64,
-        previews: [LinkPreviewFfi] = []
-    ) async throws {
-        guard let groupId = conversation.groupId else { return }
-        guard let core = cores[conversation.accountId] else { return }
-        let plaintext = Data(text.utf8)
-        // Stamp the local copy with the group's current disappearing-messages
-        // timer (docs/03 §5) so the sender's copy expires like everyone else's.
-        let timer = (try? await Task.detached {
-            try core.groupExpirySeconds(groupId: groupId)
-        }.value) ?? 0
-
-        let pending = StoredMessageFfi(
-            id: messageId,
-            conversationId: conversation.id,
-            senderDid: conversation.accountId,
-            body: text,
-            sentAtMs: sentAtMs,
-            editedAtMs: nil,
-            readAtMs: sentAtMs,
-            deliveryStatus: UInt8(DeliveryStatus.sending.rawValue),
-            editCount: 0,
-            deleted: false,
-            kind: 0,
-            metadata: nil,
-            expireTimerSecs: timer,
-            expireAtMs: nil,
-            attachments: [],
-            previews: previews
-        )
-        try await Task.detached { try core.saveMessage(msg: pending) }.value
-
-        do {
-            // A message carrying a link preview (docs/35) goes through the rich
-            // send so the preview rides the envelope; otherwise the plain group path.
-            try await Task.detached {
-                if previews.isEmpty {
-                    try core.sendGroupMessage(groupId: groupId, plaintext: plaintext, sentAtMs: sentAtMs)
-                } else {
-                    try core.sendMessageWithAttachments(
-                        target: .group(groupId: groupId), body: text,
-                        attachments: [], previews: previews, sentAtMs: sentAtMs
-                    )
-                }
-            }.value
-            updateMessageStatus(messageId: messageId, conversationId: conversation.id, newStatus: .sent)
-            let sent = StoredMessageFfi(
-                id: messageId, conversationId: conversation.id, senderDid: conversation.accountId,
-                body: text, sentAtMs: sentAtMs, editedAtMs: nil, readAtMs: sentAtMs,
-                deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil,
-                expireTimerSecs: timer, expireAtMs: nil, attachments: [], previews: previews
-            )
-            Task.detached { try? core.saveMessage(msg: sent) }
-        } catch {
-            AppLog.error("send", "group send to \(groupId) failed: \(error.localizedDescription)")
-            updateMessageStatus(messageId: messageId, conversationId: conversation.id, newStatus: .failed)
-            let failed = StoredMessageFfi(
-                id: messageId, conversationId: conversation.id, senderDid: conversation.accountId,
-                body: text, sentAtMs: sentAtMs, editedAtMs: nil, readAtMs: sentAtMs,
-                deliveryStatus: UInt8(DeliveryStatus.failed.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil,
-                expireTimerSecs: timer, expireAtMs: nil, attachments: [], previews: []
-            )
-            Task.detached { try? core.saveMessage(msg: failed) }
-            throw error
-        }
     }
 
     // MARK: - Contacts (docs/52-contacts-and-profiles.md)

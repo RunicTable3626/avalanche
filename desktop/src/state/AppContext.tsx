@@ -171,6 +171,46 @@ function messageFromFfi(m: StoredMessageFfi): Message {
   };
 }
 
+// Build a StoredMessageFfi row for service().saveMessage from the fields that
+// vary, defaulting the rest. The single source of truth for the persisted-row
+// shape, shared by the optimistic-send, retry, and incoming-message paths (T75)
+// so they can't drift field-by-field. `expireAtMs` is always null on write —
+// app-core's reaper computes the actual expiry on read.
+function buildStoredMessage(opts: {
+  id: string;
+  conversationId: string;
+  senderDid: string;
+  body: string;
+  sentAtMs: number;
+  deliveryStatus: DeliveryStatus;
+  readAtMs?: number | null;
+  editedAtMs?: number | null;
+  editCount?: number;
+  deleted?: boolean;
+  kind?: number;
+  metadata?: string | null;
+  expireTimerSecs: number;
+}): StoredMessageFfi {
+  return {
+    id: opts.id,
+    conversationId: opts.conversationId,
+    senderDid: opts.senderDid,
+    body: opts.body,
+    sentAtMs: opts.sentAtMs,
+    editedAtMs: opts.editedAtMs ?? null,
+    readAtMs: opts.readAtMs ?? null,
+    deliveryStatus: opts.deliveryStatus,
+    editCount: opts.editCount ?? 0,
+    deleted: opts.deleted ?? false,
+    kind: opts.kind ?? 0,
+    metadata: opts.metadata ?? null,
+    expireTimerSecs: opts.expireTimerSecs,
+    expireAtMs: null,
+    attachments: [],
+    previews: [],
+  };
+}
+
 // Delivery-status progression rank: sending(0) → sent(1) → delivered(2) → read(3).
 // `failed` gets -1 so a failure only applies from a non-terminal state and is
 // never treated as "more advanced" than read. Used by applyDeliveryStatusUpdates
@@ -915,24 +955,18 @@ export function AppProvider(props: { children: JSX.Element }) {
     // send. "sending" is persisted up front (and awaited) so a crash or refresh
     // mid-send is recoverable. Matches iOS AppState.sendMessage.
     const persist = (status: DeliveryStatus) =>
-      service().saveMessage({
-        id: messageId,
-        conversationId,
-        senderDid: senderAccountId,
-        body: text,
-        sentAtMs,
-        editedAtMs: null,
-        readAtMs: sentAtMs,
-        deliveryStatus: status,
-        editCount: 0,
-        deleted: false,
-        kind: 0,
-        metadata: null,
-        expireTimerSecs,
-        expireAtMs: null,
-        attachments: [],
-        previews: [],
-      });
+      service().saveMessage(
+        buildStoredMessage({
+          id: messageId,
+          conversationId,
+          senderDid: senderAccountId,
+          body: text,
+          sentAtMs,
+          readAtMs: sentAtMs,
+          deliveryStatus: status,
+          expireTimerSecs,
+        })
+      );
 
     await persist(DeliveryStatus.sending);
 
@@ -1322,24 +1356,23 @@ export function AppProvider(props: { children: JSX.Element }) {
     // Persist each state (same contract as the original optimistic send) so the
     // retried message survives a reload regardless of outcome. Matches iOS.
     const persist = (status: DeliveryStatus) =>
-      service().saveMessage({
-        id: message.id,
-        conversationId: conversation.id,
-        senderDid: message.senderAccountId,
-        body: message.body,
-        sentAtMs,
-        editedAtMs: message.editedAtMs ?? null,
-        readAtMs: sentAtMs,
-        deliveryStatus: status,
-        editCount: message.editCount,
-        deleted: message.isDeleted,
-        kind: message.kind,
-        metadata: message.metadata ?? null,
-        expireTimerSecs: message.expireTimerSecs,
-        expireAtMs: null,
-        attachments: [],
-        previews: [],
-      });
+      service().saveMessage(
+        buildStoredMessage({
+          id: message.id,
+          conversationId: conversation.id,
+          senderDid: message.senderAccountId,
+          body: message.body,
+          sentAtMs,
+          readAtMs: sentAtMs,
+          deliveryStatus: status,
+          editedAtMs: message.editedAtMs ?? null,
+          editCount: message.editCount,
+          deleted: message.isDeleted,
+          kind: message.kind,
+          metadata: message.metadata ?? null,
+          expireTimerSecs: message.expireTimerSecs,
+        })
+      );
     await persist(DeliveryStatus.sending);
     const bytes = Array.from(new TextEncoder().encode(message.body));
     try {
@@ -1733,24 +1766,18 @@ export function AppProvider(props: { children: JSX.Element }) {
     // conversation is opened; the store starts the disappearing-messages
     // countdown on read. Mirrors iOS AppState.
     void service()
-      .saveMessage({
-        id: msg.id,
-        conversationId,
-        senderDid: m.senderDid,
-        body,
-        sentAtMs: msg.sentAtMs,
-        editedAtMs: null,
-        readAtMs: null,
-        deliveryStatus: msg.deliveryStatus,
-        editCount: 0,
-        deleted: false,
-        kind: 0,
-        metadata: null,
-        expireTimerSecs: m.expireTimerSecs,
-        expireAtMs: null,
-        attachments: [],
-        previews: [],
-      })
+      .saveMessage(
+        buildStoredMessage({
+          id: msg.id,
+          conversationId,
+          senderDid: m.senderDid,
+          body,
+          sentAtMs: msg.sentAtMs,
+          readAtMs: null,
+          deliveryStatus: msg.deliveryStatus,
+          expireTimerSecs: m.expireTimerSecs,
+        })
+      )
       .catch((err: unknown) => {
         console.warn("saveMessage (incoming) failed:", err);
       });

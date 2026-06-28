@@ -327,16 +327,26 @@ fun ConversationView(
         }
     }
 
-    // Auto-scroll when new messages arrive — but only after initial positioning,
-    // so the load-time population isn't treated as an incoming message.
+    // Mark read (and auto-scroll) when the transcript loads or grows.
     val messageCount = messages.size
     LaunchedEffect(messageCount) {
-        if (initialScrollDone && messageCount > 0) {
+        if (messageCount == 0) return@LaunchedEffect
+        // Mark read whenever the transcript (re)loads or grows — mirrors iOS
+        // ConversationView's `.onChange(of: messages.count)`. Crucially this is
+        // NOT gated on initialScrollDone: on first open the transcript loads
+        // asynchronously *after* onAppear's markAllMessagesRead has already run
+        // (when the in-memory transcript was still empty, so its optimistic
+        // update was a no-op). Re-marking here, once the messages are actually
+        // in memory, is what clears the chat-list badge — otherwise it only
+        // cleared on the second visit.
+        viewModel.markAllMessagesRead(
+            conversationId = conversation.id,
+            accountId = conversation.accountId,
+        )
+        // Auto-scroll to the newest message only for messages arriving after the
+        // initial positioning; the initial load is positioned by the effect above.
+        if (initialScrollDone) {
             listState.animateScrollToItem(messageCount - 1)
-            viewModel.markAllMessagesRead(
-                conversationId = conversation.id,
-                accountId = conversation.accountId,
-            )
         }
     }
 

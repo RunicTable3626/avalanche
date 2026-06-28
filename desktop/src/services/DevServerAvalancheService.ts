@@ -120,6 +120,14 @@ export class DevServerAvalancheService implements AvalancheService {
     return ok(commands.hasRecovery());
   }
 
+  async updateRecoveryBlob(prfOutput: number[], servers: string[]): Promise<void> {
+    await ok(commands.updateRecoveryBlob(prfOutput, servers));
+  }
+
+  async homeServer(): Promise<string> {
+    return ok(commands.homeServer());
+  }
+
   async contactDisplayName(did: string): Promise<string> {
     return ok(commands.contactDisplayName(did));
   }

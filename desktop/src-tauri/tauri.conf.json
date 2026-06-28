@@ -25,6 +25,13 @@
       "devCsp": "default-src 'self' 'unsafe-inline' blob:; connect-src ipc: http://ipc.localhost"
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["avalanche"]
+      }
+    }
+  },
   "bundle": {
     "active": false,
     "targets": "all",

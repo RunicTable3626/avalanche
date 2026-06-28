@@ -9,6 +9,8 @@
     "core:event:allow-listen",
     "core:event:allow-emit",
     "core:webview:allow-create-webview-window",
+    "notification:default",
+    "deep-link:default",
     "allow-all"
   ]
 }

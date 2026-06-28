@@ -11,6 +11,7 @@
   "dependencies": {
     "@solidjs/router": "0.15.3",
     "@tauri-apps/api": "2.2.0",
+    "@tauri-apps/plugin-deep-link": "2.2.0",
     "@tauri-apps/plugin-notification": "2.2.0",
     "@tauri-apps/plugin-store": "2.2.0",
     "solid-icons": "1.2.0",

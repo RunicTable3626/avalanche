@@ -58,6 +58,8 @@ pub fn run() {
             own_display_name,
             set_display_name,
             has_recovery,
+            update_recovery_blob,
+            home_server,
             contact_display_name,
             get_account_info,
             refresh_contact_profile,
@@ -131,6 +133,8 @@ pub fn run() {
     #[allow(unreachable_code)]
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(AppState {
             app: Mutex::new(None),
         })
@@ -365,6 +369,30 @@ fn has_recovery(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     Ok(get_app(&state)?.has_recovery())
 }
 
+/// Re-encrypt and upload this account's recovery blob for the given PRF output
+/// and server list. The PRF output must be exactly 32 bytes — desktop has no
+/// passkey/PRF authenticator, so the only caller is the recovery-phrase setup
+/// flow, which feeds the 32-byte seed derived from the phrase
+/// (`recovery_phrase_to_seed`). See `desktop/CLAUDE.md` (passkey divergence).
+#[tauri::command]
+#[specta::specta]
+fn update_recovery_blob(
+    state: tauri::State<'_, AppState>,
+    prf_output: Vec<u8>,
+    servers: Vec<String>,
+) -> Result<(), String> {
+    get_app(&state)?
+        .update_recovery_blob(prf_output, servers)
+        .map_err(|e| e.to_string())
+}
+
+/// This account's home (primary) server URL.
+#[tauri::command]
+#[specta::specta]
+fn home_server(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    Ok(get_app(&state)?.home_server())
+}
+
 #[tauri::command]
 #[specta::specta]
 fn contact_display_name(
@@ -580,7 +608,6 @@ fn cached_group_state(
 ) -> Result<Option<app_core::GroupSummaryFfi>, String> {
     get_app(&state)?
         .cached_group_state(group_id)
-        .map(|opt| opt.map(Into::into))
         .map_err(|e| e.to_string())
 }
 

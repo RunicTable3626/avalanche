@@ -52,7 +52,6 @@ interface AppContextValue {
   ) => Promise<void>;
   restoreAccounts: () => Promise<void>;
   logout: () => void;
-  switchMode: (mode: ServiceMode) => void;
   serverUrl: () => string;
   setServerUrl: (url: string) => void;
   joinServer: (
@@ -250,14 +249,6 @@ export function AppProvider(props: { children: JSX.Element }) {
     await persistAccounts([...filtered, pa]);
   }
 
-  async function saveServiceMode(mode: ServiceMode) {
-    try {
-      const s = await loadStore("avalanche.json");
-      await s.set("serviceMode", mode);
-      await s.save();
-    } catch {}
-  }
-
   async function persistServerUrl(url: string) {
     try {
       const s = await loadStore("avalanche.json");
@@ -276,17 +267,12 @@ export function AppProvider(props: { children: JSX.Element }) {
   void (async () => {
     try {
       const s = await loadStore("avalanche.json");
-      const savedMode = await s.get<string>("serviceMode");
       const savedServerUrl = await s.get<string>("serverUrl");
-      // Restore persisted mode, defaulting to DevServer (the primary dev
-      // target).  Users who previously switched to Mock in DevSettingsView
-      // will get Mock back on restart.
-      const mode =
-        savedMode === ServiceMode.Mock || savedMode === ServiceMode.DevServer
-          ? (savedMode as ServiceMode)
-          : ServiceMode.DevServer;
-      setStore("serviceMode", mode);
-      setService(makeService(mode));
+      // Service mode is no longer user-selectable — mock is a test-only affordance
+      // (constructed directly in tests), not a runtime mode users pick. The live
+      // app always runs DevServer (the store default). We intentionally ignore any
+      // previously persisted "mock" so a dev who toggled it before isn't stranded
+      // with no UI to switch back.
       if (savedServerUrl != null) {
         setStore("serverUrl", savedServerUrl);
       }
@@ -438,15 +424,8 @@ export function AppProvider(props: { children: JSX.Element }) {
   function logout() {
     resetSession();
     // Fresh service instance so mock state (storedMessages, pendingEvents, etc.)
-    // doesn't bleed into the next session.  Matches switchMode.
+    // doesn't bleed into the next session.
     setService(makeService(store.serviceMode));
-  }
-
-  function switchMode(mode: ServiceMode) {
-    resetSession();
-    setService(makeService(mode));
-    setStore("serviceMode", mode);
-    void saveServiceMode(mode);
   }
 
   async function joinServer(
@@ -1161,7 +1140,6 @@ export function AppProvider(props: { children: JSX.Element }) {
     createAccount,
     restoreAccounts,
     logout,
-    switchMode,
     serverUrl: () => store.serverUrl,
     setServerUrl,
     joinServer,

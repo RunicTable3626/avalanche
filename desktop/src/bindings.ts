@@ -424,7 +424,17 @@ export type IncomingEvent =
  *  timer elapsed (docs/03 §5). The store no longer holds them; the UI should
  *  refresh the listed conversations (timeline + chat-list preview).
  */
-{ type: "messagesExpired"; conversation_ids: string[] };
+{ type: "messagesExpired"; conversation_ids: string[] } | 
+/**
+ *  A single conversation's stored content changed locally and the UI should
+ *  re-read just that conversation (its open timeline + chat-list preview).
+ *  Emitted when a `SyncSent`/`SyncRead` transcript from another of my own
+ *  devices (docs/04 §5.4) is applied over the live WS path — a message I
+ *  sent, an edit/delete/reaction I made, or read-state I cleared elsewhere.
+ *  Unlike `StorageSynced` this names the affected conversation, so the UI
+ *  refreshes one timeline instead of rebuilding everything.
+ */
+{ type: "conversationUpdated"; conversation_id: string };
 
 /**  Decoded invite token info returned to the mobile layer. */
 export type InviteInfo = {

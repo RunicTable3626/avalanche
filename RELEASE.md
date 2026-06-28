@@ -16,17 +16,10 @@ git push                 # push the branch first, so the tagged commit
 git push --tags          # push the tag, which triggers the release
 ```
 
-To re-cut a tag (e.g. you forgot to push the branch first):
-
-```bash
-git tag -d v0.2.0 && git push origin :refs/tags/v0.2.0   # delete local + remote
-git tag v0.2.0    && git push origin v0.2.0              # re-tag and push
-```
-
 ## 2. Server-side artifacts (automatic, via GitHub Actions)
 
 Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds every
-first-party binary for both Linux arches (`x86_64` and `aarch64`) and attaches
+first-party server binary for both Linux arches (`x86_64` and `aarch64`) and attaches
 them to a **draft** GitHub Release:
 
 | Asset (per arch)                  | Contents                                  |
@@ -46,7 +39,7 @@ gh release edit v0.2.0 --prerelease --draft=false
 ```
 
 
-## 3. Mobile app (manual, from your Mac)
+## 3. iOS app (manual, from your Mac)
 
 The iOS app version is derived from git tags (`project.yml` has the logic).
 
@@ -66,11 +59,26 @@ open dist/Actnet.xcarchive  # opens in Xcode Organizer
 You must be signed into Xcode with an Apple ID that has access to our Xcode team. The `open` command will bring up Xcode Organizer:
 
 1. Select the new archive, it should be at the top
-2. **Distribute App** → Internal Testing (or App Store Connect) → Upload.
+2. **Distribute App** → App Store Connect → Upload.
 
-After upload, the build appears in App Store Connect → TestFlight after
-processing. (https://appstoreconnect.apple.com) TestFlight builds automatically go out to internal testers.
+After upload and a few minutes of processing, the build appears in App Store Connect. (https://appstoreconnect.apple.com) You'll want to sign in and add 'What to Test' and submit the build for testing.
 
-## 4. Web
+## 4. Android app (manual)
+
+The Android app version is also derived from Git, as above.
+
+Run: `make android-release`. This requires the Android release signing key available to you in 1password.
+
+It outputs to `mobile/android/app/build/outputs/apk/release/app-release.apk`. 
+
+You can then upload it to Github using:
+
+```bash
+gh release upload v0.2.0 mobile/android/app/build/outputs/apk/release/app-release.apk
+```
+
+Currently the only way Android users can see a new release is by seeing it on the website, so you'll also want to update the website to point to the new release. (content/getting-started/sideload-android.md)
+
+## 5. Web
 
 The website is hosted at theavalanche.net and is in the `web/` folder. To build, run `hugo build` and then `wrangler deploy` to deploy it to Cloudflare.

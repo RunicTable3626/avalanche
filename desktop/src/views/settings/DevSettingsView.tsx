@@ -1,8 +1,7 @@
-import { createSignal, Show, type JSX } from "solid-js";
+import { createSignal, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import { FiArrowLeft } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
-import BlockedContactsView from "./BlockedContactsView";
 import "./DevSettingsView.css";
 
 interface Props {
@@ -12,8 +11,9 @@ interface Props {
 }
 
 export default function DevSettingsView(props: Props = {}): JSX.Element {
-  const { store, logout } = useApp();
-  const [showBlocked, setShowBlocked] = createSignal(false);
+  const { store, logout, serverUrl, setServerUrl } = useApp();
+  // Local draft of the server URL; committed (persisted) on Save.
+  const [draftUrl, setDraftUrl] = createSignal(serverUrl());
   // useNavigate throws if rendered outside a Router — guard gracefully.
   let navigate: ReturnType<typeof useNavigate> | undefined;
   try {
@@ -32,6 +32,13 @@ export default function DevSettingsView(props: Props = {}): JSX.Element {
     navigate?.("/");
   }
 
+  const urlDirty = () => draftUrl().trim() !== serverUrl() && draftUrl().trim().length > 0;
+
+  function saveUrl() {
+    if (!urlDirty()) return;
+    setServerUrl(draftUrl().trim());
+  }
+
   return (
     <div class="dev-settings">
       <header class="dev-settings-header">
@@ -40,6 +47,26 @@ export default function DevSettingsView(props: Props = {}): JSX.Element {
         </button>
         <h1>Developer</h1>
       </header>
+
+      <section class="dev-settings-section">
+        <h2>Server</h2>
+        <p class="dev-settings-hint">
+          Home server used when creating a new account. Persisted across restarts.
+        </p>
+        <div class="dev-settings-url-row">
+          <input
+            class="text-input dev-settings-url-input"
+            value={draftUrl()}
+            onInput={(e) => setDraftUrl(e.currentTarget.value)}
+            spellcheck={false}
+            autocomplete="off"
+            placeholder="http://localhost:3000"
+          />
+          <button class="btn-primary dev-settings-url-save" onClick={saveUrl} disabled={!urlDirty()}>
+            Save
+          </button>
+        </div>
+      </section>
 
       <section class="dev-settings-section">
         <h2>Session</h2>
@@ -52,20 +79,6 @@ export default function DevSettingsView(props: Props = {}): JSX.Element {
           Sign Out
         </button>
       </section>
-
-      <section class="dev-settings-section">
-        <h2>Safety</h2>
-        <p class="dev-settings-hint">
-          Contacts you have blocked. Unblock to allow their messages again.
-        </p>
-        <button class="btn-secondary" onClick={() => setShowBlocked(true)}>
-          Blocked Contacts
-        </button>
-      </section>
-
-      <Show when={showBlocked()}>
-        <BlockedContactsView onClose={() => setShowBlocked(false)} />
-      </Show>
     </div>
   );
 }

@@ -37,3 +37,16 @@
   color: var(--color-text-secondary);
   line-height: 1.45;
 }
+
+.dev-settings-url-row {
+  display: flex;
+  gap: 10px;
+}
+
+.dev-settings-url-input {
+  flex: 1;
+}
+
+.dev-settings-url-save {
+  padding: 0 18px;
+}

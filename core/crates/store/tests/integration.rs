@@ -207,7 +207,7 @@ async fn load_conversations_dedups_tied_timestamps() {
     // A second conversation, to prove dedup is per-conversation, not global.
     store.save_message(&msg2_other("dm-x", 1000)).await.unwrap();
 
-    let convs = store.load_conversations(Timestamp(2000)).await.unwrap();
+    let convs = store.load_conversations(Timestamp(2000), "did:plc:me").await.unwrap();
     let group_rows: Vec<_> = convs.iter().filter(|c| c.conversation_id == "group-G").collect();
     assert_eq!(
         group_rows.len(),

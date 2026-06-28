@@ -36,6 +36,12 @@ final class AppState: ObservableObject {
     /// array and the empty state flashes during restore.
     @Published var conversationsLoaded: Bool = false
     @Published var messagesByConversation: [String: [Message]] = [:]
+    /// Persisted unread count per conversation, seeded from the store on load
+    /// (`ConversationSummaryFfi.unreadCount`) and kept live as messages arrive
+    /// or are marked read. The chat-list badge reads this for conversations
+    /// whose transcript isn't currently cached in `messagesByConversation`, so
+    /// the badge is correct even for conversations never opened this session.
+    @Published var unreadCounts: [String: Int] = [:]
     /// Reactions per conversation (docs/33), keyed by conversation id. Each
     /// reaction carries its target message's wire identity
     /// `(targetAuthor, targetSentAtMs)`; the UI clusters by target + emoji.
@@ -185,12 +191,20 @@ final class AppState: ObservableObject {
         url.host == "go.theavalanche.net"
     }
 
-    // MARK: - Unread count (derived from in-memory messages)
+    // MARK: - Unread count
 
-    /// Compute unread count for a conversation from in-memory messages.
+    /// Unread count for a conversation's chat-list badge.
+    ///
+    /// When the conversation's transcript is loaded in memory we count it
+    /// directly — that reflects optimistic mark-read and freshly-appended
+    /// messages immediately. Otherwise we fall back to the persisted count
+    /// seeded from the store (`unreadCounts`), so conversations that haven't
+    /// been opened this session still show the right badge.
     func unreadCount(for conversation: Conversation) -> Int {
-        let messages = messagesByConversation[conversation.id] ?? []
-        return messages.filter { $0.readAtMs == nil && $0.senderAccountId != conversation.accountId }.count
+        if let messages = messagesByConversation[conversation.id] {
+            return messages.filter { $0.readAtMs == nil && $0.senderAccountId != conversation.accountId }.count
+        }
+        return unreadCounts[conversation.id] ?? 0
     }
 
     // MARK: - Account lifecycle
@@ -1087,37 +1101,45 @@ final class AppState: ObservableObject {
     }
 
     /// Mark all messages in a conversation as read (sets read_at on unread messages).
-    /// Sends read receipts to the sender.
+    /// Sends read receipts to each sender.
+    ///
+    /// Persistence and receipts run off the store, not the in-memory transcript,
+    /// so this works on the very first open of a conversation — before its
+    /// transcript has finished loading. (Previously this guarded on the
+    /// transcript being loaded and silently no-op'd on first open, leaving
+    /// messages unread until a second visit and inflating the badge over time.)
     func markAllMessagesRead(conversationId: String, accountId: String) {
-        guard var messages = messagesByConversation[conversationId] else { return }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        var changed = false
-        // Collect timestamps of newly-read messages, grouped by sender DID.
-        var readTimestampsBySender: [String: [Int64]] = [:]
-        for i in messages.indices {
-            if messages[i].readAtMs == nil && messages[i].senderAccountId != accountId {
+
+        // Optimistic UI: clear unread in the loaded transcript (if any) and in
+        // the persisted-count cache, then recompute the app icon badge.
+        if var messages = messagesByConversation[conversationId] {
+            var changed = false
+            for i in messages.indices where messages[i].readAtMs == nil && messages[i].senderAccountId != accountId {
                 messages[i].readAtMs = nowMs
                 changed = true
-                readTimestampsBySender[messages[i].senderAccountId, default: []].append(messages[i].sentAtMs)
             }
+            if changed { messagesByConversation[conversationId] = messages }
         }
-        guard changed else { return }
-        messagesByConversation[conversationId] = messages
+        unreadCounts[conversationId] = 0
         NotificationPresenter.updateBadge(appState: self)
 
-        // Persist to SQLCipher and send read receipts in the background.
-        if let core = cores[accountId] {
-            let convId = conversationId
-            let timestampsBySender = readTimestampsBySender
-            Task.detached {
-                try? core.markMessagesRead(conversationId: convId, upToSentAtMs: nowMs)
-                // Send read receipts to each sender.
-                for (senderDid, timestamps) in timestampsBySender {
-                    try? core.sendReadReceipt(
-                        recipientDid: senderDid,
-                        timestamps: timestamps
-                    )
-                }
+        // Persist to SQLCipher and send read receipts in the background. Read the
+        // still-unread inbound messages from the store *before* marking, so we
+        // know exactly which (sender, timestamp) pairs to acknowledge regardless
+        // of whether the transcript was loaded in memory.
+        guard let core = cores[accountId] else { return }
+        let convId = conversationId
+        Task.detached {
+            let unread = ((try? core.loadMessages(conversationId: convId)) ?? [])
+                .filter { $0.readAtMs == nil && $0.senderDid != accountId }
+            try? core.markMessagesRead(conversationId: convId, upToSentAtMs: nowMs)
+            var timestampsBySender: [String: [Int64]] = [:]
+            for m in unread {
+                timestampsBySender[m.senderDid, default: []].append(m.sentAtMs)
+            }
+            for (senderDid, timestamps) in timestampsBySender {
+                try? core.sendReadReceipt(recipientDid: senderDid, timestamps: timestamps)
             }
         }
     }
@@ -1232,10 +1254,12 @@ final class AppState: ObservableObject {
         }
 
         var newConvs: [Conversation] = []
+        var newUnread: [String: Int] = [:]
         var groupsNeedingRefresh: [(groupId: String, accountId: String)] = []
         for (accountId, summaries, _) in summariesPerAccount {
             let serverUrl = accounts.first(where: { $0.id == accountId })?.servers.first?.id ?? ""
             for s in summaries {
+                newUnread[s.conversationId] = Int(s.unreadCount)
                 let date = s.lastMessage.map {
                     Date(timeIntervalSince1970: TimeInterval($0.sentAtMs) / 1000.0)
                 }
@@ -1295,6 +1319,7 @@ final class AppState: ObservableObject {
         conversations = newConvs.sorted {
             ($0.lastMessageDate ?? .distantPast) > ($1.lastMessageDate ?? .distantPast)
         }
+        unreadCounts = newUnread
         conversationsLoaded = true
 
         // Kick off async name resolution for any conversation still showing the raw DID.
@@ -2036,16 +2061,22 @@ final class AppState: ObservableObject {
         }
 
         let messageId = UUID().uuidString
-        // Incoming messages are unread (readAtMs = nil). Carry the sender's
-        // disappearing-messages timer (docs/03 §5) so the live-expiry scheduler
-        // sees it once the message is read.
+        // If the user is currently viewing this conversation, treat the message
+        // as read on arrival (and acknowledge it below) rather than flashing an
+        // unread badge for something they're already looking at. We stamp
+        // read_at directly on the persisted row — rather than a follow-up
+        // markMessagesRead — so it can't race the save that writes the row.
+        let isActive = currentConversationId == convId
+        let readAtMs: Int64? = isActive ? Int64(Date().timeIntervalSince1970 * 1000) : nil
+        // Carry the sender's disappearing-messages timer (docs/03 §5) so the
+        // live-expiry scheduler sees it once the message is read.
         let message = Message(
             id: messageId,
             conversationId: convId,
             senderAccountId: senderDid,
             body: text,
             sentAtMs: sentAtMs,
-            readAtMs: nil,
+            readAtMs: readAtMs,
             deliveryStatus: .sent,
             expireTimerSecs: msg.expireTimerSecs,
             attachments: msg.attachments
@@ -2059,7 +2090,13 @@ final class AppState: ObservableObject {
         // The message is persisted to SQLCipher below regardless.
         if messagesByConversation[convId] != nil {
             messagesByConversation[convId]?.append(message)
+        } else if !isActive {
+            // Transcript not cached: bump the persisted-count cache so the
+            // chat-list badge reflects this message without a full reload. (For
+            // loaded conversations the badge counts the transcript directly.)
+            unreadCounts[convId, default: 0] += 1
         }
+        NotificationPresenter.updateBadge(appState: self)
 
         // Resolve the sender's name for the notification. A name we already hold
         // (own account or cached) lets us notify immediately; an unknown sender
@@ -2079,7 +2116,7 @@ final class AppState: ObservableObject {
                 body: text,
                 sentAtMs: sentAtMs,
                 editedAtMs: nil,
-                readAtMs: nil,  // unread
+                readAtMs: readAtMs,  // read on arrival iff actively viewing
                 deliveryStatus: 1,  // sent
                 editCount: 0,
                 deleted: false,
@@ -2091,7 +2128,14 @@ final class AppState: ObservableObject {
                 expireAtMs: nil,
                 attachments: msg.attachments
             )
-            Task.detached { try? core.saveMessage(msg: stored) }
+            Task.detached {
+                try? core.saveMessage(msg: stored)
+                // Acknowledge after the row is persisted (the FFI gates receipts
+                // to curated senders, so this is a no-op for message requests).
+                if isActive {
+                    try? core.sendReadReceipt(recipientDid: senderDid, timestamps: [sentAtMs])
+                }
+            }
 
             // Contact/profile metadata is now an explicit client opt-in:
             // app-core decrypts and surfaces the message but no longer writes

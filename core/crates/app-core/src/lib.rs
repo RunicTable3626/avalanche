@@ -432,6 +432,11 @@ pub struct ConversationSummaryFfi {
     /// True for a DM with a blocked contact (docs/12 §2). The chat list routes
     /// these into a Blocked section. Always false for groups.
     pub is_blocked: bool,
+    /// Number of unread inbound messages — the chat list's unread badge. Read
+    /// straight from the persisted store (`read_at IS NULL`, excluding our own
+    /// messages and expired rows), so it is correct for every conversation, not
+    /// just those whose messages are currently cached in the UI.
+    pub unread_count: u64,
 }
 
 /// A delivery status update for an outgoing message (e.g. read receipt received).
@@ -2356,7 +2361,7 @@ impl AppCore {
     pub fn load_conversations(&self) -> Result<Vec<ConversationSummaryFfi>, AppErrorFfi> {
         ffi_runtime().block_on(async {
             let inner = self.inner.lock().await;
-            let rows = inner.store.load_conversations(Timestamp::now()).await
+            let rows = inner.store.load_conversations(Timestamp::now(), &inner.did).await
                 .map_err(AppError::from)?;
             // Resolve all group titles from locally-persisted state in a single
             // query, so the chat list renders real names on launch without a
@@ -2410,6 +2415,7 @@ impl AppCore {
                     last_message: c.last_message.map(stored_to_ffi),
                     is_request,
                     is_blocked,
+                    unread_count: c.unread_count,
                 }
             }).collect())
         }).map_err(AppErrorFfi::from)

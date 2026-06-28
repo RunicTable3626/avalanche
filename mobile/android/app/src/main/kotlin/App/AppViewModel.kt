@@ -123,6 +123,17 @@ class AppViewModel(
     val messagesByConversation: StateFlow<Map<String, List<Message>>> =
         _messagesByConversation.asStateFlow()
 
+    /**
+     * Persisted unread count per conversation, seeded from the store on load
+     * (`ConversationSummaryFfi.unreadCount`) and kept live as messages arrive or
+     * are marked read. The chat-list badge reads this for conversations whose
+     * transcript isn't cached in [messagesByConversation], so the badge is
+     * correct even for conversations never opened this session.
+     * Mirrors iOS AppState.unreadCounts.
+     */
+    private val _unreadCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val unreadCounts: StateFlow<Map<String, Int>> = _unreadCounts.asStateFlow()
+
     /** Reactions per conversation (docs/33), keyed by conversation id. */
     private val _reactionsByConversation = MutableStateFlow<Map<String, List<ReactionFfi>>>(emptyMap())
     val reactionsByConversation: StateFlow<Map<String, List<ReactionFfi>>> =
@@ -408,10 +419,20 @@ class AppViewModel(
     // Unread count — mirrors iOS AppState.unreadCount(for:)
     // -----------------------------------------------------------------------
 
-    /** Compute unread count for a conversation from in-memory messages. */
+    /**
+     * Unread count for a conversation's chat-list badge.
+     *
+     * When the transcript is loaded in memory we count it directly (reflecting
+     * optimistic mark-read and freshly-appended messages immediately); otherwise
+     * we fall back to the persisted count seeded from the store, so
+     * conversations not opened this session still show the right badge.
+     */
     fun unreadCount(conversation: Conversation): Int {
-        val messages = _messagesByConversation.value[conversation.id] ?: return 0
-        return messages.count { it.readAtMs == null && it.senderAccountId != conversation.accountId }
+        val messages = _messagesByConversation.value[conversation.id]
+        if (messages != null) {
+            return messages.count { it.readAtMs == null && it.senderAccountId != conversation.accountId }
+        }
+        return _unreadCounts.value[conversation.id] ?: 0
     }
 
     // -----------------------------------------------------------------------
@@ -1384,32 +1405,45 @@ class AppViewModel(
     /**
      * Mark all messages in a conversation as read.
      * Mirrors iOS AppState.markAllMessagesRead(conversationId:accountId:).
+     *
+     * Persistence and receipts run off the store, not the in-memory transcript,
+     * so this works on the very first open of a conversation — before its
+     * transcript has finished loading. (Previously this returned early when the
+     * transcript wasn't loaded, silently no-op'ing on first open and inflating
+     * the badge over time.)
      */
     fun markAllMessagesRead(conversationId: String, accountId: String) {
-        val msgs = _messagesByConversation.value[conversationId] ?: return
         val nowMs = System.currentTimeMillis()
-        val readTimestampsBySender = mutableMapOf<String, MutableList<Long>>()
-        var changed = false
 
-        val updatedMsgs = msgs.map { msg ->
-            if (msg.readAtMs == null && msg.senderAccountId != accountId) {
-                changed = true
-                readTimestampsBySender.getOrPut(msg.senderAccountId) { mutableListOf() }
-                    .add(msg.sentAtMs)
-                msg.copy(readAtMs = nowMs)
-            } else msg
+        // Optimistic UI: clear unread in the loaded transcript (if any) and in
+        // the persisted-count cache, then recompute the notification badge.
+        _messagesByConversation.value[conversationId]?.let { msgs ->
+            var changed = false
+            val updatedMsgs = msgs.map { msg ->
+                if (msg.readAtMs == null && msg.senderAccountId != accountId) {
+                    changed = true
+                    msg.copy(readAtMs = nowMs)
+                } else msg
+            }
+            if (changed) {
+                _messagesByConversation.update { it + (conversationId to updatedMsgs) }
+            }
         }
-        if (!changed) return
-
-        _messagesByConversation.update { it + (conversationId to updatedMsgs) }
+        _unreadCounts.update { it + (conversationId to 0) }
         NotificationPresenter.updateBadge(context = applicationContext, appViewModel = this)
 
         val core = cores[accountId] ?: return
         val convId = conversationId
-        val timestampsBySender = readTimestampsBySender.toMap()
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
+                // Read the still-unread inbound messages from the store *before*
+                // marking, so we know which (sender, timestamp) pairs to ack
+                // regardless of whether the transcript was loaded in memory.
+                val unread = (runCatching { core.loadMessages(conversationId = convId) }.getOrNull() ?: emptyList())
+                    .filter { it.readAtMs == null && it.senderDid != accountId }
                 runCatching { core.markMessagesRead(conversationId = convId, upToSentAtMs = nowMs) }
+                val timestampsBySender = unread.groupBy { it.senderDid }
+                    .mapValues { (_, ms) -> ms.map { it.sentAtMs } }
                 for ((senderDid, timestamps) in timestampsBySender) {
                     runCatching {
                         core.sendReadReceipt(recipientDid = senderDid, timestamps = timestamps)
@@ -1498,6 +1532,7 @@ class AppViewModel(
         }
 
         val newConvs = mutableListOf<Conversation>()
+        val newUnread = mutableMapOf<String, Int>()
         val groupsNeedingRefresh = mutableListOf<Pair<String, String>>() // groupId to accountId
 
         for (acctSummary in summariesPerAccount) {
@@ -1505,6 +1540,7 @@ class AppViewModel(
             val summaries = acctSummary.summaries
             val serverUrl = _accounts.value.firstOrNull { it.id == accountId }?.servers?.firstOrNull()?.id ?: ""
             for (s in summaries) {
+                newUnread[s.conversationId] = s.unreadCount.toInt()
                 val lastMsg = s.lastMessage
                 val date = lastMsg?.let { Date(it.sentAtMs) }
                 val preview = lastMsg?.body
@@ -1561,6 +1597,7 @@ class AppViewModel(
 
         val sorted = newConvs.sortedByDescending { it.lastMessageDate?.time ?: Long.MIN_VALUE }
         _conversations.value = sorted
+        _unreadCounts.value = newUnread
         _conversationsLoaded.value = true
 
         // Flush a notification tap that arrived before the list was ready
@@ -2516,13 +2553,20 @@ class AppViewModel(
         }
 
         val messageId = UUID.randomUUID().toString()
+        // If the user is currently viewing this conversation, treat the message
+        // as read on arrival (and acknowledge it below) rather than flashing an
+        // unread badge for something they're already looking at. We stamp
+        // readAt directly on the persisted row — rather than a follow-up
+        // markMessagesRead — so it can't race the save that writes the row.
+        val isActive = _currentConversationId.value == convId
+        val readAtMs: Long? = if (isActive) System.currentTimeMillis() else null
         val message = Message(
             id = messageId,
             conversationId = convId,
             senderAccountId = senderDid,
             body = text,
             sentAtMs = sentAtMs,
-            readAtMs = null,
+            readAtMs = readAtMs,
             deliveryStatus = DeliveryStatus.SENT,
             expireTimerSecs = msg.expireTimerSecs,
             attachments = msg.attachments,
@@ -2534,10 +2578,19 @@ class AppViewModel(
         // non-null guard in loadMessagesFromStore() would then skip loading the
         // real history — showing only the latest message until app restart.
         // The message is persisted to SQLCipher below regardless.
-        _messagesByConversation.update { map ->
-            val existing = map[convId] ?: return@update map
-            map + (convId to (existing + message))
+        val transcriptLoaded = _messagesByConversation.value.containsKey(convId)
+        if (transcriptLoaded) {
+            _messagesByConversation.update { map ->
+                val existing = map[convId] ?: return@update map
+                map + (convId to (existing + message))
+            }
+        } else if (!isActive) {
+            // Transcript not cached: bump the persisted-count cache so the
+            // chat-list badge reflects this message without a full reload. (For
+            // loaded conversations the badge counts the transcript directly.)
+            _unreadCounts.update { it + (convId to ((it[convId] ?: 0) + 1)) }
         }
+        NotificationPresenter.updateBadge(context = applicationContext, appViewModel = this)
 
         // Resolve the sender's name for the notification. A name we already hold
         // (own account or cached) lets us notify immediately; an unknown sender
@@ -2557,7 +2610,7 @@ class AppViewModel(
                 body = text,
                 sentAtMs = sentAtMs,
                 editedAtMs = null,
-                readAtMs = null,
+                readAtMs = readAtMs,  // read on arrival iff actively viewing
                 deliveryStatus = 1u.toUByte(),
                 editCount = 0u,
                 deleted = false,
@@ -2572,6 +2625,11 @@ class AppViewModel(
             viewModelScope.launch {
                 val resolved = withContext(Dispatchers.IO) {
                     runCatching { core.saveMessage(msg = stored) }
+                    // Acknowledge after the row is persisted (the FFI gates
+                    // receipts to curated senders, so this no-ops for requests).
+                    if (isActive) {
+                        runCatching { core.sendReadReceipt(recipientDid = senderDid, timestamps = listOf(sentAtMs)) }
+                    }
                     runCatching { core.touchContact(did = senderDid, curated = false) }
                     if (isRequest) {
                         runCatching { core.setPendingRequest(did = senderDid, pending = true) }

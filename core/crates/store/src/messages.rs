@@ -249,10 +249,31 @@ impl IdentityStore {
     /// - Every group we know about (master key persisted via
     ///   `store_inbound_group_context` or `create_group`), even if no
     ///   messages have arrived yet, so a fresh invite is visible.
-    pub async fn load_conversations(&self, now: Timestamp) -> Result<Vec<ConversationSummary>, StoreError> {
+    pub async fn load_conversations(
+        &self,
+        now: Timestamp,
+        own_did: &str,
+    ) -> Result<Vec<ConversationSummary>, StoreError> {
         let now_ms = now.as_millis();
+        let own_did = own_did.to_string();
         self.conn
             .call(move |conn| {
+                // Unread counts per conversation, computed once over the whole
+                // history (excludes own messages and expired rows, matching
+                // `unread_count`). Indexed by conversation_id so the per-row
+                // attach below is O(1). Conversations with no unread inbound
+                // messages simply don't appear here and default to 0.
+                let mut unread_stmt = conn.prepare(
+                    "SELECT conversation_id, COUNT(*) FROM message_history
+                     WHERE read_at IS NULL AND sender_did != ?1
+                       AND (expire_at IS NULL OR expire_at > ?2)
+                     GROUP BY conversation_id",
+                )?;
+                let unread_by_conv: std::collections::HashMap<String, u64> = unread_stmt
+                    .query_map(rusqlite::params![&own_did, now_ms], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+                    })?
+                    .collect::<Result<_, _>>()?;
                 // 1. Latest non-expired message per conversation. Expired
                 //    messages (docs/03 §5) are excluded so a disappeared message
                 //    never surfaces as a preview, regardless of reaper timing.
@@ -282,8 +303,11 @@ impl IdentityStore {
                 )?;
                 let with_msgs: Vec<ConversationSummary> = stmt
                     .query_map([now_ms], |row| {
+                        let conversation_id: String = row.get(0)?;
+                        let unread_count = unread_by_conv.get(&conversation_id).copied().unwrap_or(0);
                         Ok(ConversationSummary {
-                            conversation_id: row.get(0)?,
+                            conversation_id,
+                            unread_count,
                             last_message: Some(HistoryMessage {
                                 id: row.get(1)?,
                                 conversation_id: row.get(0)?,
@@ -322,6 +346,7 @@ impl IdentityStore {
                     .map(|gid| format!("group-{gid}"))
                     .filter(|cid| !known.contains(cid))
                     .map(|cid| ConversationSummary {
+                        unread_count: unread_by_conv.get(&cid).copied().unwrap_or(0),
                         conversation_id: cid,
                         last_message: None,
                     })
@@ -861,6 +886,12 @@ impl IdentityStore {
 pub struct ConversationSummary {
     pub conversation_id: String,
     pub last_message: Option<HistoryMessage>,
+    /// Number of unread inbound messages in this conversation: rows with
+    /// `read_at IS NULL` whose `sender_did` is not our own, excluding expired
+    /// messages. The chat list renders this directly as the unread badge, so it
+    /// reflects the persisted truth for every conversation — not just the ones
+    /// currently loaded into the UI's in-memory message cache.
+    pub unread_count: u64,
 }
 
 /// A decrypted message stored in the local history.

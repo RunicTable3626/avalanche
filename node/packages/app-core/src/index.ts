@@ -340,6 +340,9 @@ export interface ConversationSummary {
    *  we know about (e.g. groups we've been invited to) that don't yet have
    *  any persisted messages. */
   lastMessage?: StoredMessage;
+  /** Number of unread inbound messages — the chat list's unread badge. Read
+   *  from the persisted store, so it is correct for every conversation. */
+  unreadCount: number;
 }
 
 /**
@@ -632,6 +635,7 @@ const storedMessageToNative = (m: StoredMessage): native.StoredMessageJs => ({
 const conversationSummaryFromNative = (c: native.ConversationSummaryJs): ConversationSummary => ({
   conversationId: c.conversationId,
   lastMessage: c.lastMessage ? storedMessageFromNative(c.lastMessage) : undefined,
+  unreadCount: c.unreadCount,
 });
 
 const deliveryStatusUpdateFromNative = (u: native.DeliveryStatusUpdateJs): DeliveryStatusUpdate => ({

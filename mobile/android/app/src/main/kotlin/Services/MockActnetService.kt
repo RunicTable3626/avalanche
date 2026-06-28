@@ -138,12 +138,14 @@ class MockAppCore(
         val snapshot = lock.withLock { storedMessages.toMap() }
         return snapshot.mapNotNull { (convId, msgs) ->
             val last = msgs.maxByOrNull { it.sentAtMs } ?: return@mapNotNull null
+            val unread = msgs.count { it.readAtMs == null }.toULong()
             ConversationSummaryFfi(
                 conversationId = convId,
                 groupTitle = null,
                 lastMessage = last,
                 isRequest = false,
                 isBlocked = false,
+                unreadCount = unread,
             )
         }.sortedByDescending { it.lastMessage?.sentAtMs ?: 0L }
     }

@@ -217,6 +217,10 @@ impl From<StoredMessageJs> for StoredMessageFfi {
 pub struct ConversationSummaryJs {
     pub conversation_id: String,
     pub last_message: Option<StoredMessageJs>,
+    /// Number of unread inbound messages — the chat list's unread badge.
+    /// `i64` (not `u64`) to surface as a plain JS number rather than a BigInt,
+    /// matching the existing `unread_count` accessor.
+    pub unread_count: i64,
 }
 
 impl From<ConversationSummaryFfi> for ConversationSummaryJs {
@@ -224,6 +228,7 @@ impl From<ConversationSummaryFfi> for ConversationSummaryJs {
         Self {
             conversation_id: c.conversation_id,
             last_message: c.last_message.map(Into::into),
+            unread_count: c.unread_count as i64,
         }
     }
 }

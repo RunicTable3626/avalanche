@@ -154,12 +154,71 @@ async fn load_conversations_one_row_per_convo_newest_first() {
         }).await.unwrap();
     }
 
-    let convs = store.load_conversations(Timestamp(2000)).await.unwrap();
+    let convs = store.load_conversations(Timestamp(2000), "did:plc:me").await.unwrap();
     assert_eq!(convs.len(), 2, "one row per distinct conversation_id");
     assert_eq!(convs[0].conversation_id, "convA");
     assert_eq!(convs[0].last_message.as_ref().unwrap().body, "newest A");
     assert_eq!(convs[1].conversation_id, "convB");
     assert_eq!(convs[1].last_message.as_ref().unwrap().body, "only B");
+}
+
+#[tokio::test]
+async fn load_conversations_reports_unread_count() {
+    use store::messages::HistoryMessage;
+    use types::Timestamp;
+    let store = DeviceStore::open_in_memory().await.unwrap();
+
+    let me = "did:plc:me";
+    let bob = "did:plc:bob";
+    let now = Timestamp(5000);
+
+    // convA: two unread inbound, one read inbound, one own (always read).
+    // convB: all read. convC: one read inbound whose disappearing-messages timer
+    // has already elapsed, so the whole conversation drops out of the list.
+    // (An *unread* message can never be expired — the countdown only starts on
+    // read — so "expired unread" is not a representable state.)
+    let rows: &[(&str, &str, &str, i64, Option<i64>, i64)] = &[
+        // (id, conv, sender, sent_at, read_at, expire_timer_secs)
+        ("a1", "convA", bob, 100, None, 0),
+        ("a2", "convA", bob, 200, None, 0),
+        ("a3", "convA", bob, 300, Some(350), 0),
+        ("a4", "convA", me, 400, Some(400), 0),
+        ("b1", "convB", bob, 100, Some(150), 0),
+        // read at 200 with a 1s timer => expire_at = 1200, well before `now`.
+        ("c1", "convC", bob, 100, Some(200), 1),
+    ];
+    for (id, conv, sender, sent_at, read_at, expire_timer_secs) in rows.iter().copied() {
+        store.save_message(&HistoryMessage {
+            id: id.into(),
+            conversation_id: conv.into(),
+            sender_did: sender.into(),
+            body: "x".into(),
+            sent_at: Timestamp(sent_at),
+            edited_at: None,
+            read_at: read_at.map(Timestamp),
+            delivery_status: 1,
+            edit_count: 0,
+            deleted_at: None,
+            kind: 0,
+            metadata: None,
+            expire_timer_secs,
+            expire_at: None, // computed by save_message from read_at + timer
+        }).await.unwrap();
+    }
+
+    let convs = store.load_conversations(now, me).await.unwrap();
+    let by_id: std::collections::HashMap<_, _> =
+        convs.iter().map(|c| (c.conversation_id.as_str(), c.unread_count)).collect();
+    assert_eq!(by_id.get("convA"), Some(&2), "two unread inbound; read + own excluded");
+    assert_eq!(by_id.get("convB"), Some(&0), "fully-read conversation");
+    // convC's only message is expired, so it has no surfaced row at all.
+    assert!(!by_id.contains_key("convC"), "expired-only conversation drops out");
+
+    // After marking convA read, the count goes to zero.
+    store.mark_messages_read("convA", now, now).await.unwrap();
+    let convs = store.load_conversations(now, me).await.unwrap();
+    let a = convs.iter().find(|c| c.conversation_id == "convA").unwrap();
+    assert_eq!(a.unread_count, 0, "marking read clears the unread count");
 }
 
 #[tokio::test]

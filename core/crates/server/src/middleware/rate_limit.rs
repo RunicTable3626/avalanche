@@ -6,7 +6,13 @@ pub const ACTION_UPLOAD_PREKEYS: &str = "upload_prekeys";
 pub const ACTION_FETCH_BUNDLE: &str = "fetch_bundle";
 pub const ACTION_UPDATE_RECOVERY: &str = "update_recovery";
 pub const ACTION_UPDATE_PROFILE: &str = "update_profile";
+pub const ACTION_ATTACHMENT_ALLOCATE: &str = "attachment_allocate";
 pub const ACTION_ABUSE_REPORT: &str = "abuse_report";
+
+/// Attachment allocation request-rate limit (docs/35). The bytes-per-hour cap
+/// is enforced separately by summing recent rows in the `attachments` table.
+pub const LIMIT_ATTACHMENT_ALLOCATE: i32 = 120;
+pub const WINDOW_ATTACHMENT_ALLOCATE: i64 = 3600;
 pub const ACTION_STORAGE_PULL: &str = "storage_pull";
 pub const ACTION_STORAGE_PUSH: &str = "storage_push";
 pub const ACTION_STORAGE_SNAPSHOT_GET: &str = "storage_snapshot_get";

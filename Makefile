@@ -196,8 +196,13 @@ ci: check clippy test-server
 # Local services
 # ----------------------------------------------------------------------------
 
+# Attachment blobs (docs/35) live under the repo-root dev-state/ tree on dev
+# machines (gitignored, wiped by `make db-reset`), alongside the bots' SQLCipher
+# stores. The path is absolute because the server runs with cwd=core/. We
+# override here because the server's default targets the production state dir
+# (/var/lib/avalanche/attachments), which doesn't exist on a dev box.
 dev:
-	cd core && ACTNET_ALLOW_DEV_DB=1 ACTNET_DISABLE_IP_RATE_LIMITS=1 REGISTRATION_SHARED_SECRET=$(or $(REGISTRATION_SHARED_SECRET),CHANGEME) RUST_LOG=tower_http=debug,server=debug cargo run -p server
+	cd core && ACTNET_ALLOW_DEV_DB=1 ACTNET_DISABLE_IP_RATE_LIMITS=1 REGISTRATION_SHARED_SECRET=$(or $(REGISTRATION_SHARED_SECRET),CHANGEME) ATTACHMENT_BLOB_DIR=$(CURDIR)/dev-state/attachments RUST_LOG=tower_http=debug,server=debug cargo run -p server
 
 db-up:
 	docker compose -f infra/docker-compose.yml up -d --wait

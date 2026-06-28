@@ -14,6 +14,7 @@ use crate::state::AppState;
 
 mod abuse;
 mod accounts;
+mod attachments;
 mod admin;
 mod auth;
 mod devices;
@@ -55,4 +56,5 @@ pub fn router() -> Router<AppState> {
         .merge(health::routes())
         .merge(admin::routes())
         .merge(abuse::routes())
+        .merge(attachments::routes())
 }

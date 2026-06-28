@@ -787,9 +787,11 @@ dependencies = [
  "libsignal-protocol",
  "partial-default",
  "poksho",
+ "proptest",
  "rand 0.9.4",
  "serde",
  "sha2",
+ "signal-crypto",
  "test-utils",
  "thiserror 2.0.18",
  "tokio",
@@ -3779,6 +3781,7 @@ dependencies = [
 name = "server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "axum-extra",
  "base32",

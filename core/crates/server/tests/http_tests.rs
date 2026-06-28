@@ -72,6 +72,13 @@ async fn test_state_with(
         registration_mode,
         registration_shared_secret,
         privacy_policy_url: None,
+        attachment_blob_dir: std::env::temp_dir()
+            .join("av-test-attachment-blobs")
+            .to_string_lossy()
+            .into_owned(),
+        attachment_blob_ttl_secs: 45 * 86400,
+        attachment_max_size_bytes: 100 * 1024 * 1024,
+        attachment_bytes_per_hour: 500 * 1024 * 1024,
     };
     // Load (or seed) the group crypto bundle exactly as `main.rs` does — a
     // bincoded `GroupCryptoBundle` under the current version. Seeding the raw
@@ -534,6 +541,135 @@ async fn delete_account_removes_all_data() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "deleted session token must return 401");
+}
+
+#[tokio::test]
+async fn attachment_allocate_upload_download_delete_round_trip() {
+    let app = routes::router().with_state(test_state().await);
+    let (_did, token) = register_and_get_token(&app).await;
+
+    let ciphertext = vec![0xABu8; 4096];
+
+    // 1. Allocate a slot.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/attachments")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({ "size_bytes": ciphertext.len() }))
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let attachment_id = body["attachment_id"].as_str().unwrap().to_string();
+    assert!(body["expires_at_ms"].as_i64().unwrap() > 0);
+
+    // 2. Upload the ciphertext.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/attachments/{attachment_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(ciphertext.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // 3. Download the ciphertext — exact bytes back. No Authorization header:
+    //    download is unauthenticated, the unguessable id is the capability.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/attachments/{attachment_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let got = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(got.as_ref(), ciphertext.as_slice());
+
+    // 4. Range request returns 206 with the requested slice (also unauth'd).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/attachments/{attachment_id}"))
+                .header("range", "bytes=0-9")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    let part = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(part.len(), 10);
+
+    // 5. Delete, then download → 404.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/attachments/{attachment_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/attachments/{attachment_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn attachment_allocate_rejects_oversize() {
+    let app = routes::router().with_state(test_state().await);
+    let (_did, token) = register_and_get_token(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/attachments")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({ "size_bytes": 200i64 * 1024 * 1024 }))
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

@@ -121,6 +121,7 @@ Each subsystem has its own CLAUDE.md with workflow and conventions specific to t
 - **Cite sources.** When making a claim about the codebase (what a module does, whether something exists, how a pattern works), cite the file and line range (e.g. `path/to/file.rs:42-57`). Do not state things as fact without having read them. Do not rely solely on CLAUDE.md descriptions — read the actual source and cite it.
 - **Spec before code.** Before writing implementation code for a new feature, write a spec covering what changes, what files are touched, what assumptions are being made, and a test plan. Use `/new-feature` to run the full workflow. Wait for explicit approval before implementing.
 - **Assumptions audit.** After completing an implementation, list what was assumed but not explicitly verified.
+- **Strong config defaults, not mandatory vars.** A new config value should have a default that just works for the base case — the documented/canonical deployment — so nothing has to be set for a standard install. Derive the default from how we actually deploy (e.g. the `avalanche.service` systemd `WorkingDirectory`/`ReadWritePaths`, the `install.sh` paths), have the deploy ensure it (create the dir, set ownership), and let other deployments take their cue and override via env. Dev overrides in `dev.py` / the `Makefile` dev targets. Reserve "refuse to start unless set" for things with no safe default at all (real secrets) — not for paths/sizes/limits where a sensible default exists.
 
 ## UniFFI / Mobile Workflow
 

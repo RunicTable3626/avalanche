@@ -47,8 +47,42 @@ message ContentMessage {
 
 message TextMessage {
   string body = 1;
-  // Future: attachments, mentions, reply_to, formatting.
-  reserved 2 to 10;
+  // Zero or more end-to-end-encrypted attachment pointers (docs/35). A
+  // captioned photo, an album, or a "file + caption" is one TextMessage with a
+  // `body` and one or more pointers — no separate media-message type.
+  repeated AttachmentPointer attachments = 2;
+  // Future: mentions, reply_to, formatting.
+  reserved 3 to 10;
+}
+
+// Pointer to an end-to-end-encrypted attachment blob (docs/35-attachments.md).
+// The blob travels out-of-band: it is encrypted locally with fresh one-off key
+// material, uploaded to dumb server storage, and referenced here. The server
+// stores only ciphertext and never sees `key`. The recipient downloads from
+// `url`, verifies `digest` against the exact stored bytes BEFORE decrypting,
+// then decrypts with `key` and trims to `size_bytes`.
+//
+// Encryption is AES-256-CBC + HMAC-SHA-256 (encrypt-then-MAC), Signal-exact —
+// deliberately NOT the AES-256-GCM the rest of the app uses for messages, so
+// large media can be verified incrementally as it streams in. The stored blob
+// is `IV(16) ‖ AES-256-CBC(PKCS7(padded_plaintext)) ‖ HMAC-SHA-256(IV ‖ ct)`.
+message AttachmentPointer {
+  string url            = 1;   // full download URL on the hosting homeserver
+  string content_type   = 2;   // MIME
+  bytes  key            = 3;   // 64 bytes: AES-256-CBC key ‖ HMAC-SHA-256 key
+  bytes  digest         = 4;   // SHA-256 over the exact stored ciphertext blob
+  uint64 size_bytes     = 5;   // *unpadded* plaintext size
+
+  // UX metadata (all optional)
+  string file_name      = 6;   // for docs: "minutes-2026-06.pdf"
+  uint32 width          = 7;   // image/video
+  uint32 height         = 8;
+  uint32 duration_ms    = 9;   // audio/video
+  string blurhash       = 10;  // tiny placeholder string (defined; not yet generated)
+  bytes  thumbnail      = 11;  // small inline encrypted preview (downscaled JPEG)
+  string caption        = 12;  // per-attachment, distinct from TextMessage.body
+  uint32 flags          = 13;  // bitset: VOICE_NOTE, GIF, BORDERLESS, ...
+  reserved 14 to 20;
 }
 
 // In-place edit of a prior message (docs/36-message-editing-deletion.md).

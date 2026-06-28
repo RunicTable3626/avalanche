@@ -52,6 +52,41 @@ pub fn spawn_all(state: AppState) {
         },
     ));
 
+    // Attachment blob TTL GC (docs/35): the server can't reference-count
+    // encrypted pointers, so blobs are reclaimed purely by TTL. Delete expired
+    // rows and their on-disk blobs together. Uses `state` (not just `pool`)
+    // because it must reach the blob store.
+    {
+        let pool = state.db.clone();
+        let blob_store = state.blob_store.clone();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                timer.tick().await;
+                let mut conn = match pool.acquire().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!(task = "attachment_expiry", error = %e, "db acquire failed");
+                        continue;
+                    }
+                };
+                match db::attachments::delete_expired(&mut conn).await {
+                    Ok(ids) => {
+                        if !ids.is_empty() {
+                            for id in &ids {
+                                let _ = blob_store.delete(id).await;
+                            }
+                            tracing::info!(count = ids.len(), "expired attachments deleted");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(task = "attachment_expiry", error = %e, "delete_expired failed");
+                    }
+                }
+            }
+        });
+    }
+
     tokio::spawn(run_periodic(
         "session_token_expiry",
         Duration::from_secs(300),

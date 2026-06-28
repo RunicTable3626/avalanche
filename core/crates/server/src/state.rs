@@ -111,6 +111,9 @@ pub struct AppState {
     /// via `server_events` + `GET /v1/admin/events`, so a disconnected bot
     /// misses nothing.
     pub account_joined_subscribers: Arc<RwLock<HashMap<i64, mpsc::UnboundedSender<WsPush>>>>,
+    /// Opaque attachment blob storage (docs/35). LocalFs in the first cut;
+    /// behind a trait so an S3 backend can replace it without protocol change.
+    pub blob_store: Arc<dyn crate::blobstore::BlobStore>,
 }
 
 impl AppState {
@@ -120,6 +123,8 @@ impl AppState {
         zkgroup_secret: ServerSecretParams,
         sender_cert_chain: SenderCertChain,
     ) -> Self {
+        let blob_store: Arc<dyn crate::blobstore::BlobStore> =
+            Arc::new(crate::blobstore::LocalFs::new(config.attachment_blob_dir.clone()));
         Self {
             db,
             config,
@@ -128,6 +133,7 @@ impl AppState {
             zkgroup_secret: Arc::new(zkgroup_secret),
             sender_cert_chain: Arc::new(sender_cert_chain),
             account_joined_subscribers: Arc::new(RwLock::new(HashMap::new())),
+            blob_store,
         }
     }
 }

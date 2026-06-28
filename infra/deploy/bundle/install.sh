@@ -82,6 +82,9 @@ ufw --force enable
 # ---- users + dirs ----
 useradd --system --home /var/lib/avalanche --shell /usr/sbin/nologin avalanche || true
 install -d -o avalanche -g avalanche -m 750 /var/lib/avalanche
+# Attachment blob store (docs/35); the server's default ATTACHMENT_BLOB_DIR.
+# The server would auto-create it, but pre-creating pins the ownership/mode.
+install -d -o avalanche -g avalanche -m 750 /var/lib/avalanche/attachments
 install -d -o root      -g root      -m 755 "$AV_ROOT" "$DEPLOYMENTS"
 install -d -o avalanche -g avalanche -m 750 "$SHARED"
 install -d -o root      -g avalanche -m 750 "$ETC"

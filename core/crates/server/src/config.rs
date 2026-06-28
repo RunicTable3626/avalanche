@@ -91,6 +91,25 @@ pub struct Config {
     /// auto-disables the moment any Project is granted `registration.gatekeeper`.
     /// Set via `REGISTRATION_SHARED_SECRET`. Unset = no shared-secret path.
     pub registration_shared_secret: Option<String>,
+    /// Directory for the local-filesystem attachment blob store (docs/35). The
+    /// default `/var/lib/avalanche/attachments` works out of the box on the
+    /// documented deploy: the `avalanche.service` unit runs as the `avalanche`
+    /// user with `WorkingDirectory`/`ReadWritePaths=/var/lib/avalanche` (which
+    /// `install.sh` creates), and the store auto-creates the `attachments`
+    /// subdir. Other deployments take their cue from that path; the dev
+    /// launchers (`make dev`, `dev.py`) override `ATTACHMENT_BLOB_DIR` to the
+    /// repo-root `dev-state/attachments` tree.
+    pub attachment_blob_dir: String,
+    /// Attachment blob TTL in seconds (docs/35); the GC task deletes blobs past
+    /// this. Default ~45 days — deliberately longer than message-queue
+    /// retention. Set via `ATTACHMENT_BLOB_TTL_SECS`.
+    pub attachment_blob_ttl_secs: i64,
+    /// Per-attachment ciphertext size cap in bytes. Default 100 MB. Set via
+    /// `ATTACHMENT_MAX_SIZE_BYTES`.
+    pub attachment_max_size_bytes: i64,
+    /// Rolling per-account upload quota in bytes per hour. Default 500 MB. Set
+    /// via `ATTACHMENT_BYTES_PER_HOUR`.
+    pub attachment_bytes_per_hour: i64,
 }
 
 impl Config {
@@ -147,6 +166,20 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
             privacy_policy_url: std::env::var("PRIVACY_POLICY_URL").ok().filter(|s| !s.is_empty()),
+            attachment_blob_dir: std::env::var("ATTACHMENT_BLOB_DIR")
+                .unwrap_or_else(|_| "/var/lib/avalanche/attachments".to_string()),
+            attachment_blob_ttl_secs: std::env::var("ATTACHMENT_BLOB_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(45 * 86400),
+            attachment_max_size_bytes: std::env::var("ATTACHMENT_MAX_SIZE_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100 * 1024 * 1024),
+            attachment_bytes_per_hour: std::env::var("ATTACHMENT_BYTES_PER_HOUR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(500 * 1024 * 1024),
         }
     }
 

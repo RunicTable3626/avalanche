@@ -170,7 +170,9 @@ def main():
         # exercise the same admission path prod uses. Clients present the shared
         # secret below; testbot/adminbot read DEV_SHARED_SECRET to build a
         # bootstrap token. Override REGISTRATION_MODE=open for quick hacking.
-        env={**os.environ, "PROJECTS": json.dumps(projects_json), "RUST_LOG": "tower_http=debug,server=debug", "ACTNET_ALLOW_DEV_DB": "1", "ACTNET_DISABLE_IP_RATE_LIMITS": "1", "REGISTRATION_SHARED_SECRET": DEV_SHARED_SECRET, "PRIVACY_POLICY_URL": privacy_policy_url},
+        # Attachment blobs (docs/35) land under the repo-root dev-state/ tree
+        # (gitignored, wiped by `make db-reset`), alongside the bots' stores.
+        env={**os.environ, "PROJECTS": json.dumps(projects_json), "RUST_LOG": "tower_http=debug,server=debug", "ACTNET_ALLOW_DEV_DB": "1", "ACTNET_DISABLE_IP_RATE_LIMITS": "1", "REGISTRATION_SHARED_SECRET": DEV_SHARED_SECRET, "PRIVACY_POLICY_URL": privacy_policy_url, "ATTACHMENT_BLOB_DIR": os.path.join(REPO_DIR, "dev-state", "attachments")},
     ))
 
     for project, port in project_launches:

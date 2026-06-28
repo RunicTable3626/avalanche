@@ -39,6 +39,7 @@
 //! - Private keys (never leave the client device)
 //! - Group membership lists (managed client-side in encrypted group state)
 
+pub mod blobstore;
 pub mod config;
 pub mod db;
 pub mod error;

@@ -61,6 +61,13 @@ async fn test_state() -> AppState {
         registration_mode: server::config::RegistrationMode::Open,
         registration_shared_secret: None,
         privacy_policy_url: None,
+        attachment_blob_dir: std::env::temp_dir()
+            .join("av-test-attachment-blobs")
+            .to_string_lossy()
+            .into_owned(),
+        attachment_blob_ttl_secs: 45 * 86400,
+        attachment_max_size_bytes: 100 * 1024 * 1024,
+        attachment_bytes_per_hour: 500 * 1024 * 1024,
     };
     // Load (or seed) the group crypto bundle exactly as `main.rs` does — a
     // bincoded `GroupCryptoBundle` under the current version. Seeding the raw

@@ -139,6 +139,7 @@ The shell is the only WebView with Tauri command access. Keep these invariants:
 - Strict TypeScript (`strict: true` in `tsconfig.json`, no `any`)
 - All message content received as typed data from Tauri commands — never parse raw bytes in the frontend
 - Minimal Tauri command surface: only declare commands the shell legitimately needs in `tauri.conf.json` capabilities
+- **Project webviews are IPC-isolated by capability scope, and that scope is the only thing isolating them.** A project page (`new WebviewWindow("project-*", …)`) loads untrusted remote content. It can't reach app-core IPC because (a) the `default` capability scopes `allow-all`/core to `windows: ["main"]` + `local: true`, so a `project-*` label and a remote URL are both denied by the ACL, and (b) `withGlobalTauri: false` means no `__TAURI__` bridge is injected. Never broaden that capability's window scope to a glob, add a `remote` block, or set `withGlobalTauri: true` without review. After any change to capabilities or webview creation, **verify isolation empirically rather than from the config read**: open a project window and confirm `invoke('ping')` from its console is rejected (`ping not allowed on window project-..., allowed on: [windows: main, URL: local]`).
 
 ---
 

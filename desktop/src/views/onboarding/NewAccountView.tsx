@@ -8,6 +8,7 @@ interface Props {
   inviteInfo: InviteInfo;
   token: string;
   showRecoverLink: boolean;
+  onRecover?: () => void;
   onBack?: () => void;
 }
 
@@ -60,6 +61,11 @@ export default function NewAccountView(props: Props) {
           {isCreating() && <span class="spinner" />}
           {isCreating() ? "Creating…" : "Create Identity"}
         </button>
+        {props.showRecoverLink && props.onRecover && !isCreating() && (
+          <button class="back-btn na-recover" onClick={props.onRecover}>
+            Recover an existing identity
+          </button>
+        )}
         {props.onBack && !isCreating() && (
           <button class="back-btn na-back" onClick={props.onBack}><FiArrowLeft size={14} />Back</button>
         )}

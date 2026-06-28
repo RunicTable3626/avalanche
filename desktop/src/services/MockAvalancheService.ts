@@ -432,6 +432,15 @@ export class MockAvalancheService implements AvalancheService {
   async hasRecovery(): Promise<boolean> { return false; }
   async updateRecoveryBlob(_prfOutput: number[], _servers: string[]): Promise<void> {}
   async homeServer(): Promise<string> { return MOCK_SERVER_URL; }
+  async generateRecoveryPhrase(): Promise<string> {
+    return "ripple ladder cactus dove velvet anchor maple jungle orbit pencil quartz salmon";
+  }
+  async recoveryPhraseToSeed(_phrase: string): Promise<number[]> {
+    return Array.from({ length: 32 }, (_, i) => i);
+  }
+  async deriveDidFromPasskey(_prfOutput: number[], _signupServerUrl: string): Promise<string> {
+    return this.mockDid || makeMockDid();
+  }
   async contactDisplayName(did: string): Promise<string> {
     if (did === "did:plc:organizer") return "Jamie (Organizer)";
     return "";

@@ -84,6 +84,9 @@ export interface AvalancheService {
   hasRecovery(): Promise<boolean>;
   updateRecoveryBlob(prfOutput: number[], servers: string[]): Promise<void>;
   homeServer(): Promise<string>;
+  generateRecoveryPhrase(): Promise<string>;
+  recoveryPhraseToSeed(phrase: string): Promise<number[]>;
+  deriveDidFromPasskey(prfOutput: number[], signupServerUrl: string): Promise<string>;
   contactDisplayName(did: string): Promise<string>;
   getAccountInfo(did: string): Promise<import("../bindings").AccountInfoFfi>;
   refreshContactProfile(did: string): Promise<boolean>;

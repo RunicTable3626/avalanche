@@ -129,6 +129,27 @@ Before closing any branch that adds or changes Desktop UI:
 
 ---
 
+## Passkey / recovery divergence (sanctioned)
+
+Desktop has **no WebAuthn passkey / PRF authenticator path**. This is a deliberate
+divergence from iOS, not a gap to close:
+
+- **Signup is single-shot.** `createAccount` passes an **empty PRF output** (`[]`)
+  to `AppCore::create_account`. iOS's two-stage `PreparedAccount` handle
+  (`prepareAccount` / `finalizeAccount`, which threads a real passkey PRF output
+  between the two calls) is **not** ported — desktop has no credential to thread.
+  This resolves the former `AppContext.tsx` PRF TODO.
+- **Recovery uses a 12-word phrase, not a passkey.** Setup
+  (`RecoveryPhraseSetupView`) generates a BIP39 phrase, then derives the 32-byte
+  seed (`recoveryPhraseToSeed`) and uploads the recovery blob
+  (`updateRecoveryBlob`) — the seed is the PRF-output stand-in. Restore
+  (`RecoveryExplainerView` → `RecoveryConsoleView`) recomputes the DID from the
+  seed + home-server URL (`deriveDidFromPasskey`) and calls `recoverFromPhrase`.
+  iOS's `PasskeyExplainerView` and passkey recovery branch are intentionally
+  omitted on desktop.
+
+If a desktop WebAuthn/PRF path is ever added, revisit both points above.
+
 ## Security constraints
 
 The shell is the only WebView with Tauri command access. Keep these invariants:

@@ -239,12 +239,12 @@ export function AppProvider(props: { children: JSX.Element }) {
    * need to fan out over `store.accounts` / merge per-account state rather than
    * just swap which account this returns.
    */
-  function getSoleAccountId(): string {
-    // TODO(robustness): return `null` instead of `""` so callers can
-    // distinguish "no account" from a valid empty-string DID. An empty
-    // string as sentinel could collide with real data in edge cases
-    // (stale event loop after logout).
-    return store.accounts[0]?.id ?? "";
+  function getSoleAccountId(): string | null {
+    // Returns `null` (not `""`) when no account is signed in, so callers can
+    // distinguish "no account" from a valid DID — an empty-string sentinel
+    // could collide with real data in edge cases (e.g. a stale event loop
+    // after logout).
+    return store.accounts[0]?.id ?? null;
   }
 
   function getServerUrl(accountId: string): string {
@@ -628,6 +628,13 @@ export function AppProvider(props: { children: JSX.Element }) {
 
     const summaries = await service().loadConversations().catch(() => [] as ConversationSummaryFfi[]);
     const accountId = getSoleAccountId();
+    if (accountId === null) {
+      // No account signed in — nothing to load. Reset the guard so a later load
+      // (once an account enters) isn't permanently suppressed.
+      loadedConversations.value = false;
+      setStore("conversations", []);
+      return;
+    }
     const serverUrl = getServerUrl(accountId);
 
     const convs: Conversation[] = summaries.map((s) => {
@@ -1479,7 +1486,11 @@ export function AppProvider(props: { children: JSX.Element }) {
 
     // Apply phase — run once for the whole batch.
     const accountId = getSoleAccountId();
-    for (const m of messages) handleIncomingMessage(m, accountId);
+    // No account (e.g. a stale event-loop drain mid-logout): can't attribute
+    // incoming messages to a conversation, so skip them.
+    if (accountId !== null) {
+      for (const m of messages) handleIncomingMessage(m, accountId);
+    }
     if (receiptUpdates.length) applyDeliveryStatusUpdates(receiptUpdates);
     if (needsConversationReload) void reloadConversations();
   }

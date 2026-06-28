@@ -47,10 +47,17 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -242,7 +249,7 @@ private fun BubbleContent(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 FlowMessageText(
-                    text = "This message was deleted",
+                    text = AnnotatedString("This message was deleted"),
                     textStyle = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
                     textColor = AvalancheColors.Muted,
                     showMetadata = showMetadata,
@@ -265,7 +272,7 @@ private fun BubbleContent(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             FlowMessageText(
-                text = message.body,
+                text = linkify(message.body),
                 textStyle = MaterialTheme.typography.bodyMedium,
                 textColor = fgColor,
                 showMetadata = showMetadata,
@@ -273,6 +280,42 @@ private fun BubbleContent(
             )
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hyperlinking
+// ---------------------------------------------------------------------------
+
+private val URL_REGEX = Regex("""(https?://|www\.)\S+""", RegexOption.IGNORE_CASE)
+
+/**
+ * Turn URLs in [body] into tappable links (Compose opens them via the
+ * `LocalUriHandler`). Mirrors iOS's `NSDataDetector` linkification; trailing
+ * punctuation is excluded from the link, and bare `www.` hosts get an `http://`
+ * scheme so they resolve.
+ */
+fun linkify(body: String): AnnotatedString = buildAnnotatedString {
+    var idx = 0
+    for (m in URL_REGEX.findAll(body)) {
+        append(body.substring(idx, m.range.first))
+        val raw = m.value
+        val trailing = raw.takeLastWhile { it in ".,;:!?)]}\"'" }
+        val linkText = raw.dropLast(trailing.length)
+        if (linkText.isNotEmpty()) {
+            val url = if (linkText.startsWith("www", ignoreCase = true)) "http://$linkText" else linkText
+            withLink(
+                LinkAnnotation.Url(
+                    url,
+                    TextLinkStyles(SpanStyle(textDecoration = TextDecoration.Underline)),
+                )
+            ) {
+                append(linkText)
+            }
+        }
+        append(trailing)
+        idx = m.range.last + 1
+    }
+    append(body.substring(idx))
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +331,7 @@ private fun BubbleContent(
  */
 @Composable
 private fun FlowMessageText(
-    text: String,
+    text: AnnotatedString,
     textStyle: TextStyle,
     textColor: Color,
     showMetadata: Boolean,

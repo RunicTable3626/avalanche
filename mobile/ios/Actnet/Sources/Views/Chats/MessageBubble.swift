@@ -105,9 +105,32 @@ struct MessageBubble: View {
     private var contentText: Text {
         let base = message.isDeleted
             ? Text("This message was deleted").italic()
-            : Text(message.body)
+            : Text(Self.linkified(message.body))
         guard showMetadata else { return base }
         return base + Text("\u{2007}\u{2007}") + metadataText(reserved: true)
+    }
+
+    /// Turn URLs in `body` into tappable links. SwiftUI renders an
+    /// `AttributedString` carrying `.link` attributes as live links (a tap opens
+    /// them via the environment's `openURL`); the `Text` still concatenates into
+    /// the metadata-flow trick above. Detection uses `NSDataDetector`, the same
+    /// engine the system uses elsewhere.
+    static func linkified(_ body: String) -> AttributedString {
+        var attr = AttributedString(body)
+        guard !body.isEmpty,
+              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        else { return attr }
+        let full = NSRange(location: 0, length: (body as NSString).length)
+        detector.enumerateMatches(in: body, range: full) { match, _, _ in
+            guard let match, let url = match.url,
+                  let r = Range(match.range, in: body),
+                  let lo = AttributedString.Index(r.lowerBound, within: attr),
+                  let hi = AttributedString.Index(r.upperBound, within: attr)
+            else { return }
+            attr[lo..<hi].link = url
+            attr[lo..<hi].underlineStyle = .single
+        }
+        return attr
     }
 
     @ViewBuilder

@@ -10,11 +10,17 @@ export async function openProjectWindow(
   token: string
 ): Promise<boolean> {
   const label = `project-${crypto.randomUUID().slice(0, 8)}`;
-  // Pass the token via hash fragment rather than query string so it is
-  // never sent to the server, written to access logs, or leaked in Referer
-  // headers / browser history. The project page reads it from
-  // `window.location.hash`.
-  const url = `${project.url}#token=${encodeURIComponent(token)}`;
+  // Pass the token as a query parameter, matching the iOS reference
+  // (mobile/ios/.../NetworkView.swift) and the project interface contract: a
+  // project that renders server-side needs the token in the request the server
+  // sees, which a URL hash fragment is not.
+  // TODO(security, cross-platform): a query-string token is written to the
+  // project server's access logs, can leak via Referer, and persists in
+  // history. A hash fragment avoids that but is invisible to server-rendered
+  // projects, so changing it is a protocol-wide decision (all platforms + the
+  // project contract) to make with the project owner — not a desktop-only
+  // change. See docs/02-todos-deferred.md.
+  const url = `${project.url}?token=${encodeURIComponent(token)}`;
 
   // TODO(Day 4): intercept navigation to go.theavalanche.net and close the
   // modal / emit a deeplink event.

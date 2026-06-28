@@ -194,7 +194,7 @@ export function AppProvider(props: { children: JSX.Element }) {
    * need to fan out over `store.accounts` / merge per-account state rather than
    * just swap which account this returns.
    */
-  function getActiveAccountId(): string {
+  function getSoleAccountId(): string {
     // TODO(robustness): return `null` instead of `""` so callers can
     // distinguish "no account" from a valid empty-string DID. An empty
     // string as sentinel could collide with real data in edge cases
@@ -468,7 +468,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     loadedConversations.value = true;
 
     const summaries = await service().loadConversations().catch(() => [] as ConversationSummaryFfi[]);
-    const accountId = getActiveAccountId();
+    const accountId = getSoleAccountId();
     const serverUrl = getServerUrl(accountId);
 
     const convs: Conversation[] = summaries.map((s) => {
@@ -837,7 +837,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     }
 
     // Apply phase — run once for the whole batch.
-    const accountId = getActiveAccountId();
+    const accountId = getSoleAccountId();
     for (const m of messages) handleIncomingMessage(m, accountId);
     if (receiptUpdates.length) applyDeliveryStatusUpdates(receiptUpdates);
     if (needsConversationReload) void reloadConversations();
@@ -1067,7 +1067,7 @@ export function AppProvider(props: { children: JSX.Element }) {
   // layer a second backoff scheme on top of the core's own reconnect logic).
   function startConnectionLoop() {
     if (connLoopRunning) return;
-    const accountId = getActiveAccountId();
+    const accountId = getSoleAccountId();
     // Guard against empty DID: prevents storing connection state at key ""
     // which would pollute the aggregate with a phantom connection.  This
     // also catches the transient state after resetSession clears accounts

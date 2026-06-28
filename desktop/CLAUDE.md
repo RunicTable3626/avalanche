@@ -67,9 +67,13 @@ initiates every fetch.
 ## Desktop Workflow
 
 ```bash
-cd desktop && cargo tauri dev    # dev mode with hot reload
-cd desktop && cargo tauri build  # package for current platform
+cd desktop && npm run tauri dev    # dev mode with hot reload (or: make dev-desktop)
+cd desktop && npm run tauri build  # package for current platform
 ```
+
+The Tauri CLI is the npm-local `@tauri-apps/cli` (a devDependency), invoked via
+the `tauri` package script. `cargo tauri ...` only works if you've separately
+`cargo install tauri-cli`, which this repo does not assume.
 
 FFI constraints:
 - Tauri commands are async-capable — use `async fn` for Rust calls that block

@@ -138,6 +138,27 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_deep_link::init())
+        .setup(|app| {
+            use tauri::Emitter;
+            use tauri_plugin_deep_link::DeepLinkExt;
+
+            // Forward every opened deep link to the frontend as `avalanche-deeplink`
+            // (the raw URL string). AppContext owns parsing/routing — see its
+            // handleDeepLink (conversation/<did>, i/<token>). Fires for cold launch
+            // and while running. The frontend listener is the single consumer.
+            let handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    let _ = handle.emit("avalanche-deeplink", url.to_string());
+                }
+            });
+
+            // Best-effort runtime registration of the avalanche:// scheme — needed
+            // for dev on Windows/Linux where no installer has registered it. A
+            // failure here is non-fatal (e.g. already registered).
+            let _ = app.deep_link().register_all();
+            Ok(())
+        })
         .manage(AppState {
             app: Mutex::new(None),
         })

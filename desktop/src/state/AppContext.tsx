@@ -8,6 +8,7 @@ import {
 } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { load as loadStore } from "@tauri-apps/plugin-store";
+import { listen } from "@tauri-apps/api/event";
 import type { Account, Conversation, InviteInfo, ServerInfo } from "../models";
 import { displayHost } from "../lib/format";
 import { DeliveryStatus, type Message } from "../models/Message";
@@ -328,6 +329,16 @@ export function AppProvider(props: { children: JSX.Element }) {
     } catch {}
   })();
 
+  // ── Deep-link listener ────────────────────────────────────────────────────
+  // Single consumer of `avalanche-deeplink` (emitted by the Rust deep-link
+  // plugin, see src-tauri/src/lib.rs). OnboardingFlow's pendingInviteToken
+  // effect still drives onboarding navigation for invite tokens.
+  let deeplinkUnlisten: (() => void) | undefined;
+  listen<string>("avalanche-deeplink", (ev) => handleDeepLink(ev.payload))
+    .then((un) => { deeplinkUnlisten = un; })
+    .catch(() => { /* Tauri event API unavailable (browser/test) */ });
+  onCleanup(() => deeplinkUnlisten?.());
+
   // ── Account lifecycle ─────────────────────────────────────────────────────
 
   // Shared completion step for every onboarding path: resets the conversation
@@ -565,6 +576,86 @@ export function AppProvider(props: { children: JSX.Element }) {
 
   function generateRecoveryPhrase(): Promise<string> {
     return service().generateRecoveryPhrase();
+  }
+
+  // ── Deep links (T61) ────────────────────────────────────────────────────────
+
+  // Parse a deep-link URL into (action, arg), accepting both the custom
+  // `avalanche://<action>/<arg>` scheme (what the desktop OS launches) and the
+  // universal-link form `https://go.theavalanche.net/<action>/<arg>` (iOS parity).
+  function parseDeepLink(raw: string): { action: string; arg: string } | null {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return null;
+    }
+    let segments: string[];
+    if (url.protocol === "avalanche:") {
+      // avalanche://a/b puts the first segment in `host`; the triple-slash form
+      // avalanche:///a/b puts everything in the path. Handle both.
+      segments = [url.host, ...url.pathname.split("/")].filter(Boolean);
+    } else if (url.host === "go.theavalanche.net") {
+      segments = url.pathname.split("/").filter(Boolean);
+    } else {
+      return null;
+    }
+    if (segments.length < 2) return null;
+    return { action: segments[0], arg: segments.slice(1).join("/") };
+  }
+
+  // Decode a base64url invite token ({s:serverUrl,d:inviterDid}) — the decode
+  // side of lib/format.makeInviteToken, matching iOS handleDeepLink.
+  function decodeInviteToken(
+    token: string
+  ): { serverUrl: string; inviterDid: string | null } | null {
+    try {
+      const b64 = token.replace(/-/g, "+").replace(/_/g, "/");
+      const obj = JSON.parse(atob(b64)) as { s?: unknown; d?: unknown };
+      if (typeof obj.s !== "string") return null;
+      return { serverUrl: obj.s, inviterDid: typeof obj.d === "string" ? obj.d : null };
+    } catch {
+      return null;
+    }
+  }
+
+  const trimSlashes = (s: string) => s.replace(/\/+$/, "");
+
+  // Route a deep link like iOS AppState.handleDeepLink: open a DM for
+  // conversation/<did>, and for i/<token> jump straight to the inviter's DM if
+  // already on that server, else hand the token to onboarding.
+  function handleDeepLink(raw: string) {
+    const parsed = parseDeepLink(raw);
+    if (!parsed) return;
+    const { action, arg } = parsed;
+
+    if (action === "conversation") {
+      const accountId = getSoleAccountId();
+      if (!arg || accountId === null) return;
+      const conv = findOrCreateDMConversation(arg, accountId);
+      setStore("selectedTab", "chats");
+      setSelectedConversationId(conv.id);
+      return;
+    }
+
+    if (action === "i" || action === "invite") {
+      const token = arg;
+      const decoded = decodeInviteToken(token);
+      if (decoded) {
+        const account = store.accounts.find((a) =>
+          a.servers.some((s) => trimSlashes(s.url) === trimSlashes(decoded.serverUrl))
+        );
+        if (account && decoded.inviterDid) {
+          // Already on this server — open the inviter's DM directly.
+          const conv = findOrCreateDMConversation(decoded.inviterDid, account.id);
+          setStore("selectedTab", "chats");
+          setSelectedConversationId(conv.id);
+          return;
+        }
+      }
+      // Not on the server (or undecodable) → start onboarding with the token.
+      setStore("pendingInviteToken", token);
+    }
   }
 
   // Recovery SETUP: derive the 32-byte seed from the freshly-generated phrase and

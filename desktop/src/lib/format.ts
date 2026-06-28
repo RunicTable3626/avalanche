@@ -14,6 +14,24 @@ export function initials(name: string): string {
 }
 
 /**
+ * Encodes a contact invite token (base64url of `{s:serverUrl,d:inviterDid}`),
+ * matching iOS `IdentityDetailView.makeInviteToken`. Single-char wire keys keep
+ * the token short. The decode side lives in `AppContext`'s deep-link handler.
+ */
+export function makeInviteToken(serverUrl: string, inviterDid: string): string {
+  const json = JSON.stringify({ s: serverUrl, d: inviterDid });
+  return btoa(json).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * Builds the shareable contact URL for an identity, matching iOS
+ * `IdentityDetailView.contactURL` (`https://go.theavalanche.net/i/<token>`).
+ */
+export function contactInviteUrl(serverUrl: string, inviterDid: string): string {
+  return `https://go.theavalanche.net/i/${makeInviteToken(serverUrl, inviterDid)}`;
+}
+
+/**
  * Returns the hostname of `url`, or `fallback` if the URL cannot be parsed.
  */
 export function displayHost(url: string, fallback: string): string {

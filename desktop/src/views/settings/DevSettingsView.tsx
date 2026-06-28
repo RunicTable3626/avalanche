@@ -5,7 +5,13 @@ import { useApp } from "../../state/AppContext";
 import BlockedContactsView from "./BlockedContactsView";
 import "./DevSettingsView.css";
 
-export default function DevSettingsView(): JSX.Element {
+interface Props {
+  // When embedded inside the SettingsView hub, the hub supplies its own back
+  // handler. When routed standalone, falls back to router navigation.
+  onBack?: () => void;
+}
+
+export default function DevSettingsView(props: Props = {}): JSX.Element {
   const { store, logout } = useApp();
   const [showBlocked, setShowBlocked] = createSignal(false);
   // useNavigate throws if rendered outside a Router — guard gracefully.
@@ -16,6 +22,11 @@ export default function DevSettingsView(): JSX.Element {
     // rendered outside Router context (e.g. test), navigation is a no-op
   }
 
+  function handleBack() {
+    if (props.onBack) props.onBack();
+    else navigate?.(-1);
+  }
+
   function handleLogout() {
     logout();
     navigate?.("/");
@@ -24,10 +35,10 @@ export default function DevSettingsView(): JSX.Element {
   return (
     <div class="dev-settings">
       <header class="dev-settings-header">
-        <button class="back-btn" onClick={() => navigate?.(-1)}>
+        <button class="back-btn" onClick={handleBack}>
           <FiArrowLeft size={14} />Back
         </button>
-        <h1>Settings</h1>
+        <h1>Developer</h1>
       </header>
 
       <section class="dev-settings-section">

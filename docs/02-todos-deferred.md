@@ -1,5 +1,8 @@
 # Deferred TODOs
 
+## Security / protocol
+- Project auth-token delivery: the token is passed to project webviews as a query parameter (`?token=`, matching iOS), so it lands in the project server's access logs, can leak via `Referer`, and persists in history. A URL hash fragment avoids that but is invisible to server-rendered projects. Decide a leak-resistant scheme that still works server-side (hash for client-only projects, a header/POST handshake, or short-lived single-use tokens) **with the project owner**, and apply it across all platforms + the project interface contract at once.
+
 ## Build samples of the following projects
 - $ Gatekeeper project + onboarding flow (see 24-vetted-onboarding-project); the infra should be there but there's no project yet. `#approvals` group, approve/decline review flow, invite tokens.
 - $ Chatbot to answer questions

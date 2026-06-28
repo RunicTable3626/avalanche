@@ -178,7 +178,7 @@ const indexHtml = (basePath: string) => `<!DOCTYPE html>
     <button id="textme" onclick="textMe()">Text Me</button>
     <div id="status"></div>
     <script>
-        const params = new URLSearchParams(window.location.hash.slice(1));
+        const params = new URLSearchParams(window.location.search);
         const token = params.get('token');
 
         async function textMe() {

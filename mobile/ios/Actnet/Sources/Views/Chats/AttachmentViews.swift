@@ -1,5 +1,25 @@
 import SwiftUI
 import UIKit
+import ImageIO
+
+/// Decode `data` into a `UIImage` downsampled so its largest side is at most
+/// `maxPixel` pixels, via ImageIO — the full-resolution bitmap is never
+/// materialized (a 4000px photo shown at 240pt must not decode at full size).
+/// `nonisolated` so callers can run it off the main actor once and cache the
+/// result, instead of re-decoding inside a SwiftUI `body` on every re-render
+/// (which is what made typing in image-heavy conversations janky).
+nonisolated func decodeDownsampledImage(_ data: Data, maxPixel: CGFloat) -> UIImage? {
+    let srcOpts = [kCGImageSourceShouldCache: false] as CFDictionary
+    guard let src = CGImageSourceCreateWithData(data as CFData, srcOpts) else { return nil }
+    let opts: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceShouldCacheImmediately: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+    ]
+    guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+    return UIImage(cgImage: cg)
+}
 
 /// Renders a single message attachment (docs/35-attachments.md) inside a
 /// message bubble. Images show the inline thumbnail immediately, then load the
@@ -11,7 +31,10 @@ struct AttachmentView: View {
     /// Downloads (or loads the cached) decrypted bytes for this attachment.
     let loader: (AttachmentFfi) async -> Data?
 
-    @State private var fullData: Data?
+    /// Decoded images, cached so `body` never re-decodes. `thumbImage` is the
+    /// inline placeholder; `fullImage` replaces it once the blob downloads.
+    @State private var fullImage: UIImage?
+    @State private var thumbImage: UIImage?
     @State private var loading = false
 
     private var isImage: Bool { attachment.contentType.hasPrefix("image/") }
@@ -27,12 +50,12 @@ struct AttachmentView: View {
     @ViewBuilder
     private var imageView: some View {
         Group {
-            if let fullData, let img = UIImage(data: fullData) {
-                Image(uiImage: img).resizable().scaledToFit()
-            } else if let img = UIImage(data: attachment.thumbnail) {
+            if let fullImage {
+                Image(uiImage: fullImage).resizable().scaledToFit()
+            } else if let thumbImage {
                 // Inline thumbnail placeholder while the full blob loads.
                 ZStack {
-                    Image(uiImage: img).resizable().scaledToFit().blur(radius: 2)
+                    Image(uiImage: thumbImage).resizable().scaledToFit().blur(radius: 2)
                     if loading { ProgressView() }
                 }
             } else {
@@ -64,10 +87,24 @@ struct AttachmentView: View {
     }
 
     private func load() async {
-        guard fullData == nil, !loading else { return }
+        // Decode the inline thumbnail once for an instant placeholder.
+        if isImage, thumbImage == nil, !attachment.thumbnail.isEmpty {
+            let thumb = attachment.thumbnail
+            thumbImage = await Task.detached(priority: .userInitiated) {
+                decodeDownsampledImage(thumb, maxPixel: 960)
+            }.value
+        }
+        guard fullImage == nil, !loading else { return }
         loading = true
-        fullData = await loader(attachment)
-        loading = false
+        defer { loading = false }
+        guard let data = await loader(attachment) else { return }
+        if isImage {
+            // Decode + downsample off the main thread, then cache — so a render
+            // pass (e.g. per keystroke in the composer) never touches the bitmap.
+            fullImage = await Task.detached(priority: .userInitiated) {
+                decodeDownsampledImage(data, maxPixel: 960)
+            }.value
+        }
     }
 
     private func byteSize(_ n: Int64) -> String {
@@ -98,7 +135,7 @@ struct LinkPreviewCard: View {
     let isMe: Bool
     let loader: (AttachmentFfi) async -> Data?
 
-    @State private var imageData: Data?
+    @State private var image: UIImage?
     @Environment(\.openURL) private var openURL
 
     private var domain: String {
@@ -108,8 +145,8 @@ struct LinkPreviewCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let imageData, let img = UIImage(data: imageData) {
-                Image(uiImage: img)
+            if let image {
+                Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
                     .frame(maxWidth: 260, maxHeight: 140)
@@ -139,8 +176,10 @@ struct LinkPreviewCard: View {
         .contentShape(Rectangle())
         .onTapGesture { if let url = URL(string: preview.url) { openURL(url) } }
         .task(id: preview.url) {
-            if imageData == nil, let image = preview.image {
-                imageData = await loader(image)
+            if image == nil, let imageAttachment = preview.image, let data = await loader(imageAttachment) {
+                image = await Task.detached(priority: .userInitiated) {
+                    decodeDownsampledImage(data, maxPixel: 520)
+                }.value
             }
         }
     }

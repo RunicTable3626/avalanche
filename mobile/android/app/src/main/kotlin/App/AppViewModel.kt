@@ -2372,6 +2372,15 @@ class AppViewModel(
         val senderDid = msg.senderDid
         val text = runCatching { String(msg.plaintext, Charsets.UTF_8) }.getOrElse { "(binary)" }
 
+        // Use the sender's timestamp if available, otherwise fall back to local
+        // time. This must drive the conversation-row timestamp too (not the
+        // arrival time): a late-delivered message — sent hours ago but only
+        // decrypted now — would otherwise show "moments ago" in the list while
+        // the bubble shows the real send time, and the row would jump back once
+        // the list reloads from the store (which sorts by MAX(sent_at)).
+        val sentAtMs: Long = msg.sentAtMs ?: System.currentTimeMillis()
+        val lastMessageDate = Date(sentAtMs)
+
         val convId: String
 
         val groupId = msg.groupId
@@ -2389,7 +2398,7 @@ class AppViewModel(
                 list.map { c ->
                     if (c.id == convId) c.copy(
                         lastMessage = text,
-                        lastMessageDate = Date(),
+                        lastMessageDate = lastMessageDate,
                         lastMessageSenderDid = senderDid,
                     ).clearLastMessageEvent()
                     else c
@@ -2406,7 +2415,7 @@ class AppViewModel(
                     list.mapIndexed { idx, c ->
                         if (idx == existingIdx) c.copy(
                             lastMessage = text,
-                            lastMessageDate = Date(),
+                            lastMessageDate = lastMessageDate,
                             lastMessageSenderDid = senderDid,
                         ).clearLastMessageEvent()
                         else c
@@ -2423,7 +2432,7 @@ class AppViewModel(
                     serverUrl = serverUrl,
                     recipientDid = senderDid,
                     lastMessage = text,
-                    lastMessageDate = Date(),
+                    lastMessageDate = lastMessageDate,
                     lastMessageSenderDid = senderDid,
                     isGroup = false,
                 )
@@ -2431,7 +2440,6 @@ class AppViewModel(
             }
         }
 
-        val sentAtMs: Long = msg.sentAtMs ?: System.currentTimeMillis()
         val messageId = UUID.randomUUID().toString()
         val message = Message(
             id = messageId,

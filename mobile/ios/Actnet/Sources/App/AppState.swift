@@ -1903,6 +1903,15 @@ final class AppState: ObservableObject {
         let senderDid = msg.senderDid
         let text = String(data: msg.plaintext, encoding: .utf8) ?? "(binary)"
 
+        // Use the sender's timestamp if available, otherwise fall back to local
+        // time. This must drive the conversation-row timestamp too (not the
+        // arrival time): a late-delivered message — sent hours ago but only
+        // decrypted now — would otherwise show "moments ago" in the list while
+        // the bubble shows the real send time, and the row would jump back once
+        // the list reloads from the store (which sorts by MAX(sent_at)).
+        let sentAtMs: Int64 = msg.sentAtMs ?? Int64(Date().timeIntervalSince1970 * 1000)
+        let lastMessageDate = Date(timeIntervalSince1970: TimeInterval(sentAtMs) / 1000.0)
+
         var convId: String
 
         if let groupId = msg.groupId {
@@ -1920,7 +1929,7 @@ final class AppState: ObservableObject {
             convId = conv.id
             if let idx = conversations.firstIndex(where: { $0.id == convId }) {
                 conversations[idx].lastMessage = text
-                conversations[idx].lastMessageDate = Date()
+                conversations[idx].lastMessageDate = lastMessageDate
                 conversations[idx].lastMessageSenderDid = senderDid
                 conversations[idx].clearLastMessageEvent()
             }
@@ -1931,7 +1940,7 @@ final class AppState: ObservableObject {
         }) {
             convId = conversations[idx].id
             conversations[idx].lastMessage = text
-            conversations[idx].lastMessageDate = Date()
+            conversations[idx].lastMessageDate = lastMessageDate
             conversations[idx].lastMessageSenderDid = senderDid
             conversations[idx].clearLastMessageEvent()
         } else {
@@ -1946,15 +1955,13 @@ final class AppState: ObservableObject {
                 serverUrl: serverUrl,
                 recipientDid: senderDid,
                 lastMessage: text,
-                lastMessageDate: Date(),
+                lastMessageDate: lastMessageDate,
                 lastMessageSenderDid: senderDid,
                 isGroup: false
             )
             conversations.append(conv)
         }
 
-        // Use sender's timestamp if available, otherwise fall back to local time.
-        let sentAtMs: Int64 = msg.sentAtMs ?? Int64(Date().timeIntervalSince1970 * 1000)
         let messageId = UUID().uuidString
         // Incoming messages are unread (readAtMs = nil). Carry the sender's
         // disappearing-messages timer (docs/03 §5) so the live-expiry scheduler

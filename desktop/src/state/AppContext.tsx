@@ -117,6 +117,12 @@ interface AppContextValue {
   listBlocked: () => Promise<ContactRowFfi[]>;
   getConversationTimer: (conversationId: string) => Promise<number | null>;
   setConversationTimer: (recipientDid: string, expirySecs: number | null) => Promise<void>;
+
+  // Track E — settings / account lifecycle
+  setAccountDisplayName: (accountId: string, displayName: string) => Promise<void>;
+  leaveServer: () => Promise<void>;
+  deleteIdentity: () => Promise<void>;
+  hasRecovery: () => Promise<boolean>;
 }
 
 const AppContext = createContext<AppContextValue | undefined>(undefined);
@@ -498,6 +504,57 @@ export function AppProvider(props: { children: JSX.Element }) {
       }
     }
     enterApp();
+  }
+
+  // ── Track E: settings / account lifecycle ──────────────────────────────────
+
+  // Tear down all local session state and return to onboarding. Single-account
+  // desktop has one core, so removing the (only) account empties the session —
+  // identical teardown to logout(), but reached after a server-side leave or
+  // identity delete rather than a voluntary sign-out.
+  function removeAccountLocally() {
+    resetSession();
+    setService(makeService(store.serviceMode));
+  }
+
+  // Update the user's display name on the core, then mirror it into the in-memory
+  // account and the persisted entry so it survives a restart.
+  async function setAccountDisplayName(accountId: string, displayName: string) {
+    const trimmed = displayName.trim();
+    if (!trimmed) return;
+    await service().setDisplayName(trimmed);
+    const idx = store.accounts.findIndex((a) => a.id === accountId);
+    if (idx >= 0) setStore("accounts", idx, "displayName", trimmed);
+    const persisted = await persistedAccounts();
+    const pIdx = persisted.findIndex((p) => p.did === accountId);
+    if (pIdx >= 0) {
+      persisted[pIdx].displayName = trimmed;
+      await persistAccounts(persisted);
+    }
+  }
+
+  // Mirrors iOS AppState.leaveServer: leave the connected server on the core,
+  // then drop the account from the device. The UI only offers this for non-home
+  // memberships (ServerDetailView gates it). Throws on failure, leaving the
+  // account in place so the user can retry.
+  async function leaveServer() {
+    await service().leaveServer();
+    removeAccountLocally();
+  }
+
+  // Mirrors iOS AppState.deleteIdentity: the core leaves every server, submits a
+  // PLC tombstone, and wipes local rows; then we drop the account from the
+  // device. Throws (leaving state intact) if the tombstone couldn't be submitted.
+  async function deleteIdentity() {
+    await service().deleteIdentity();
+    removeAccountLocally();
+  }
+
+  function hasRecovery(): Promise<boolean> {
+    return service().hasRecovery().catch((e: unknown) => {
+      console.warn("hasRecovery failed:", e);
+      return false;
+    });
   }
 
   // ── Messaging ─────────────────────────────────────────────────────────────
@@ -1781,6 +1838,10 @@ export function AppProvider(props: { children: JSX.Element }) {
     listBlocked,
     getConversationTimer,
     setConversationTimer,
+    setAccountDisplayName,
+    leaveServer,
+    deleteIdentity,
+    hasRecovery,
   };
 
   return (

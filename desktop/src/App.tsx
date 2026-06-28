@@ -4,7 +4,7 @@ import { useApp } from "./state/AppContext";
 import MainLayout from "./views/common/MainLayout";
 import ChatsView from "./views/chats/ChatsView";
 import NetworkView from "./views/network/NetworkView";
-import DevSettingsView from "./views/settings/DevSettingsView";
+import SettingsView from "./views/settings/SettingsView";
 import OnboardingFlow from "./views/onboarding/OnboardingFlow";
 
 export default function App() {
@@ -18,7 +18,7 @@ export default function App() {
           <Route path="/chats" component={ChatsView} />
           <Route path="/chats/:conversationId" component={ChatsView} />
           <Route path="/network" component={NetworkView} />
-          <Route path="/settings" component={DevSettingsView} />
+          <Route path="/settings" component={SettingsView} />
         </Route>
       </Router>
     </Show>

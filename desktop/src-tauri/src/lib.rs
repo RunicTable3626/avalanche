@@ -135,6 +135,17 @@ pub fn run() {
 
     #[allow(unreachable_code)]
     tauri::Builder::default()
+        // Single-instance MUST be the first plugin. When a second launch occurs
+        // (e.g. opening an avalanche:// link while the app runs), this focuses the
+        // existing window; the `deep-link` feature forwards that launch's URL to
+        // the running instance's on_open_url handler instead of opening a new window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_deep_link::init())

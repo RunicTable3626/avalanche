@@ -82,6 +82,8 @@ export interface AvalancheService {
   ownDisplayName(): Promise<string>;
   setDisplayName(displayName: string): Promise<void>;
   hasRecovery(): Promise<boolean>;
+  updateRecoveryBlob(prfOutput: number[], servers: string[]): Promise<void>;
+  homeServer(): Promise<string>;
   contactDisplayName(did: string): Promise<string>;
   getAccountInfo(did: string): Promise<import("../bindings").AccountInfoFfi>;
   refreshContactProfile(did: string): Promise<boolean>;

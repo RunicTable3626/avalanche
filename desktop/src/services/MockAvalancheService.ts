@@ -430,6 +430,8 @@ export class MockAvalancheService implements AvalancheService {
   async ownDisplayName(): Promise<string> { return "Me"; }
   async setDisplayName(_displayName: string): Promise<void> {}
   async hasRecovery(): Promise<boolean> { return false; }
+  async updateRecoveryBlob(_prfOutput: number[], _servers: string[]): Promise<void> {}
+  async homeServer(): Promise<string> { return MOCK_SERVER_URL; }
   async contactDisplayName(did: string): Promise<string> {
     if (did === "did:plc:organizer") return "Jamie (Organizer)";
     return "";

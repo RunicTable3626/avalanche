@@ -28,6 +28,16 @@ export const commands = {
 	ownDisplayName: () => typedError<string, string>(__TAURI_INVOKE("own_display_name")),
 	setDisplayName: (displayName: string) => typedError<null, string>(__TAURI_INVOKE("set_display_name", { displayName })),
 	hasRecovery: () => typedError<boolean, string>(__TAURI_INVOKE("has_recovery")),
+	/**
+	 *  Re-encrypt and upload this account's recovery blob for the given PRF output
+	 *  and server list. The PRF output must be exactly 32 bytes — desktop has no
+	 *  passkey/PRF authenticator, so the only caller is the recovery-phrase setup
+	 *  flow, which feeds the 32-byte seed derived from the phrase
+	 *  (`recovery_phrase_to_seed`). See `desktop/CLAUDE.md` (passkey divergence).
+	 */
+	updateRecoveryBlob: (prfOutput: number[], servers: string[]) => typedError<null, string>(__TAURI_INVOKE("update_recovery_blob", { prfOutput, servers })),
+	/**  This account's home (primary) server URL. */
+	homeServer: () => typedError<string, string>(__TAURI_INVOKE("home_server")),
 	contactDisplayName: (did: string) => typedError<string, string>(__TAURI_INVOKE("contact_display_name", { did })),
 	getAccountInfo: (did: string) => typedError<AccountInfoFfi, string>(__TAURI_INVOKE("get_account_info", { did })),
 	refreshContactProfile: (did: string) => typedError<boolean, string>(__TAURI_INVOKE("refresh_contact_profile", { did })),

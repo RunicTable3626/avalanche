@@ -63,9 +63,28 @@ struct AllocateRequest {
     size_bytes: i64,
 }
 
+/// Where and how the client should PUT the ciphertext. The client replays this
+/// verbatim and stays backend-blind: for LocalFs `url` is this homeserver's own
+/// route and `headers` carry the bearer; a future S3 backend returns a presigned
+/// PUT URL + signed headers here instead, with no client change (docs/35).
+#[derive(Serialize)]
+struct UploadDescriptor {
+    url: String,
+    method: String,
+    headers: Vec<(String, String)>,
+}
+
 #[derive(Serialize)]
 struct AllocateResponse {
     attachment_id: String,
+    /// Where/how to upload the ciphertext.
+    upload: UploadDescriptor,
+    /// Absolute, stable URL for the E2E pointer; recipients GET it
+    /// (unauthenticated). For LocalFs this is the same route as `upload.url`
+    /// (different method); a future S3 backend points it at the homeserver's
+    /// redirect route (not a short-lived presigned URL, which couldn't survive
+    /// the blob's multi-week TTL).
+    download_url: String,
     /// Unix-millis blob TTL deadline.
     expires_at_ms: i64,
 }
@@ -73,6 +92,7 @@ struct AllocateResponse {
 async fn allocate(
     State(state): State<AppState>,
     auth: AuthDevice,
+    headers: HeaderMap,
     Json(req): Json<AllocateRequest>,
 ) -> Result<(StatusCode, Json<AllocateResponse>), ServerError> {
     if req.size_bytes <= 0 {
@@ -110,10 +130,34 @@ async fn allocate(
     db::attachments::insert(&mut conn, &attachment_id, account_id, req.size_bytes, expires_at)
         .await?;
 
+    let base = state.config.server_url.trim_end_matches('/');
+    let url = format!("{base}/v1/attachments/{attachment_id}");
+    // Echo the caller's bearer so the client replays it verbatim on the PUT
+    // (LocalFs upload is authenticated by the session token, same as before —
+    // it just arrives via the descriptor rather than the client adding it). The
+    // client already holds this token; the redundancy goes away when the upload
+    // path later moves to a scoped/presigned token, a server-only change.
+    let mut upload_headers = vec![(
+        "content-type".to_string(),
+        "application/octet-stream".to_string(),
+    )];
+    if let Some(authz) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        upload_headers.push(("authorization".to_string(), authz.to_string()));
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(AllocateResponse {
             attachment_id,
+            upload: UploadDescriptor {
+                url: url.clone(),
+                method: "PUT".to_string(),
+                headers: upload_headers,
+            },
+            download_url: url,
             expires_at_ms: expires_at.unix_timestamp() * 1000,
         }),
     ))

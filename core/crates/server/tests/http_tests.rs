@@ -572,6 +572,15 @@ async fn attachment_allocate_upload_download_delete_round_trip() {
     let attachment_id = body["attachment_id"].as_str().unwrap().to_string();
     assert!(body["expires_at_ms"].as_i64().unwrap() > 0);
 
+    // The upload descriptor is backend-agnostic: a PUT to an absolute url with
+    // replayed headers (incl. the echoed bearer). The client replays it blindly.
+    assert_eq!(body["upload"]["method"], "PUT");
+    assert!(body["upload"]["url"].as_str().unwrap().ends_with(&format!("/v1/attachments/{attachment_id}")));
+    let hdrs = body["upload"]["headers"].as_array().unwrap();
+    let has_authz = hdrs.iter().any(|h| h[0] == "authorization" && h[1] == format!("Bearer {token}"));
+    assert!(has_authz, "upload descriptor must echo the bearer for the LocalFs backend");
+    assert!(body["download_url"].as_str().unwrap().ends_with(&format!("/v1/attachments/{attachment_id}")));
+
     // 2. Upload the ciphertext.
     let resp = app
         .clone()

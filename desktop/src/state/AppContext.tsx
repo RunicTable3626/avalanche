@@ -11,7 +11,7 @@ import { load as loadStore } from "@tauri-apps/plugin-store";
 import type { Account, Conversation, InviteInfo, ServerInfo } from "../models";
 import { displayHost } from "../lib/format";
 import { DeliveryStatus, type Message } from "../models/Message";
-import { ServiceMode, type AvalancheService, type ConnectionState, type StoredMessageFfi, type ConversationSummaryFfi, type IncomingEvent } from "../services/AvalancheService";
+import { ServiceMode, type AvalancheService, type ConnectionState, type StoredMessageFfi, type ConversationSummaryFfi, type IncomingEvent, type ReactionFfi, type MessageRevisionFfi, type MessageTarget, type JoinResultFfi, type ContactRowFfi } from "../services/AvalancheService";
 import { MockAvalancheService } from "../services/MockAvalancheService";
 import { DevServerAvalancheService } from "../services/DevServerAvalancheService";
 
@@ -33,6 +33,7 @@ interface AppStore {
   selectedTab: "chats" | "network";
   conversations: Conversation[];
   messagesByConversation: Record<string, Message[]>;
+  reactionsByConversation: Record<string, ReactionFfi[]>;
   connectionStates: Record<string, ConnectionState>;
   pendingInviteToken: string | null;
   serverUrl: string;
@@ -78,6 +79,44 @@ interface AppContextValue {
   displayName: (did: string, accountId: string) => string;
   setPendingInviteToken: (token: string | null) => void;
   validateInvite: (token: string) => Promise<InviteInfo>;
+
+  // Conversation selection (lifted so compose/group flows can open a chat)
+  selectedConversationId: () => string | null;
+  selectConversation: (id: string | null) => void;
+  reloadConversations: () => Promise<void>;
+
+  // Track A — message actions
+  reactionsFor: (conversation: Conversation, message: Message) => ReactionFfi[];
+  loadReactions: (conversationId: string) => void;
+  toggleReaction: (conversation: Conversation, message: Message, emoji: string) => void;
+  editMessage: (conversation: Conversation, message: Message, newBody: string) => void;
+  loadMessageRevisions: (conversation: Conversation, message: Message) => Promise<MessageRevisionFfi[]>;
+  deleteMessage: (conversation: Conversation, message: Message, forEveryone: boolean) => void;
+  retryMessage: (conversation: Conversation, message: Message) => Promise<void>;
+
+  // Track B — groups + join
+  createGroupAndOpen: (
+    accountId: string,
+    title: string,
+    recipientDids: string[],
+    expirySeconds: number
+  ) => Promise<Conversation>;
+  joinViaLink: (
+    masterKey: number[],
+    hostingServerUrl: string,
+    password: number[]
+  ) => Promise<JoinResultFfi>;
+  leaveGroup: (conversation: Conversation) => Promise<void>;
+
+  // Track D — safety + timers
+  acceptRequest: (conversation: Conversation) => Promise<void>;
+  deleteRequest: (conversation: Conversation) => Promise<void>;
+  reportAndBlock: (conversation: Conversation, reason: string) => Promise<void>;
+  blockContact: (did: string) => Promise<void>;
+  unblockContact: (did: string) => Promise<void>;
+  listBlocked: () => Promise<ContactRowFfi[]>;
+  getConversationTimer: (conversationId: string) => Promise<number | null>;
+  setConversationTimer: (recipientDid: string, expirySecs: number | null) => Promise<void>;
 }
 
 const AppContext = createContext<AppContextValue | undefined>(undefined);
@@ -133,6 +172,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     selectedTab: "chats",
     conversations: [],
     messagesByConversation: {},
+    reactionsByConversation: {},
     connectionStates: {},
     pendingInviteToken: null,
     serverUrl: "http://localhost:3000",
@@ -141,6 +181,10 @@ export function AppProvider(props: { children: JSX.Element }) {
   const [service, setService] = createSignal<AvalancheService>(
     makeService(ServiceMode.DevServer)
   );
+
+  // Selected conversation — lifted into context so compose/group/join flows
+  // can programmatically open a conversation. ChatsView mirrors this signal.
+  const [selectedConversationId, setSelectedConversationId] = createSignal<string | null>(null);
 
   // Reactive display-name cache: reads are tracked by Solid so components
   // re-render when a resolved name arrives.  A separate plain Set tracks
@@ -157,23 +201,15 @@ export function AppProvider(props: { children: JSX.Element }) {
   // launching a second interleaving load.
   let reloadInFlight: Promise<void> | null = null;
   let reloadQueued = false;
-  // Conversation ids created in-memory (e.g. an incoming welcome DM) that aren't
-  // backed by a row in the local DB. loadConversationsFromStore preserves only
-  // these across a reload, NOT arbitrary DB-absent entries, which would resurrect
-  // conversations the DB intentionally dropped (e.g. left groups).
-  //
-  // Persistence is the frontend's responsibility; app-core does not auto-persist
-  // (the client owns local history). On this branch the incoming-message handler
-  // does not call saveMessage yet, so a received-DM conversation is held only
-  // here in memory and is lost on app restart. Day 4 wires up that persistence:
-  // once the handler saves received messages, the conversation shows up in the DB
-  // summaries on the next reload and this set just bridges the brief window until
-  // then. The drop-on-DB-appearance path below returns a conversation to the
-  // normal DB-driven lifecycle once it is persisted (e.g. once an outgoing reply
-  // saves).
-  //
-  // TODO: persist incoming messages in the receive handler (wired up in day 4;
-  // removes the session-only / lost-on-restart gap above).
+  const loadedReactions: Set<string> = new Set();
+  // Conversation ids created in-memory (e.g. an incoming DM in a brand-new
+  // thread) that aren't yet backed by a row in the local DB.
+  // loadConversationsFromStore preserves only these across a reload, NOT
+  // arbitrary DB-absent entries, which would resurrect conversations the DB
+  // intentionally dropped. The incoming-message handler persists the received
+  // message (so the conversation appears in the DB summaries on the next
+  // reload), and this set bridges the brief gap until that reload runs; the
+  // drop-on-DB-appearance path below then hands it back to normal lifecycle.
   const pendingConversations: Set<string> = new Set();
 
   // Event loop lifecycle
@@ -406,12 +442,15 @@ export function AppProvider(props: { children: JSX.Element }) {
         s.isOnboarding = true;
         s.conversations = [];
         s.messagesByConversation = {};
+        s.reactionsByConversation = {};
         s.connectionStates = {};
         s.pendingInviteToken = null;
       })
     );
+    setSelectedConversationId(null);
     loadedConversations.value = false;
     loadedMessages.clear();
+    loadedReactions.clear();
     pendingConversations.clear();
     // Reset the reactive display-name cache so components get a reactive
     // update on logout/mode-switch.
@@ -578,6 +617,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     conversationId: string,
     text: string,
     senderAccountId: string,
+    expireTimerSecs: number,
     transportFn: (sentAtMs: number) => Promise<void>,
     errorMessage: string
   ) {
@@ -595,7 +635,10 @@ export function AppProvider(props: { children: JSX.Element }) {
       editCount: 0,
       isDeleted: false,
       kind: 0,
-      expireTimerSecs: 0,
+      // Stamp the sender's local copy with the same disappearing-messages timer
+      // the wire envelope carries, so app-core's reaper expires it too. Without
+      // this the sender's own messages never disappear (docs/03 §5).
+      expireTimerSecs,
     };
 
     setStore("messagesByConversation", conversationId, (prev) => [
@@ -603,12 +646,39 @@ export function AppProvider(props: { children: JSX.Element }) {
       optimistic,
     ]);
 
-    // Update conversation preview
+    // Update conversation preview. Clear any stale group system-event fields so
+    // ConversationRow renders this new message, not a prior "X joined" line.
     const convIdx = store.conversations.findIndex((c) => c.id === conversationId);
     if (convIdx >= 0) {
       setStore("conversations", convIdx, "lastMessage", text);
       setStore("conversations", convIdx, "lastMessageDate", sentAtMs);
+      setStore("conversations", convIdx, "lastMessageKind", 0);
+      setStore("conversations", convIdx, "lastMessageMetadata", undefined);
     }
+
+    // Persist every delivery state to the local store so the timeline survives a
+    // refresh/restart and a store reload never loses an in-flight or failed
+    // send. "sending" is persisted up front (and awaited) so a crash or refresh
+    // mid-send is recoverable. Matches iOS AppState.sendMessage.
+    const persist = (status: DeliveryStatus) =>
+      service().saveMessage({
+        id: messageId,
+        conversationId,
+        senderDid: senderAccountId,
+        body: text,
+        sentAtMs,
+        editedAtMs: null,
+        readAtMs: sentAtMs,
+        deliveryStatus: status,
+        editCount: 0,
+        deleted: false,
+        kind: 0,
+        metadata: null,
+        expireTimerSecs,
+        expireAtMs: null,
+      });
+
+    await persist(DeliveryStatus.sending);
 
     try {
       await transportFn(sentAtMs);
@@ -619,28 +689,10 @@ export function AppProvider(props: { children: JSX.Element }) {
             : m
         )
       );
-      // Best-effort persist — log failures to console so they are
-      // visible in DevTools but never crash the send path.
-      void service()
-        .saveMessage({
-          id: messageId,
-          conversationId,
-          senderDid: senderAccountId,
-          body: text,
-          sentAtMs,
-          editedAtMs: null,
-          readAtMs: sentAtMs,
-          deliveryStatus: DeliveryStatus.sent,
-          editCount: 0,
-          deleted: false,
-          kind: 0,
-          metadata: null,
-          expireTimerSecs: 0,
-          expireAtMs: null,
-        })
-        .catch((err: unknown) => {
-          console.warn("saveMessage failed:", err);
-        });
+      // Best-effort re-save — log failures but never crash the send path.
+      void persist(DeliveryStatus.sent).catch((err: unknown) => {
+        console.warn("saveMessage (sent) failed:", err);
+      });
     } catch {
       setStore("messagesByConversation", conversationId, (msgs) =>
         (msgs ?? []).map((m) =>
@@ -649,6 +701,9 @@ export function AppProvider(props: { children: JSX.Element }) {
             : m
         )
       );
+      void persist(DeliveryStatus.failed).catch((err: unknown) => {
+        console.warn("saveMessage (failed) failed:", err);
+      });
       throw new Error(errorMessage);
     }
   }
@@ -659,10 +714,15 @@ export function AppProvider(props: { children: JSX.Element }) {
     recipientDid: string,
     senderAccountId: string
   ) {
+    // DM disappearing-messages timer is keyed by peer DID in app-core's store
+    // (save/load_conversation_expiry), so read it with recipientDid — not the
+    // full conversation id — to match what the wire envelope is stamped with.
+    const timer = (await service().getConversationTimer(recipientDid).catch(() => null)) ?? 0;
     await sendOptimistic(
       conversationId,
       text,
       senderAccountId,
+      timer,
       (sentAtMs) => service().sendDm(recipientDid, Array.from(new TextEncoder().encode(text)), sentAtMs),
       "Send failed"
     );
@@ -670,11 +730,14 @@ export function AppProvider(props: { children: JSX.Element }) {
 
   async function sendGroupMessage(conversation: Conversation, text: string) {
     if (!conversation.groupId) return;
+    const groupId = conversation.groupId;
+    const timer = (await service().groupExpirySeconds(groupId).catch(() => 0)) ?? 0;
     await sendOptimistic(
       conversation.id,
       text,
       conversation.accountId,
-      (sentAtMs) => service().sendGroupMessage(conversation.groupId!, Array.from(new TextEncoder().encode(text)), sentAtMs),
+      timer,
+      (sentAtMs) => service().sendGroupMessage(groupId, Array.from(new TextEncoder().encode(text)), sentAtMs),
       "Group send failed"
     );
   }
@@ -684,9 +747,13 @@ export function AppProvider(props: { children: JSX.Element }) {
     if (!msgs) return;
     const now = Date.now();
     let changed = false;
+    // Collect the sent-at timestamps of inbound messages that newly flip to
+    // read, so we can acknowledge them to the sender via a read receipt.
+    const newlyReadSentAt: number[] = [];
     const updated = msgs.map((m) => {
       if (m.readAtMs === undefined && m.senderAccountId !== accountId) {
         changed = true;
+        newlyReadSentAt.push(m.sentAtMs);
         return { ...m, readAtMs: now };
       }
       return m;
@@ -698,6 +765,28 @@ export function AppProvider(props: { children: JSX.Element }) {
         .catch((e: unknown) => {
           console.warn("markMessagesRead failed:", e);
         });
+      // Send a read receipt to the DM partner so their bubbles flip to "read".
+      // Receipts are 1:1 (a single recipient), so this applies to DMs only —
+      // a group has no single recipient. Suppress for un-accepted requests
+      // (opening to evaluate isn't acknowledgement) and for blocked contacts
+      // (never signal "read" to someone you cut off) — don't rely on app-core
+      // to gate it.
+      const conv = store.conversations.find((c) => c.id === conversationId);
+      if (
+        conv &&
+        !conv.isGroup &&
+        !conv.isRequest &&
+        !conv.isBlocked &&
+        conv.recipientDid &&
+        newlyReadSentAt.length > 0
+      ) {
+        const recipientDid = conv.recipientDid;
+        void service()
+          .sendReadReceipt(recipientDid, newlyReadSentAt)
+          .catch((e: unknown) => {
+            console.warn("sendReadReceipt failed:", e);
+          });
+      }
     }
   }
 
@@ -725,8 +814,422 @@ export function AppProvider(props: { children: JSX.Element }) {
       isBlocked: false,
       lastMessageKind: 0,
     };
+    // Track as pending so a reload (e.g. a storageSynced event firing before
+    // the first message persists) doesn't drop this freshly-opened, selected
+    // conversation — loadConversationsFromStore only preserves DB-absent
+    // conversations that are in pendingConversations.
+    pendingConversations.add(convId);
     setStore("conversations", (prev) => [...prev, conv]);
     return conv;
+  }
+
+  function findOrCreateGroupConversation(
+    groupId: string,
+    title: string,
+    accountId: string
+  ): Conversation {
+    const convId = `group-${groupId}`;
+    const existing = store.conversations.find((c) => c.id === convId);
+    if (existing) return existing;
+    const conv: Conversation = {
+      id: convId,
+      title,
+      accountId,
+      serverUrl: getServerUrl(accountId),
+      groupId,
+      isGroup: true,
+      isRequest: false,
+      isBlocked: false,
+      lastMessageKind: 0,
+    };
+    // See findOrCreateDMConversation — a just-created group isn't in the DB
+    // summaries yet, so preserve it across reloads until its state syncs.
+    pendingConversations.add(convId);
+    setStore("conversations", (prev) => [...prev, conv]);
+    return conv;
+  }
+
+  function messageTargetFor(conversation: Conversation): MessageTarget {
+    return conversation.isGroup && conversation.groupId
+      ? { type: "group", group_id: conversation.groupId }
+      : { type: "dm", recipient_did: conversation.recipientDid ?? "" };
+  }
+
+  // ── Track A: reactions / edit / delete / retry ─────────────────────────────
+
+  function reactionsFor(
+    conversation: Conversation,
+    message: Message
+  ): ReactionFfi[] {
+    const all = store.reactionsByConversation[conversation.id] ?? [];
+    return all.filter(
+      (r) =>
+        r.targetAuthor === message.senderAccountId &&
+        r.targetSentAtMs === message.sentAtMs
+    );
+  }
+
+  function loadReactions(conversationId: string) {
+    if (loadedReactions.has(conversationId)) return;
+    loadedReactions.add(conversationId);
+    void service()
+      .loadReactions(conversationId)
+      .then((rows) => {
+        setStore("reactionsByConversation", conversationId, rows);
+      })
+      .catch((err: unknown) => {
+        console.warn("loadReactions failed for", conversationId, err);
+        loadedReactions.delete(conversationId);
+      });
+  }
+
+  function toggleReaction(
+    conversation: Conversation,
+    message: Message,
+    emoji: string
+  ) {
+    const myDid = conversation.accountId;
+    const convId = conversation.id;
+    const targetAuthor = message.senderAccountId;
+    const targetSentAtMs = message.sentAtMs;
+    const now = Date.now();
+
+    const current = store.reactionsByConversation[convId] ?? [];
+    const existingMine = current.find(
+      (r) =>
+        r.targetAuthor === targetAuthor &&
+        r.targetSentAtMs === targetSentAtMs &&
+        r.reactorDid === myDid
+    );
+    const remove = existingMine?.emoji === emoji;
+
+    // Optimistic in-memory update: drop my prior reaction on this message,
+    // then (unless toggling the same emoji off) add the new one.
+    const withoutMine = current.filter(
+      (r) =>
+        !(
+          r.targetAuthor === targetAuthor &&
+          r.targetSentAtMs === targetSentAtMs &&
+          r.reactorDid === myDid
+        )
+    );
+    const next = remove
+      ? withoutMine
+      : [
+          ...withoutMine,
+          {
+            conversationId: convId,
+            targetAuthor,
+            targetSentAtMs,
+            reactorDid: myDid,
+            emoji,
+            reactedAtMs: now,
+          },
+        ];
+    setStore("reactionsByConversation", convId, next);
+
+    void service()
+      .sendReaction(
+        messageTargetFor(conversation),
+        targetAuthor,
+        targetSentAtMs,
+        emoji,
+        remove,
+        now
+      )
+      .catch((e: unknown) => {
+        console.warn("sendReaction failed:", e);
+      });
+  }
+
+  function editMessage(
+    conversation: Conversation,
+    message: Message,
+    newBody: string
+  ) {
+    const trimmed = newBody.trim();
+    if (!trimmed || trimmed === message.body) return;
+    const now = Date.now();
+    setStore("messagesByConversation", conversation.id, (prev) =>
+      (prev ?? []).map((m) =>
+        m.id === message.id
+          ? {
+              ...m,
+              body: trimmed,
+              editedAtMs: now,
+              editCount: m.editCount + 1,
+            }
+          : m
+      )
+    );
+    // Keep the sidebar preview in sync when the edited message is the latest
+    // (the inbound messageEdited handler does the same for peers' edits).
+    const convIdx = store.conversations.findIndex((c) => c.id === conversation.id);
+    if (
+      convIdx >= 0 &&
+      store.conversations[convIdx]?.lastMessageDate === message.sentAtMs
+    ) {
+      const preview = trimmed.length > 100 ? trimmed.slice(0, 100) + "…" : trimmed;
+      setStore("conversations", convIdx, "lastMessage", preview);
+    }
+    void service()
+      .sendEdit(messageTargetFor(conversation), message.sentAtMs, trimmed, now)
+      .catch((e: unknown) => {
+        console.warn("sendEdit failed:", e);
+      });
+  }
+
+  function loadMessageRevisions(
+    conversation: Conversation,
+    message: Message
+  ): Promise<MessageRevisionFfi[]> {
+    return service()
+      .loadMessageRevisions(
+        conversation.id,
+        message.senderAccountId,
+        message.sentAtMs
+      )
+      .catch((e: unknown) => {
+        console.warn("loadMessageRevisions failed:", e);
+        return [] as MessageRevisionFfi[];
+      });
+  }
+
+  function clearReactionsForMessage(
+    conversationId: string,
+    targetAuthor: string,
+    targetSentAtMs: number
+  ) {
+    const current = store.reactionsByConversation[conversationId];
+    if (!current) return;
+    setStore(
+      "reactionsByConversation",
+      conversationId,
+      current.filter(
+        (r) =>
+          !(
+            r.targetAuthor === targetAuthor &&
+            r.targetSentAtMs === targetSentAtMs
+          )
+      )
+    );
+  }
+
+  function deleteMessage(
+    conversation: Conversation,
+    message: Message,
+    forEveryone: boolean
+  ) {
+    const now = Date.now();
+    if (forEveryone) {
+      setStore("messagesByConversation", conversation.id, (prev) =>
+        (prev ?? []).map((m) =>
+          m.id === message.id
+            ? { ...m, body: "", isDeleted: true, editedAtMs: undefined }
+            : m
+        )
+      );
+    } else {
+      setStore("messagesByConversation", conversation.id, (prev) =>
+        (prev ?? []).filter((m) => m.id !== message.id)
+      );
+    }
+    clearReactionsForMessage(
+      conversation.id,
+      message.senderAccountId,
+      message.sentAtMs
+    );
+    void service()
+      .sendDelete(
+        messageTargetFor(conversation),
+        message.senderAccountId,
+        message.sentAtMs,
+        forEveryone,
+        now
+      )
+      .catch((e: unknown) => {
+        console.warn("sendDelete failed:", e);
+      });
+  }
+
+  async function retryMessage(conversation: Conversation, message: Message) {
+    // Flip back to "sending", re-run the transport with a fresh timestamp, and
+    // resolve to sent/failed exactly like the original optimistic send.
+    const sentAtMs = Date.now();
+    setStore("messagesByConversation", conversation.id, (prev) =>
+      (prev ?? []).map((m) =>
+        m.id === message.id
+          ? { ...m, deliveryStatus: DeliveryStatus.sending, sentAtMs }
+          : m
+      )
+    );
+    // Persist each state (same contract as the original optimistic send) so the
+    // retried message survives a reload regardless of outcome. Matches iOS.
+    const persist = (status: DeliveryStatus) =>
+      service().saveMessage({
+        id: message.id,
+        conversationId: conversation.id,
+        senderDid: message.senderAccountId,
+        body: message.body,
+        sentAtMs,
+        editedAtMs: message.editedAtMs ?? null,
+        readAtMs: sentAtMs,
+        deliveryStatus: status,
+        editCount: message.editCount,
+        deleted: message.isDeleted,
+        kind: message.kind,
+        metadata: message.metadata ?? null,
+        expireTimerSecs: message.expireTimerSecs,
+        expireAtMs: null,
+      });
+    await persist(DeliveryStatus.sending);
+    const bytes = Array.from(new TextEncoder().encode(message.body));
+    try {
+      if (conversation.isGroup && conversation.groupId) {
+        await service().sendGroupMessage(conversation.groupId, bytes, sentAtMs);
+      } else if (conversation.recipientDid) {
+        await service().sendDm(conversation.recipientDid, bytes, sentAtMs);
+      } else {
+        throw new Error("no transport target");
+      }
+      setStore("messagesByConversation", conversation.id, (prev) =>
+        (prev ?? []).map((m) =>
+          m.id === message.id
+            ? { ...m, deliveryStatus: DeliveryStatus.sent }
+            : m
+        )
+      );
+      void persist(DeliveryStatus.sent).catch((err: unknown) => {
+        console.warn("saveMessage after retry failed:", err);
+      });
+    } catch (e) {
+      setStore("messagesByConversation", conversation.id, (prev) =>
+        (prev ?? []).map((m) =>
+          m.id === message.id
+            ? { ...m, deliveryStatus: DeliveryStatus.failed }
+            : m
+        )
+      );
+      void persist(DeliveryStatus.failed).catch((err: unknown) => {
+        console.warn("saveMessage (failed) after retry failed:", err);
+      });
+      console.warn("retryMessage failed:", e);
+    }
+  }
+
+  // ── Track B: groups + join via link ────────────────────────────────────────
+
+  async function createGroupAndOpen(
+    accountId: string,
+    title: string,
+    recipientDids: string[],
+    expirySeconds: number
+  ): Promise<Conversation> {
+    const created = await service().createGroup(title, "", expirySeconds);
+    const groupId = created.groupId;
+    // Best-effort fan-out: one failed invite must not abort the rest.
+    for (const did of recipientDids) {
+      try {
+        await service().inviteMember(groupId, did, 0);
+      } catch (e) {
+        console.warn("inviteMember failed for", did, e);
+      }
+    }
+    const conv = findOrCreateGroupConversation(groupId, title, accountId);
+    return conv;
+  }
+
+  // TODO(track-F): no in-app entry point calls joinViaLink yet. iOS joins a
+  // group purely via deep link (no dedicated UI), so the trigger lands with the
+  // deep-link plumbing in day 5. The handler itself is complete.
+  async function joinViaLink(
+    masterKey: number[],
+    hostingServerUrl: string,
+    password: number[]
+  ): Promise<JoinResultFfi> {
+    const result = await service().joinViaLink(masterKey, hostingServerUrl, password);
+    await reloadConversations();
+    return result;
+  }
+
+  async function leaveGroup(conversation: Conversation) {
+    if (!conversation.groupId) return;
+    try {
+      await service().leaveGroup(conversation.groupId);
+    } catch (e) {
+      // Don't flip the UI to the irreversible read-only "you left" state when
+      // the server-side leave didn't actually happen — the user is still a
+      // member and can keep participating.
+      console.warn("leaveGroup failed:", e);
+      throw e;
+    }
+    // Keep the conversation visible but read-only (Signal-style): mark it left
+    // and track it as pending so the next loadConversationsFromStore preserves
+    // it if app-core stops returning the left group.
+    const idx = store.conversations.findIndex((c) => c.id === conversation.id);
+    if (idx >= 0) setStore("conversations", idx, "hasLeft", true);
+    pendingConversations.add(conversation.id);
+  }
+
+  // ── Track D: message requests / blocking / timers ──────────────────────────
+
+  async function acceptRequest(conversation: Conversation) {
+    if (!conversation.recipientDid) return;
+    await service().acceptRequest(conversation.recipientDid).catch((e: unknown) => {
+      console.warn("acceptRequest failed:", e);
+    });
+    await reloadConversations();
+  }
+
+  async function deleteRequest(conversation: Conversation) {
+    if (!conversation.recipientDid) return;
+    await service().deleteRequest(conversation.recipientDid).catch((e: unknown) => {
+      console.warn("deleteRequest failed:", e);
+    });
+    if (selectedConversationId() === conversation.id) setSelectedConversationId(null);
+    await reloadConversations();
+  }
+
+  async function reportAndBlock(conversation: Conversation, reason: string) {
+    if (!conversation.recipientDid) return;
+    await service().reportAndBlock(conversation.recipientDid, reason).catch((e: unknown) => {
+      console.warn("reportAndBlock failed:", e);
+    });
+    await reloadConversations();
+  }
+
+  async function blockContact(did: string) {
+    await service().blockContact(did).catch((e: unknown) => {
+      console.warn("blockContact failed:", e);
+    });
+    await reloadConversations();
+  }
+
+  async function unblockContact(did: string) {
+    await service().unblockContact(did).catch((e: unknown) => {
+      console.warn("unblockContact failed:", e);
+    });
+    await reloadConversations();
+  }
+
+  function listBlocked(): Promise<ContactRowFfi[]> {
+    return service().listBlocked().catch((e: unknown) => {
+      console.warn("listBlocked failed:", e);
+      return [] as ContactRowFfi[];
+    });
+  }
+
+  function getConversationTimer(conversationId: string): Promise<number | null> {
+    return service().getConversationTimer(conversationId).catch((e: unknown) => {
+      console.warn("getConversationTimer failed:", e);
+      return null;
+    });
+  }
+
+  async function setConversationTimer(recipientDid: string, expirySecs: number | null) {
+    await service().setConversationTimer(recipientDid, expirySecs).catch((e: unknown) => {
+      console.warn("setConversationTimer failed:", e);
+    });
   }
 
   function unreadCount(conversation: Conversation): number {
@@ -811,19 +1314,33 @@ export function AppProvider(props: { children: JSX.Element }) {
           applyInboundDelete(d.conversation_id ?? "", d.author_did, d.sent_at_ms);
           break;
         }
-        case "reactionUpdated":
-          // day-3 has no on-message reaction rendering yet; a list reload picks
-          // up any cached reaction change. (Real reaction state lands in day 4.)
-          needsConversationReload = true;
+        case "reactionUpdated": {
+          const r = ev as Extract<IncomingEvent, { type: "reactionUpdated" }>;
+          applyInboundReaction(
+            r.conversation_id,
+            r.target_author,
+            r.target_sent_at_ms,
+            r.reactor_did,
+            r.emoji,
+            r.removed
+          );
           break;
+        }
         case "messagesExpired": {
           const exp = ev as Extract<IncomingEvent, { type: "messagesExpired" }>;
           for (const cid of exp.conversation_ids) reloadMessagesIfLoaded(cid);
           needsConversationReload = true;
           break;
         }
+        case "groupMetadataChanged": {
+          // app-core has already persisted a system row (e.g. "X made Y an
+          // admin") for this change. Refresh the group's timeline (if loaded)
+          // so it appears, then refresh the conversation list/preview.
+          const gm = ev as Extract<IncomingEvent, { type: "groupMetadataChanged" }>;
+          reloadMessagesIfLoaded(`group-${gm.event.groupId}`);
+          needsConversationReload = true;
+        }
         case "groupInvite":
-        case "groupMetadataChanged":
         case "storageSynced":
           needsConversationReload = true;
           break;
@@ -893,6 +1410,32 @@ export function AppProvider(props: { children: JSX.Element }) {
       ...(prev ?? []),
       msg,
     ]);
+    // Persist the incoming message. app-core does NOT persist messages on the
+    // receive path (the client owns local history), so without this every
+    // received message is lost on app restart/refresh while sent messages
+    // (which are saved) survive. readAtMs stays null (unread) until the
+    // conversation is opened; the store starts the disappearing-messages
+    // countdown on read. Mirrors iOS AppState.
+    void service()
+      .saveMessage({
+        id: msg.id,
+        conversationId,
+        senderDid: m.senderDid,
+        body,
+        sentAtMs: msg.sentAtMs,
+        editedAtMs: null,
+        readAtMs: null,
+        deliveryStatus: msg.deliveryStatus,
+        editCount: 0,
+        deleted: false,
+        kind: 0,
+        metadata: null,
+        expireTimerSecs: m.expireTimerSecs,
+        expireAtMs: null,
+      })
+      .catch((err: unknown) => {
+        console.warn("saveMessage (incoming) failed:", err);
+      });
 
     // Update conversation preview, or create the conversation in-memory.
     const convIdx = store.conversations.findIndex((c) => c.id === conversationId);
@@ -905,11 +1448,19 @@ export function AppProvider(props: { children: JSX.Element }) {
         "lastMessageDate",
         m.sentAtMs ?? Date.now()
       );
+      // Clear stale group system-event fields (see sendOptimistic).
+      setStore("conversations", convIdx, "lastMessageKind", 0);
+      setStore("conversations", convIdx, "lastMessageMetadata", undefined);
     } else {
-      // Conversation not in the list yet — create it in-memory and mark it
-      // pending so the merge in loadConversationsFromStore preserves it across
-      // reloads until its message lands in the DB.
+      // Conversation not in the list yet — create it in-memory. The incoming
+      // message is now persisted (above), so it will also show up in the DB
+      // summaries on the next reload; tracking it pending bridges the gap.
       const isGroup = !!m.groupId;
+      // A DM from a sender that didn't pass the message-request gate is a
+      // request (docs/12 §1). app-core reports the verdict but leaves
+      // persistence to us — flag it so the request banner shows and survives a
+      // refresh.
+      const isRequest = !isGroup && m.isRequest;
       const serverUrl = getServerUrl(accountId);
       const newConv: Conversation = {
         id: conversationId,
@@ -922,11 +1473,18 @@ export function AppProvider(props: { children: JSX.Element }) {
         lastMessageDate: m.sentAtMs ?? Date.now(),
         lastMessageKind: 0,
         isGroup,
-        isRequest: false,
+        isRequest,
         isBlocked: false,
       };
       pendingConversations.add(conversationId);
       setStore("conversations", (prev) => [newConv, ...prev]);
+      if (isRequest) {
+        void service()
+          .setPendingRequest(m.senderDid, true)
+          .catch((e: unknown) => {
+            console.warn("setPendingRequest failed:", e);
+          });
+      }
     }
   }
 
@@ -1018,6 +1576,8 @@ export function AppProvider(props: { children: JSX.Element }) {
             : m
         )
       );
+      // A deleted message drops its reactions too.
+      clearReactionsForMessage(cid, authorDid, sentAtMs);
       // Update conversation preview if the deleted message was the most recent.
       const convIdx = store.conversations.findIndex((c) => c.id === cid);
       if (
@@ -1030,6 +1590,42 @@ export function AppProvider(props: { children: JSX.Element }) {
       // Messages not loaded or no conversation_id — reload to pick up the tombstone.
       void reloadConversations();
     }
+  }
+
+  // Apply an inbound reaction add/remove (iOS `applyInboundReaction`). Replaces
+  // any prior reaction by the same reactor on the target message, then re-adds
+  // it unless this was a removal.
+  function applyInboundReaction(
+    cid: string,
+    targetAuthor: string,
+    targetSentAtMs: number,
+    reactorDid: string,
+    emoji: string,
+    removed: boolean
+  ) {
+    const current = store.reactionsByConversation[cid] ?? [];
+    const withoutReactor = current.filter(
+      (x) =>
+        !(
+          x.targetAuthor === targetAuthor &&
+          x.targetSentAtMs === targetSentAtMs &&
+          x.reactorDid === reactorDid
+        )
+    );
+    const next = removed
+      ? withoutReactor
+      : [
+          ...withoutReactor,
+          {
+            conversationId: cid,
+            targetAuthor,
+            targetSentAtMs,
+            reactorDid,
+            emoji,
+            reactedAtMs: Date.now(),
+          },
+        ];
+    setStore("reactionsByConversation", cid, next);
   }
 
   function startEventLoop() {
@@ -1158,6 +1754,27 @@ export function AppProvider(props: { children: JSX.Element }) {
     displayName,
     setPendingInviteToken: (token) => setStore("pendingInviteToken", token),
     validateInvite,
+    selectedConversationId,
+    selectConversation: (id) => setSelectedConversationId(id),
+    reloadConversations,
+    reactionsFor,
+    loadReactions,
+    toggleReaction,
+    editMessage,
+    loadMessageRevisions,
+    deleteMessage,
+    retryMessage,
+    createGroupAndOpen,
+    joinViaLink,
+    leaveGroup,
+    acceptRequest,
+    deleteRequest,
+    reportAndBlock,
+    blockContact,
+    unblockContact,
+    listBlocked,
+    getConversationTimer,
+    setConversationTimer,
   };
 
   return (

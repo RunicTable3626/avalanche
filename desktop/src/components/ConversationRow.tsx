@@ -1,6 +1,7 @@
 import { useApp } from "../state/AppContext";
 import type { Conversation } from "../models";
 import { formatRelative } from "../lib/format";
+import { groupEventText } from "../lib/groupEvents";
 import AccountAvatar from "./AccountAvatar";
 import "./ConversationRow.css";
 
@@ -11,8 +12,26 @@ interface Props {
 }
 
 export default function ConversationRow(props: Props) {
-  const { unreadCount } = useApp();
-  const n = unreadCount(props.conversation);
+  const { unreadCount, displayName } = useApp();
+  // Reactive accessor (not a captured value): re-reads on every
+  // messagesByConversation change, so the unread badge clears the instant a
+  // conversation is opened (markAllMessagesRead), not only after the row
+  // remounts on navigating away and back.
+  const unread = () => unreadCount(props.conversation);
+  // Format a group system event (e.g. "You made Alice an admin") for the
+  // preview when the last message is one; otherwise show the raw last message.
+  const preview = () => {
+    const c = props.conversation;
+    if (c.lastMessageKind > 0) {
+      return groupEventText(
+        c.lastMessageMetadata,
+        c.lastMessage ?? "",
+        c.accountId,
+        (d) => displayName(d, c.accountId)
+      );
+    }
+    return c.lastMessage ?? "";
+  };
   const did =
     props.conversation.recipientDid ??
     props.conversation.groupId ??
@@ -26,9 +45,7 @@ export default function ConversationRow(props: Props) {
       <AccountAvatar name={props.conversation.title} did={did} />
       <div class="conv-info">
         <div class="conv-title">{props.conversation.title}</div>
-        {props.conversation.lastMessage && (
-          <div class="conv-preview">{props.conversation.lastMessage}</div>
-        )}
+        {preview() && <div class="conv-preview">{preview()}</div>}
       </div>
       <div class="conv-meta">
         {props.conversation.lastMessageDate && (
@@ -36,7 +53,7 @@ export default function ConversationRow(props: Props) {
             {formatRelative(props.conversation.lastMessageDate)}
           </span>
         )}
-        {n > 0 && <span class="unread-badge">{n}</span>}
+        {unread() > 0 && <span class="unread-badge">{unread()}</span>}
       </div>
     </div>
   );

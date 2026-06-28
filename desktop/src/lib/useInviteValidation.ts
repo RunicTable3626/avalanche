@@ -11,7 +11,7 @@ export interface InviteValidation {
 }
 
 /**
- * Shared invite-validation logic used by QRScannerView and InviteLinkEntryView.
+ * Invite-validation logic used by InviteLinkEntryView.
  *
  * @param validateInvite  The `validateInvite` function from `useApp()`.
  * @param onValidated     Called with the resolved InviteInfo on success.

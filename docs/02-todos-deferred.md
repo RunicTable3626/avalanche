@@ -1,5 +1,8 @@
 # Deferred TODOs
 
+## Security / protocol
+- Project auth-token delivery: the token is passed to project webviews as a query parameter (`?token=`, matching iOS), so it lands in the project server's access logs, can leak via `Referer`, and persists in history. A URL hash fragment avoids that but is invisible to server-rendered projects. Decide a leak-resistant scheme that still works server-side (hash for client-only projects, a header/POST handshake, or short-lived single-use tokens) **with the project owner**, and apply it across all platforms + the project interface contract at once.
+
 ## Build samples of the following projects
 - $ Gatekeeper project + onboarding flow (see 24-vetted-onboarding-project); the infra should be there but there's no project yet. `#approvals` group, approve/decline review flow, invite tokens.
 - $ Chatbot to answer questions
@@ -45,6 +48,7 @@
 
 ## Infra
 - Right now foreground apps poll the server every minute for storage updates; implement something that reduces this poll rate -- probably proactive sync of some sort. Part of multi-device implementation.
+- No cancellation path for app-core's blocking receive APIs, so an authenticated WebSocket can linger after logout. `next_events()` (`core/crates/app-core/src/lib.rs`) blocks on `event_rx.recv().await` and only returns when an event arrives or the channel closes; the channel closes only when every `event_tx` clone is dropped, i.e. when `AppCore` is dropped. But a caller must hold the core alive to make the call (desktop: `spawn_blocking(move || app.next_events())`; iOS: `Task.detached { try core.nextEvents() }`), so while a poll is parked over a quiet connection the core cannot be dropped — logout / mode-switch sets the platform's core reference to `None` but the parked call keeps the old core, reconnect task, and authenticated WS alive until the next event wakes it. Same applies to `wait_for_connection_state_change()` (`rx.changed().await`). Affects all clients that run the poll loop (desktop today; iOS once a quiet-connection logout hits it; Android once it wires the loop). Desktop's `clear_session` comment currently overstates this as "die on drop." Fix belongs in app-core: expose a cancellation path the parked `recv()`/`changed()` selects on (shutdown signal), or a bounded poll timeout so the call returns periodically and rechecks a cancel flag; then have each client invoke it on logout.
 - In-place server upgrades (see [`42-server-upgrades.md`](42-server-upgrades.md)). **Phase 1:** rewrite `avalanche-update` to be tag + tarball based and cover the bots (download `av-{server,adminbot,testbot}-$TARGET` for a release tag, migrate, swap all installed components, restart, rollback; stamp the tag into `bootstrap.env` and show it in `avalanche-status`). The shipped updater is still bare-binary/server-only. **Phase 2:** the `av-deploy-<tag>.tar.gz` deploy-bundle model — move the systemd units / Caddyfile / env templates / scripts into `infra/deploy/bundle/`, add the artifact to `release.yml`, thin the configure-page cloud-init down to "fetch bundle + run install.sh", and have `update.sh` refresh the infra glue. **Phase 3:** `#admins` `/upgrade [tag]` command (docs/22) so operators upgrade from inside the app.
 
 ## Project-wide

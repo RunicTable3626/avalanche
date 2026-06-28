@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { FiArrowLeft } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
 import type { InviteInfo } from "../../models/InviteToken";
 import { useInviteValidation } from "../../lib/useInviteValidation";
@@ -26,7 +27,7 @@ export default function InviteLinkEntryView(props: Props) {
       <input
         class="text-input ie-input"
         type="text"
-        placeholder="actnet://... or paste token"
+        placeholder="avalanche://... or paste token"
         value={linkText()}
         onInput={(e) => setLinkText(e.currentTarget.value)}
         onKeyDown={(e) => { if (e.key === "Enter") void handleValidate(linkText()); }}
@@ -41,7 +42,7 @@ export default function InviteLinkEntryView(props: Props) {
         {isValidating() ? "Validating…" : "Continue"}
       </button>
       {props.onBack && (
-        <button class="back-btn ie-back" onClick={props.onBack}>← Back</button>
+        <button class="back-btn ie-back" onClick={props.onBack}><FiArrowLeft size={14} />Back</button>
       )}
     </div>
   );

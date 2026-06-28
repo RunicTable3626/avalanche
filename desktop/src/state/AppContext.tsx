@@ -35,12 +35,14 @@ interface AppStore {
   messagesByConversation: Record<string, Message[]>;
   connectionStates: Record<string, ConnectionState>;
   pendingInviteToken: string | null;
+  serverUrl: string;
 }
 
 // ── Context value ─────────────────────────────────────────────────────────────
 
 interface AppContextValue {
   store: AppStore;
+  service: () => AvalancheService;
   setSelectedTab: (tab: "chats" | "network") => void;
   createAccount: (
     serverUrl: string,
@@ -50,7 +52,8 @@ interface AppContextValue {
   ) => Promise<void>;
   restoreAccounts: () => Promise<void>;
   logout: () => void;
-  switchMode: (mode: ServiceMode) => void;
+  serverUrl: () => string;
+  setServerUrl: (url: string) => void;
   joinServer: (
     serverUrl: string,
     serverName: string,
@@ -106,22 +109,37 @@ function messageFromFfi(m: StoredMessageFfi): Message {
   };
 }
 
+// Delivery-status progression rank: sending(0) → sent(1) → delivered(2) → read(3).
+// `failed` gets -1 so a failure only applies from a non-terminal state and is
+// never treated as "more advanced" than read. Used by applyDeliveryStatusUpdates
+// to ensure receipts only ever move a message forward.
+function deliveryRank(s: DeliveryStatus): number {
+  switch (s) {
+    case DeliveryStatus.sending:   return 0;
+    case DeliveryStatus.sent:      return 1;
+    case DeliveryStatus.delivered: return 2;
+    case DeliveryStatus.read:      return 3;
+    case DeliveryStatus.failed:    return -1;
+  }
+}
+
 // ── Provider ──────────────────────────────────────────────────────────────────
 
 export function AppProvider(props: { children: JSX.Element }) {
   const [store, setStore] = createStore<AppStore>({
     accounts: [],
     isOnboarding: true,
-    serviceMode: ServiceMode.Mock,
+    serviceMode: ServiceMode.DevServer,
     selectedTab: "chats",
     conversations: [],
     messagesByConversation: {},
     connectionStates: {},
     pendingInviteToken: null,
+    serverUrl: "http://localhost:3000",
   });
 
   const [service, setService] = createSignal<AvalancheService>(
-    makeService(ServiceMode.Mock)
+    makeService(ServiceMode.DevServer)
   );
 
   // Reactive display-name cache: reads are tracked by Solid so components
@@ -133,14 +151,67 @@ export function AppProvider(props: { children: JSX.Element }) {
   // Load-once guards
   const loadedConversations = { value: false };
   const loadedMessages: Set<string> = new Set();
+  // Coalesces forced conversation reloads (the inbound-event handlers plus
+  // safety/group actions) so their store reconciles don't interleave. A reload
+  // requested while one is in flight queues exactly one follow-up rather than
+  // launching a second interleaving load.
+  let reloadInFlight: Promise<void> | null = null;
+  let reloadQueued = false;
+  // Conversation ids created in-memory (e.g. an incoming welcome DM) that aren't
+  // backed by a row in the local DB. loadConversationsFromStore preserves only
+  // these across a reload, NOT arbitrary DB-absent entries, which would resurrect
+  // conversations the DB intentionally dropped (e.g. left groups).
+  //
+  // Persistence is the frontend's responsibility; app-core does not auto-persist
+  // (the client owns local history). On this branch the incoming-message handler
+  // does not call saveMessage yet, so a received-DM conversation is held only
+  // here in memory and is lost on app restart. Day 4 wires up that persistence:
+  // once the handler saves received messages, the conversation shows up in the DB
+  // summaries on the next reload and this set just bridges the brief window until
+  // then. The drop-on-DB-appearance path below returns a conversation to the
+  // normal DB-driven lifecycle once it is persisted (e.g. once an outgoing reply
+  // saves).
+  //
+  // TODO: persist incoming messages in the receive handler (wired up in day 4;
+  // removes the session-only / lost-on-restart gap above).
+  const pendingConversations: Set<string> = new Set();
 
   // Event loop lifecycle
   let eventLoopRunning = false;
   let connLoopRunning = false;
+  let eventLoopTimeout: ReturnType<typeof setTimeout> | undefined;
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
+  /**
+   * The single account whose session this context drives today. Multi-account
+   * is not yet implemented on desktop.
+   *
+   * NOTE: the eventual multi-account model is NOT a "currently active" identity
+   * the user switches between — all identities share one inbox (per the mobile
+   * design). So this helper is a stopgap, not a forward-compatible abstraction:
+   * when multi-account lands, callers that assume a single active account will
+   * need to fan out over `store.accounts` / merge per-account state rather than
+   * just swap which account this returns.
+   */
+  function getSoleAccountId(): string {
+    // TODO(robustness): return `null` instead of `""` so callers can
+    // distinguish "no account" from a valid empty-string DID. An empty
+    // string as sentinel could collide with real data in edge cases
+    // (stale event loop after logout).
+    return store.accounts[0]?.id ?? "";
+  }
+
   function getServerUrl(accountId: string): string {
+    // Uses `servers[0]`, the server the account was created with / joined first,
+    // which stands in for the account's discovery/home server until multi-server
+    // is modeled. There is no `isCurrent` field on ServerInfo (the original code
+    // that referenced one was a bug that silently returned "").
+    // TODO(multi-server): per docs/53, an identity has one discovery/home server
+    // plus additional memberships; there is no single user-selected "current
+    // server". When multi-server lands, account-level calls should use the
+    // discovery server and group/DM operations should use the conversation's own
+    // server, rather than a global current-server flag.
     return (
       store.accounts
         .find((a) => a.id === accountId)
@@ -182,12 +253,17 @@ export function AppProvider(props: { children: JSX.Element }) {
     await persistAccounts([...filtered, pa]);
   }
 
-  async function saveServiceMode(mode: ServiceMode) {
+  async function persistServerUrl(url: string) {
     try {
       const s = await loadStore("avalanche.json");
-      await s.set("serviceMode", mode);
+      await s.set("serverUrl", url);
       await s.save();
     } catch {}
+  }
+
+  function setServerUrl(url: string) {
+    setStore("serverUrl", url);
+    void persistServerUrl(url);
   }
 
   // ── Init: read persisted mode on mount ───────────────────────────────────
@@ -195,13 +271,14 @@ export function AppProvider(props: { children: JSX.Element }) {
   void (async () => {
     try {
       const s = await loadStore("avalanche.json");
-      const savedMode = await s.get<string>("serviceMode");
-      if (
-        savedMode === ServiceMode.Mock ||
-        savedMode === ServiceMode.DevServer
-      ) {
-        setStore("serviceMode", savedMode as ServiceMode);
-        setService(makeService(savedMode as ServiceMode));
+      const savedServerUrl = await s.get<string>("serverUrl");
+      // Service mode is no longer user-selectable — mock is a test-only affordance
+      // (constructed directly in tests), not a runtime mode users pick. The live
+      // app always runs DevServer (the store default). We intentionally ignore any
+      // previously persisted "mock" so a dev who toggled it before isn't stranded
+      // with no UI to switch back.
+      if (savedServerUrl != null) {
+        setStore("serverUrl", savedServerUrl);
       }
     } catch {}
   })();
@@ -314,6 +391,10 @@ export function AppProvider(props: { children: JSX.Element }) {
   }
 
   function resetSession() {
+    // Drop the Rust AppCore handle so the old reconnect task + WS connection
+    // die on drop.  The TS-owned polling loop has already been stopped by
+    // stopPolling() above, so clear_session doesn't need to cancel any thread.
+    service().clearSession().catch(() => {});
     // Block restoreAccounts from re-entering while we clear persisted state.
     // Otherwise SplashView.onMount fires restoreAccounts before persistAccounts([])
     // completes, finding stale accounts and auto-signing-in — undoing the logout.
@@ -331,6 +412,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     );
     loadedConversations.value = false;
     loadedMessages.clear();
+    pendingConversations.clear();
     // Reset the reactive display-name cache so components get a reactive
     // update on logout/mode-switch.
     setDisplayNameCache(reconcile({}));
@@ -346,15 +428,8 @@ export function AppProvider(props: { children: JSX.Element }) {
   function logout() {
     resetSession();
     // Fresh service instance so mock state (storedMessages, pendingEvents, etc.)
-    // doesn't bleed into the next session.  Matches switchMode.
+    // doesn't bleed into the next session.
     setService(makeService(store.serviceMode));
-  }
-
-  function switchMode(mode: ServiceMode) {
-    resetSession();
-    setService(makeService(mode));
-    setStore("serviceMode", mode);
-    void saveServiceMode(mode);
   }
 
   async function joinServer(
@@ -368,6 +443,20 @@ export function AppProvider(props: { children: JSX.Element }) {
         ...prev,
         { id: serverUrl, name: serverName, url: serverUrl, displayHost: displayHost(serverUrl, serverName) },
       ]);
+      // Persist the new server so it survives restart.  We re-read persisted
+      // accounts rather than relying on the in-memory snapshot, because the
+      // account may have accumulated additional state (e.g. display name from
+      // login) since it was last written.
+      const persisted = await persistedAccounts();
+      const existingIdx = persisted.findIndex((pa) => pa.did === existingAccountId);
+      if (existingIdx >= 0) {
+        persisted[existingIdx].servers.push({
+          id: serverUrl,
+          name: serverName,
+          url: serverUrl,
+        });
+        await persistAccounts(persisted);
+      }
     }
     enterApp();
   }
@@ -379,7 +468,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     loadedConversations.value = true;
 
     const summaries = await service().loadConversations().catch(() => [] as ConversationSummaryFfi[]);
-    const accountId = store.accounts[0]?.id ?? "";
+    const accountId = getSoleAccountId();
     const serverUrl = getServerUrl(accountId);
 
     const convs: Conversation[] = summaries.map((s) => {
@@ -413,10 +502,58 @@ export function AppProvider(props: { children: JSX.Element }) {
       };
     });
 
-    const sorted = [...convs].sort(
+    const dbIds = new Set(convs.map((c) => c.id));
+    // A pending conversation that now appears in the DB is fully persisted —
+    // stop tracking it so it follows normal DB-driven lifecycle from here on.
+    for (const id of dbIds) pendingConversations.delete(id);
+    // Preserve only still-unpersisted in-memory conversations. Other DB-absent
+    // entries (e.g. a group the DB dropped after leaving) are intentionally let go.
+    const preserved = store.conversations.filter(
+      (c) => !dbIds.has(c.id) && pendingConversations.has(c.id)
+    );
+    const merged = [...convs, ...preserved].sort(
       (a, b) => (b.lastMessageDate ?? 0) - (a.lastMessageDate ?? 0)
     );
-    setStore("conversations", sorted);
+    setStore("conversations", merged);
+  }
+
+  // Force a fresh conversation reload, bypassing the load-once guard. Used by
+  // the inbound-event handlers (and later by safety/group actions). If a reload
+  // is already running, queue exactly one follow-up rather than launching a
+  // second interleaving load — this is the "please reload" path, distinct from
+  // the load-once `loadConversationsFromStore`.
+  function reloadConversations(): Promise<void> {
+    if (reloadInFlight) {
+      reloadQueued = true;
+      return reloadInFlight;
+    }
+    loadedConversations.value = false;
+    reloadInFlight = loadConversationsFromStore().finally(() => {
+      reloadInFlight = null;
+      if (reloadQueued) {
+        reloadQueued = false;
+        void reloadConversations();
+      }
+    });
+    return reloadInFlight;
+  }
+
+  // Reload a conversation's timeline from the store, fully replacing the
+  // in-memory copy (matches iOS `reloadMessagesIfLoaded`). Only acts on an
+  // already-loaded conversation, so it never eagerly loads unopened ones. A full
+  // replace is correct because the store is the source of truth: a row missing
+  // from the reload was deliberately deleted (expired by the disappearing-
+  // messages reaper, docs/03 §5, or tombstoned), so it must leave the UI too.
+  function reloadMessagesIfLoaded(cid: string) {
+    if (!loadedMessages.has(cid)) return;
+    void service()
+      .loadMessages(cid)
+      .then((rows) => {
+        setStore("messagesByConversation", cid, rows.map(messageFromFfi));
+      })
+      .catch((e: unknown) => {
+        console.warn("reloadMessagesIfLoaded failed:", cid, e);
+      });
   }
 
   function loadMessagesFromStore(conversationId: string, _accountId: string) {
@@ -427,9 +564,14 @@ export function AppProvider(props: { children: JSX.Element }) {
       .loadMessages(conversationId)
       .then((rows) => {
         const messages = rows.map(messageFromFfi);
-        setStore("messagesByConversation", conversationId, messages);
+        if (messages.length > 0) {
+          setStore("messagesByConversation", conversationId, messages);
+        }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.warn("loadMessages failed for", conversationId, err);
+        loadedMessages.delete(conversationId);
+      });
   }
 
   async function sendOptimistic(
@@ -477,25 +619,28 @@ export function AppProvider(props: { children: JSX.Element }) {
             : m
         )
       );
-      // Best-effort persist.
-      // TODO: surface save failures to the user (e.g. disk full, IPC error)
-      // rather than silently dropping the message from local history.
-      void service().saveMessage({
-        id: messageId,
-        conversationId,
-        senderDid: senderAccountId,
-        body: text,
-        sentAtMs,
-        editedAtMs: null,
-        readAtMs: sentAtMs,
-        deliveryStatus: DeliveryStatus.sent,
-        editCount: 0,
-        deleted: false,
-        kind: 0,
-        metadata: null,
-        expireTimerSecs: 0,
-        expireAtMs: null,
-      });
+      // Best-effort persist — log failures to console so they are
+      // visible in DevTools but never crash the send path.
+      void service()
+        .saveMessage({
+          id: messageId,
+          conversationId,
+          senderDid: senderAccountId,
+          body: text,
+          sentAtMs,
+          editedAtMs: null,
+          readAtMs: sentAtMs,
+          deliveryStatus: DeliveryStatus.sent,
+          editCount: 0,
+          deleted: false,
+          kind: 0,
+          metadata: null,
+          expireTimerSecs: 0,
+          expireAtMs: null,
+        })
+        .catch((err: unknown) => {
+          console.warn("saveMessage failed:", err);
+        });
     } catch {
       setStore("messagesByConversation", conversationId, (msgs) =>
         (msgs ?? []).map((m) =>
@@ -550,7 +695,9 @@ export function AppProvider(props: { children: JSX.Element }) {
       setStore("messagesByConversation", conversationId, updated);
       void service()
         .markMessagesRead(conversationId, now)
-        .catch(() => {});
+        .catch((e: unknown) => {
+          console.warn("markMessagesRead failed:", e);
+        });
     }
   }
 
@@ -613,7 +760,9 @@ export function AppProvider(props: { children: JSX.Element }) {
             });
           }
         })
-        .catch(() => {})
+        .catch((e: unknown) => {
+          console.warn("contactDisplayName failed:", did, e);
+        })
         .finally(() => {
           displayNamePending.delete(did);
         });
@@ -624,111 +773,275 @@ export function AppProvider(props: { children: JSX.Element }) {
 
   // ── Event loop ────────────────────────────────────────────────────────────
 
+  // Drain a batch of decrypted events (mirrors iOS `AppState.eventLoop`,
+  // AppState.swift). The switch only *collects*; state is applied once after the
+  // loop, so a whole batch triggers at most one conversation reload — this is
+  // what kills the interleaving-reload races the old per-case reloads caused.
+  // Point mutations that don't benefit from batching (edits, deletes) are
+  // applied inline via small named handlers, matching iOS.
   function handleIncomingEvents(events: IncomingEvent[]) {
+    const messages: Extract<IncomingEvent, { type: "message" }>["msg"][] = [];
+    const receiptUpdates: Extract<
+      IncomingEvent,
+      { type: "receiptUpdate" }
+    >["update"][] = [];
+    let needsConversationReload = false;
+
     for (const ev of events) {
       switch (ev.type) {
-        case "message": {
-          const m = ev.msg;
-          const accountId = store.accounts[0]?.id ?? "";
-          const conversationId = m.groupId
-            ? `group-${m.groupId}`
-            : `dm-${accountId}-${m.senderDid}`;
-          const body = new TextDecoder().decode(new Uint8Array(m.plaintext));
-          const msg: Message = {
-            id: crypto.randomUUID(),
-            conversationId,
-            senderAccountId: m.senderDid,
-            body,
-            sentAtMs: m.sentAtMs ?? Date.now(),
-            deliveryStatus: DeliveryStatus.delivered,
-            editCount: 0,
-            isDeleted: false,
-            kind: 0,
-            expireTimerSecs: m.expireTimerSecs,
-          };
-          // TODO: once DevServer mode is wired, reconcile/de-duplicate the
-          // server-delivered copy of an outgoing message against its optimistic
-          // entry (client UUID vs server-assigned id) before appending.
-          setStore("messagesByConversation", conversationId, (prev) => [
-            ...(prev ?? []),
-            msg,
-          ]);
-          // Update conversation preview
-          const convIdx = store.conversations.findIndex(
-            (c) => c.id === conversationId
+        case "message":
+          messages.push(ev.msg);
+          break;
+        case "receiptUpdate":
+          receiptUpdates.push(ev.update);
+          break;
+        case "messageEdited": {
+          const e = ev as Extract<IncomingEvent, { type: "messageEdited" }>;
+          applyInboundEdit(
+            e.conversation_id ?? "",
+            e.author_did,
+            e.sent_at_ms,
+            e.new_body,
+            e.edited_at_ms
           );
-          if (convIdx >= 0) {
-            const previewText = body.length > 100 ? body.slice(0, 100) + "…" : body;
-            setStore("conversations", convIdx, "lastMessage", previewText);
-            setStore("conversations", convIdx, "lastMessageDate", m.sentAtMs ?? Date.now());
-          }
           break;
         }
-        case "receiptUpdate": {
-          const update = ev.update;
-          const msgs = store.messagesByConversation[update.conversationId];
-          if (msgs) {
-            // Delivery-status progression: sending(0) → sent(1) → delivered(2) → read(3).
-            // `failed`(4) is a terminal error state — it can only be set from a
-            // non-terminal state (not from delivered/read), and it must never be
-            // treated as "more advanced" than read.
-            //
-            // rank() maps the four forward states to their progression order and
-            // gives `failed` a rank of -1 so it can only be applied when the
-            // current state is still in the non-terminal range.
-            function rank(s: DeliveryStatus): number {
-              switch (s) {
-                case DeliveryStatus.sending:   return 0;
-                case DeliveryStatus.sent:      return 1;
-                case DeliveryStatus.delivered: return 2;
-                case DeliveryStatus.read:      return 3;
-                case DeliveryStatus.failed:    return -1; // handled separately
-              }
-            }
-            // TODO: range-guard the cast (as in messageFromFfi lines 97-99)
-            // so new backend variants don't silently produce undefined from rank().
-            const incoming = update.deliveryStatus as DeliveryStatus;
-            setStore(
-              "messagesByConversation",
-              update.conversationId,
-              msgs.map((m) => {
-                if (m.sentAtMs !== update.sentAtMs) return m;
-                if (incoming === DeliveryStatus.failed) {
-                  // Only apply `failed` when the message is still non-terminal
-                  // (sending/sent).  A delivered or read message is never
-                  // downgraded to failed by a stale or out-of-order receipt.
-                  if (rank(m.deliveryStatus) <= rank(DeliveryStatus.sent)) {
-                    return { ...m, deliveryStatus: DeliveryStatus.failed };
-                  }
-                  return m;
-                }
-                // For normal forward states, only advance — never go backwards.
-                if (rank(incoming) > rank(m.deliveryStatus)) {
-                  return { ...m, deliveryStatus: incoming };
-                }
-                return m;
-              })
-            );
-          }
+        case "messageDeleted": {
+          const d = ev as Extract<IncomingEvent, { type: "messageDeleted" }>;
+          applyInboundDelete(d.conversation_id ?? "", d.author_did, d.sent_at_ms);
+          break;
+        }
+        case "reactionUpdated":
+          // day-3 has no on-message reaction rendering yet; a list reload picks
+          // up any cached reaction change. (Real reaction state lands in day 4.)
+          needsConversationReload = true;
+          break;
+        case "messagesExpired": {
+          const exp = ev as Extract<IncomingEvent, { type: "messagesExpired" }>;
+          for (const cid of exp.conversation_ids) reloadMessagesIfLoaded(cid);
+          needsConversationReload = true;
           break;
         }
         case "groupInvite":
         case "groupMetadataChanged":
         case "storageSynced":
-          loadedConversations.value = false;
-          void loadConversationsFromStore();
+          needsConversationReload = true;
           break;
         default:
-          // TODO: handle MessageEdited, MessageDeleted, ReactionUpdated,
-          // and MessagesExpired events once the mock/backend emits them.
+          console.warn(
+            "handleIncomingEvents: unknown event type",
+            (ev as { type: string }).type
+          );
           break;
       }
+    }
+
+    // Apply phase — run once for the whole batch.
+    const accountId = getSoleAccountId();
+    for (const m of messages) handleIncomingMessage(m, accountId);
+    if (receiptUpdates.length) applyDeliveryStatusUpdates(receiptUpdates);
+    if (needsConversationReload) void reloadConversations();
+  }
+
+  // Append or reconcile a single decrypted message (iOS `handleIncomingMessage`).
+  function handleIncomingMessage(
+    m: Extract<IncomingEvent, { type: "message" }>["msg"],
+    accountId: string
+  ) {
+    const conversationId = m.groupId
+      ? `group-${m.groupId}`
+      : `dm-${accountId}-${m.senderDid}`;
+    const senderIsSelf = m.senderDid === accountId;
+
+    if (senderIsSelf && m.sentAtMs !== null) {
+      // Echo of our own outgoing message — update the optimistic entry in-place
+      // by sentAtMs instead of appending a duplicate. Only match messages still
+      // in a non-terminal delivery state (sending/sent); a delivered message is
+      // already confirmed and should not be matched again.
+      setStore("messagesByConversation", conversationId, (prev) =>
+        (prev ?? []).map((existing) =>
+          existing.sentAtMs === m.sentAtMs &&
+          existing.senderAccountId === accountId &&
+          (existing.deliveryStatus === DeliveryStatus.sending ||
+            existing.deliveryStatus === DeliveryStatus.sent)
+            ? {
+                ...existing,
+                deliveryStatus: DeliveryStatus.delivered,
+                id: `server-${m.serverId}`,
+              }
+            : existing
+        )
+      );
+      return;
+    }
+
+    // Received from another user — append as a new message.
+    const body = new TextDecoder().decode(new Uint8Array(m.plaintext));
+    const msg: Message = {
+      id: crypto.randomUUID(),
+      conversationId,
+      senderAccountId: m.senderDid,
+      body,
+      sentAtMs: m.sentAtMs ?? Date.now(),
+      deliveryStatus: DeliveryStatus.delivered,
+      editCount: 0,
+      isDeleted: false,
+      kind: 0,
+      expireTimerSecs: m.expireTimerSecs,
+    };
+    setStore("messagesByConversation", conversationId, (prev) => [
+      ...(prev ?? []),
+      msg,
+    ]);
+
+    // Update conversation preview, or create the conversation in-memory.
+    const convIdx = store.conversations.findIndex((c) => c.id === conversationId);
+    if (convIdx >= 0) {
+      const previewText = body.length > 100 ? body.slice(0, 100) + "…" : body;
+      setStore("conversations", convIdx, "lastMessage", previewText);
+      setStore(
+        "conversations",
+        convIdx,
+        "lastMessageDate",
+        m.sentAtMs ?? Date.now()
+      );
+    } else {
+      // Conversation not in the list yet — create it in-memory and mark it
+      // pending so the merge in loadConversationsFromStore preserves it across
+      // reloads until its message lands in the DB.
+      const isGroup = !!m.groupId;
+      const serverUrl = getServerUrl(accountId);
+      const newConv: Conversation = {
+        id: conversationId,
+        title: isGroup ? "Group" : m.senderDid,
+        accountId,
+        serverUrl,
+        recipientDid: isGroup ? undefined : m.senderDid,
+        groupId: m.groupId ?? undefined,
+        lastMessage: body.length > 100 ? body.slice(0, 100) + "…" : body,
+        lastMessageDate: m.sentAtMs ?? Date.now(),
+        lastMessageKind: 0,
+        isGroup,
+        isRequest: false,
+        isBlocked: false,
+      };
+      pendingConversations.add(conversationId);
+      setStore("conversations", (prev) => [newConv, ...prev]);
+    }
+  }
+
+  // Apply a batch of delivery-status receipts (iOS `applyDeliveryStatusUpdates`).
+  // Receipts only ever move a message forward; `failed` applies only from a
+  // non-terminal state (see `deliveryRank`).
+  function applyDeliveryStatusUpdates(
+    updates: Extract<IncomingEvent, { type: "receiptUpdate" }>["update"][]
+  ) {
+    for (const update of updates) {
+      const msgs = store.messagesByConversation[update.conversationId];
+      if (!msgs) continue;
+      const incoming = (
+        update.deliveryStatus >= 0 && update.deliveryStatus <= 4
+          ? update.deliveryStatus
+          : DeliveryStatus.sent
+      ) as DeliveryStatus;
+      setStore(
+        "messagesByConversation",
+        update.conversationId,
+        msgs.map((m) => {
+          if (m.sentAtMs !== update.sentAtMs) return m;
+          if (incoming === DeliveryStatus.failed) {
+            // Only apply `failed` when the message is still non-terminal
+            // (sending/sent). A delivered or read message is never downgraded
+            // to failed by a stale or out-of-order receipt.
+            if (deliveryRank(m.deliveryStatus) <= deliveryRank(DeliveryStatus.sent)) {
+              return { ...m, deliveryStatus: DeliveryStatus.failed };
+            }
+            return m;
+          }
+          // For normal forward states, only advance — never go backwards.
+          if (deliveryRank(incoming) > deliveryRank(m.deliveryStatus)) {
+            return { ...m, deliveryStatus: incoming };
+          }
+          return m;
+        })
+      );
+    }
+  }
+
+  // Apply an inbound edit (iOS `applyInboundEdit`).
+  // TODO(robustness): matching solely on senderAccountId+sentAtMs can collide
+  // if two messages share the same millisecond timestamp. Additionally match on
+  // serverId once echo reconciliation assigns it.
+  function applyInboundEdit(
+    cid: string,
+    authorDid: string,
+    sentAtMs: number,
+    newBody: string,
+    editedAtMs: number
+  ) {
+    if (cid && store.messagesByConversation[cid]) {
+      setStore("messagesByConversation", cid, (prev) =>
+        (prev ?? []).map((m) =>
+          m.senderAccountId === authorDid && m.sentAtMs === sentAtMs
+            ? {
+                ...m,
+                body: newBody,
+                editedAtMs,
+                editCount: m.editCount + 1,
+              }
+            : m
+        )
+      );
+      // Update conversation preview if the edited message was the most recent.
+      const convIdx = store.conversations.findIndex((c) => c.id === cid);
+      if (
+        convIdx >= 0 &&
+        store.conversations[convIdx]?.lastMessageDate === sentAtMs
+      ) {
+        const previewText =
+          newBody.length > 100 ? newBody.slice(0, 100) + "..." : newBody;
+        setStore("conversations", convIdx, "lastMessage", previewText);
+      }
+    } else {
+      // Messages not loaded or no conversation_id — reload to pick up the edit.
+      void reloadConversations();
+    }
+  }
+
+  // Apply an inbound delete tombstone (iOS `applyInboundDelete`).
+  function applyInboundDelete(cid: string, authorDid: string, sentAtMs: number) {
+    if (cid && store.messagesByConversation[cid]) {
+      setStore("messagesByConversation", cid, (prev) =>
+        (prev ?? []).map((m) =>
+          m.senderAccountId === authorDid && m.sentAtMs === sentAtMs
+            ? { ...m, isDeleted: true }
+            : m
+        )
+      );
+      // Update conversation preview if the deleted message was the most recent.
+      const convIdx = store.conversations.findIndex((c) => c.id === cid);
+      if (
+        convIdx >= 0 &&
+        store.conversations[convIdx]?.lastMessageDate === sentAtMs
+      ) {
+        setStore("conversations", convIdx, "lastMessage", "[deleted]");
+      }
+    } else {
+      // Messages not loaded or no conversation_id — reload to pick up the tombstone.
+      void reloadConversations();
     }
   }
 
   function startEventLoop() {
     if (eventLoopRunning) return;
     eventLoopRunning = true;
+
+    // Unified async polling loop.  `nextEvents()` blocks until decrypted
+    // events arrive (WebSocket push via app-core's channel), then drains the
+    // batch.  The Tauri command is async — it parks on the tokio runtime, so
+    // the JS event loop stays responsive.  Both DevServer and Mock mode use
+    // the same pattern; the ordering race is gone because the consumer owns
+    // the cadence.
     const loop = async () => {
       if (!eventLoopRunning) return;
       try {
@@ -736,36 +1049,44 @@ export function AppProvider(props: { children: JSX.Element }) {
         handleIncomingEvents(events);
         if (eventLoopRunning) void loop();
       } catch {
-        // service errored — back off before retrying to avoid tight-spin IPC storm
         if (eventLoopRunning) {
-          // TODO: use an abortable delay (or clearTimeout/flag) so that
-          // stopPolling() during the 1s backoff doesn't spawn a second
-          // concurrent event loop via the stale timer.
-          await new Promise<void>((r) => setTimeout(r, 1000));
-          void loop();
+          eventLoopTimeout = setTimeout(() => void loop(), 1000);
         }
       }
     };
     void loop();
   }
 
+  // Mirror iOS `connectionStateLoop` (AppState.swift:1427): seed from the
+  // current snapshot, then block on `waitForConnectionStateChange` and copy
+  // each state the core emits into `connectionStates[accountId]`. The Rust
+  // core owns reconnection and surfaces its progress as `reconnecting` /
+  // `connected` states, so this loop is a thin mirror — connectivity churn
+  // flows through as ConnectionState values, NOT as JS-side retries. A throw
+  // means the core/session is gone, which is terminal (we deliberately do not
+  // layer a second backoff scheme on top of the core's own reconnect logic).
   function startConnectionLoop() {
     if (connLoopRunning) return;
-    const accountId = store.accounts[0]?.id;
+    const accountId = getSoleAccountId();
+    // Guard against empty DID: prevents storing connection state at key ""
+    // which would pollute the aggregate with a phantom connection.  This
+    // also catches the transient state after resetSession clears accounts
+    // but before enterApp re-establishes a session.
     if (!accountId) return;
     connLoopRunning = true;
 
     const loop = async (last: ConnectionState) => {
-      if (!connLoopRunning) return;
-      try {
-        const next = await service().waitForConnectionStateChange(last);
+      while (connLoopRunning) {
+        let next: ConnectionState;
+        try {
+          next = await service().waitForConnectionStateChange(last);
+        } catch {
+          connLoopRunning = false;
+          break;
+        }
+        if (!connLoopRunning) break;
+        last = next;
         setStore("connectionStates", accountId, next);
-        if (connLoopRunning) void loop(next);
-      } catch {
-        // TODO: retry with backoff on transient failures instead of
-        // silently killing the connection loop. Also reset connLoopRunning
-        // if the initial connectionState() call rejects so the loop isn't
-        // permanently deadlocked.
       }
     };
 
@@ -775,8 +1096,9 @@ export function AppProvider(props: { children: JSX.Element }) {
         setStore("connectionStates", accountId, state);
         void loop(state);
       })
-      // TODO: reset connLoopRunning on rejection so the loop can recover.
-      .catch(() => {});
+      .catch(() => {
+        connLoopRunning = false;
+      });
   }
 
   function startPolling() {
@@ -787,6 +1109,10 @@ export function AppProvider(props: { children: JSX.Element }) {
   function stopPolling() {
     eventLoopRunning = false;
     connLoopRunning = false;
+    if (eventLoopTimeout) {
+      clearTimeout(eventLoopTimeout);
+      eventLoopTimeout = undefined;
+    }
   }
 
   onCleanup(stopPolling);
@@ -813,11 +1139,13 @@ export function AppProvider(props: { children: JSX.Element }) {
 
   const ctx: AppContextValue = {
     store,
+    service,
     setSelectedTab: (tab) => setStore("selectedTab", tab),
     createAccount,
     restoreAccounts,
     logout,
-    switchMode,
+    serverUrl: () => store.serverUrl,
+    setServerUrl,
     joinServer,
     sendMessage,
     sendGroupMessage,

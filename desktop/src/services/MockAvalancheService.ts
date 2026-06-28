@@ -11,7 +11,6 @@ import type {
   MessageRevisionFfi,
   GroupSummaryFfi,
   CreatedGroupFfi,
-  DecryptedMessage,
   IncomingEvent,
   InviteInfo,
   DeliveryStatusUpdate,
@@ -322,10 +321,6 @@ export class MockAvalancheService implements AvalancheService {
     this.echoReply(`group-${groupId}`, "did:plc:organizer", plaintext);
   }
 
-  async receiveMessages(): Promise<DecryptedMessage[]> {
-    return [];
-  }
-
   nextEvents(): Promise<IncomingEvent[]> {
     if (this.pendingEvents.length > 0) {
       return Promise.resolve(this.pendingEvents.splice(0));
@@ -407,6 +402,10 @@ export class MockAvalancheService implements AvalancheService {
   async unblockContact(_did: string): Promise<void> {}
   async leaveServer(): Promise<void> {}
   async deleteIdentity(): Promise<void> {}
+
+  async clearSession(): Promise<void> {
+    // Mock mode has no Rust backend session to clear.
+  }
 
   async fetchProjects(): Promise<ProjectInfoFfi[]> {
     return [

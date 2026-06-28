@@ -63,7 +63,11 @@
 }
 
 .delivery {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   font-size: 11px;
+  vertical-align: middle;
 }
 .delivery.read {
   color: var(--color-accent);

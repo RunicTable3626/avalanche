@@ -17,7 +17,6 @@ export type {
   ContactRowFfi,
   ConversationSummaryFfi,
   CreatedGroupFfi,
-  DecryptedMessage,
   DeliveryStatusUpdate,
   GroupEventKind,
   GroupMemberFfi,
@@ -58,7 +57,6 @@ export interface AvalancheService {
   // Core messaging
   sendDm(recipientDid: string, plaintext: number[], sentAtMs: number): Promise<void>;
   sendGroupMessage(groupId: string, plaintext: number[], sentAtMs: number): Promise<void>;
-  receiveMessages(): Promise<import("../bindings").DecryptedMessage[]>;
   nextEvents(): Promise<import("../bindings").IncomingEvent[]>;
   saveMessage(msg: import("../bindings").StoredMessageFfi): Promise<void>;
   loadConversations(): Promise<import("../bindings").ConversationSummaryFfi[]>;
@@ -85,6 +83,9 @@ export interface AvalancheService {
   // Account lifecycle
   leaveServer(): Promise<void>;
   deleteIdentity(): Promise<void>;
+
+  // Session management
+  clearSession(): Promise<void>;
 
   // Projects
   fetchProjects(): Promise<import("../bindings").ProjectInfoFfi[]>;

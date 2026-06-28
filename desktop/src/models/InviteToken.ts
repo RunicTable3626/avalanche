@@ -3,6 +3,11 @@
 // pass it to `commands.validateInvite(token)`.
 //
 // InviteInfo is now code-generated from Rust via tauri-specta → bindings.ts.
+//
+// TODO(parity): when rebasing onto a main that includes `privacy_policy_url`
+// on InviteInfo (upstream 44cfce2), regenerate bindings.ts and wire the field
+// into IdentityPickerView / NewAccountView so users see the privacy link before
+// creating an account. iOS and Android already consume this field.
 
 export type { InviteInfo } from "../bindings";
 

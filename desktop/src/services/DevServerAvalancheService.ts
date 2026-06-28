@@ -1,10 +1,10 @@
 import { commands } from "../bindings";
+import { invoke } from "@tauri-apps/api/core";
 import type { AvalancheService } from "./AvalancheService";
 import type {
   AccountResult,
   ConnectionState,
   CreatedGroupFfi,
-  DecryptedMessage,
   GroupSummaryFfi,
   IncomingEvent,
 } from "../bindings";
@@ -53,10 +53,6 @@ export class DevServerAvalancheService implements AvalancheService {
 
   async sendGroupMessage(groupId: string, plaintext: number[], sentAtMs: number): Promise<void> {
     await ok(commands.sendGroupMessage(groupId, plaintext, sentAtMs));
-  }
-
-  async receiveMessages(): Promise<DecryptedMessage[]> {
-    return ok(commands.receiveMessages());
   }
 
   async nextEvents(): Promise<IncomingEvent[]> {
@@ -149,6 +145,12 @@ export class DevServerAvalancheService implements AvalancheService {
 
   async deleteIdentity(): Promise<void> {
     await ok(commands.deleteIdentity());
+  }
+
+  // ── Session management ──────────────────────────────────────────────
+
+  async clearSession(): Promise<void> {
+    await invoke("clear_session");
   }
 
   // ── Projects ───────────────────────────────────────────────────────

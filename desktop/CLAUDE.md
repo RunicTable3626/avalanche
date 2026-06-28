@@ -38,28 +38,48 @@ There is no main/renderer process split. The app has two layers:
 **Rust backend** (`src-tauri/src/lib.rs`):
 - Links against `app-core` directly — no Node.js intermediary
 - Exposes methods as Tauri commands (`#[tauri::command]`)
-- Manages WebSocket loops, metadata persistence via `tauri-plugin-store`
+- Manages metadata persistence via `tauri-plugin-store`
 
 **Solid frontend** (`src/`, runs in a WebView sandbox):
 - Runs Solid — no direct native access
 - Calls Rust via `invoke('command_name', args)`
-- Receives push events via Tauri event system
+- Polls for decrypted events via Tauri commands (TS-owned loop, no background thread)
 
 All Rust core calls flow: `Solid → invoke() → src-tauri/src/lib.rs → app-core → Rust`.
+
+### Architectural invariant: TS owns the event loop
+
+`startEventLoop()` in `AppContext.tsx` polls `nextEvents()` in a loop. The
+Tauri command blocks on the Rust side (`ffi_runtime().block_on`) and returns
+via IPC when events arrive — the JS event loop stays responsive. Each poll
+parks one blocking-pool thread for the duration of the call (the event loop and
+the connection-state loop run concurrently, so steady state is two), but each
+loop serializes its own calls — no unbounded fan-out. Events queue in
+app-core's MPSC channel between polls. No registration race — the consumer
+initiates every fetch.
+
+- ❌ Never spawn a thread/task in `lib.rs` to call `next_events()`
+- ❌ Never `app_handle.emit(…)` events or `listen(…)` in the frontend
+- ❌ Never add generation counters or cancellation tokens to `AppState`
 
 ---
 
 ## Desktop Workflow
 
 ```bash
-cd desktop && cargo tauri dev    # dev mode with hot reload
-cd desktop && cargo tauri build  # package for current platform
+cd desktop && npm run tauri dev    # dev mode with hot reload (or: make dev-desktop)
+cd desktop && npm run tauri build  # package for current platform
 ```
+
+The Tauri CLI is the npm-local `@tauri-apps/cli` (a devDependency), invoked via
+the `tauri` package script. `cargo tauri ...` only works if you've separately
+`cargo install tauri-cli`, which this repo does not assume.
 
 FFI constraints:
 - Tauri commands are async-capable — use `async fn` for Rust calls that block
-- WebSocket loops run in the Rust backend via Tauri's async runtime
-- Push events to the frontend via `app_handle.emit('event-name', payload)`
+- Event polling runs in the TS frontend via a loop calling `nextEvents()` — the
+  Tauri command blocks on the Rust side but returns via IPC when events arrive,
+  so the JS event loop stays responsive
 
 ---
 
@@ -119,6 +139,7 @@ The shell is the only WebView with Tauri command access. Keep these invariants:
 - Strict TypeScript (`strict: true` in `tsconfig.json`, no `any`)
 - All message content received as typed data from Tauri commands — never parse raw bytes in the frontend
 - Minimal Tauri command surface: only declare commands the shell legitimately needs in `tauri.conf.json` capabilities
+- **Project webviews are IPC-isolated by capability scope, and that scope is the only thing isolating them.** A project page (`new WebviewWindow("project-*", …)`) loads untrusted remote content. It can't reach app-core IPC because (a) the `default` capability scopes `allow-all`/core to `windows: ["main"]` + `local: true`, so a `project-*` label and a remote URL are both denied by the ACL, and (b) `withGlobalTauri: false` means no `__TAURI__` bridge is injected. Never broaden that capability's window scope to a glob, add a `remote` block, or set `withGlobalTauri: true` without review. After any change to capabilities or webview creation, **verify isolation empirically rather than from the config read**: open a project window and confirm `invoke('ping')` from its console is rejected (`ping not allowed on window project-..., allowed on: [windows: main, URL: local]`).
 
 ---
 
@@ -159,8 +180,8 @@ interface **and** present in the `ctx` object literal. (This crashed the entire
 invite/QR onboarding path once.)
 
 ### Background loops: idempotent start, tear down before swapping state
-`startEventLoop`/`startConnectionLoop` (and `startPolling`) must guard against
-re-entry (`if (running) return;`) — they're called from more than one place
+`startPolling` (which starts the event + connection loops) must guard against
+re-entry (`if (running) return;`) — it's called from more than one place
 (`restoreAccounts` and `createAccount`), and a double start runs duplicate loops that
 process every incoming event twice. When switching accounts/service, call
 `stopPolling`/`resetSession` **before** swapping the `service()` signal, or the
@@ -198,19 +219,37 @@ must be a Solid store/signal, not a plain `Map`. A non-reactive cache never prop
 the resolved value to the UI and re-fires the fetch every render. Back such caches with
 reactive state and guard against duplicate in-flight fetches per key.
 
-### Optimistic updates need an id-reconciliation story
-Optimistic messages use a client-generated id. Before DevServer/real-backend mode is
-wired, the incoming-event handler must reconcile/de-duplicate the server-delivered copy
-of an outgoing message against its optimistic entry (client id vs server id) — otherwise
-it appears twice. Leave a `// TODO:` at the append site until that path exists.
-
-### Enum comparisons must encode the real ordering
-Don't `>`-compare enum members whose numeric values aren't in semantic order. E.g.
-`DeliveryStatus` is `sending0/sent1/delivered2/read3/failed4` — `failed` is terminal,
-not "more advanced than read." Use an explicit rank/compare for progression, and treat
-terminal states (`failed`) separately rather than by numeric magnitude.
-
 ### Distinguish "no connection" from "connected"
 Aggregate/derived connection state must not default to `connected` when there are zero
 connections (e.g. no account yet, or just after logout) — return a non-connected state
 so the UI doesn't show a green indicator before any connection exists.
+
+### Debugging best practices (from the Day 3 trenches)
+
+#### Event polling: TS-owned loop, not a Rust background thread
+
+`nextEvents()` blocks on the Rust side until decrypted events arrive, then
+returns via IPC. The TS side calls it in a loop, which parks one blocking-pool
+thread per in-flight call (the connection-state loop adds a second). Each loop
+serializes its own calls. Do not reintroduce a Rust background thread or
+`app_handle.emit(…)` — the loop is the single unified path for both DevServer
+and Mock mode.
+
+#### Unicode in prompts breaks JSON
+
+Em dashes (`—`), curly quotes (`‘` `’`), and other non-ASCII
+characters in system prompts silently break `JSON.stringify()`. Some providers
+reject these with "invalid unicode code point". Use ASCII-safe alternatives
+(`--`, `'`, `"`).
+
+#### Model response format varies by provider
+
+Don't assume `content[0].text`. DeepSeek v4 models return a `"thinking"` block
+first. Find the first block with `type: "text"`; fall back to `thinking` text
+if no text block is present. Defensive parsing over positional indexing — the
+same fix applies to any LLM backend swap.
+
+#### `.env` reload won't override existing env vars
+
+`dev.py` uses `os.environ.setdefault()` which skips variables already in the
+environment. Changing a value in `.env` requires a fresh shell.

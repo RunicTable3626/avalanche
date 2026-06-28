@@ -1,16 +1,20 @@
 import { useLocation, A } from "@solidjs/router";
 import type { RouteSectionProps } from "@solidjs/router";
 import type { JSX } from "solid-js";
+import { Dynamic } from "solid-js/web";
+import { FiSettings, FiMessageSquare, FiGlobe, FiLogOut } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
 import "./MainLayout.css";
 
-const NAV_ITEMS: Array<{ path: string; label: string; icon: string }> = [
-  { path: "/chats", label: "Chats", icon: "💬" },
-  { path: "/network", label: "Network", icon: "🌐" },
+type NavItem = { path: string; label: string; icon: typeof FiMessageSquare };
+
+const NAV_ITEMS: NavItem[] = [
+  { path: "/chats", label: "Chats", icon: FiMessageSquare },
+  { path: "/network", label: "Network", icon: FiGlobe },
 ];
 
 interface NavLinkProps {
-  item: { path: string; label: string; icon: string };
+  item: NavItem;
 }
 
 function NavLink(props: NavLinkProps) {
@@ -27,7 +31,7 @@ function NavLink(props: NavLinkProps) {
       class={`sidebar-link${isActive() ? " active" : ""}`}
       aria-label={props.item.label}
     >
-      <span>{props.item.icon}</span>
+      <Dynamic component={props.item.icon} size={22} />
       <span class="sidebar-label">{props.item.label}</span>
     </A>
   );
@@ -43,8 +47,14 @@ export default function MainLayout(props: RouteSectionProps): JSX.Element {
           <NavLink item={item} />
         ))}
         <div class="sidebar-spacer" />
+        <A href="/settings" class="sidebar-settings-link" aria-label="Settings" title="Settings">
+          {/* Feather "settings" outlined gear, matching iOS SF Symbol
+              `gearshape` and Android's Material settings icon. Renders with
+              stroke="currentColor", so it inherits the link color + hover. */}
+          <FiSettings size={22} aria-hidden="true" />
+        </A>
         <button class="logout-btn" onClick={logout} title="Sign out">
-          <span>↩</span>
+          <FiLogOut size={20} aria-hidden="true" />
           <span class="logout-label">Sign out</span>
         </button>
       </nav>

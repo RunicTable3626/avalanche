@@ -4,7 +4,7 @@
 // All FFI types are now derived directly on app-core via the "specta" feature —
 // no more manual ffi_types.rs mirror.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use app_core::AppCore;
 
@@ -19,7 +19,7 @@ struct AccountResult {
 // ── App state ─────────────────────────────────────────────────────────────────
 
 struct AppState {
-    app: Mutex<Option<std::sync::Arc<AppCore>>>,
+    app: Mutex<Option<Arc<AppCore>>>,
 }
 
 fn get_app(state: &tauri::State<'_, AppState>) -> Result<std::sync::Arc<AppCore>, String> {
@@ -47,7 +47,6 @@ pub fn run() {
             recover_from_blob,
             send_dm,
             send_group_message,
-            receive_messages,
             next_events,
             save_message,
             load_conversations,
@@ -70,6 +69,7 @@ pub fn run() {
             unblock_contact,
             leave_server,
             delete_identity,
+            clear_session,
             fetch_projects,
             request_project_token,
             validate_invite,
@@ -100,7 +100,7 @@ pub fn run() {
             load_message_revisions,
         ]);
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "codegen")]
     {
         builder
             .export(
@@ -211,20 +211,20 @@ fn send_group_message(
         .map_err(|e| e.to_string())
 }
 
+/// Async so it runs off the main thread. `app_core.next_events()` blocks until
+/// decrypted events arrive (WebSocket push via app-core's MPSC channel), so it
+/// must not run on the main thread — that would freeze the WebView. We clone the
+/// `Arc<AppCore>` out of `State` *before* awaiting (a `State` reference cannot be
+/// held across an await point) and run the blocking call on the blocking pool.
 #[tauri::command]
 #[specta::specta]
-fn receive_messages(state: tauri::State<'_, AppState>) -> Result<Vec<app_core::DecryptedMessage>, String> {
-    get_app(&state)?
-        .receive_messages()
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-#[specta::specta]
-fn next_events(state: tauri::State<'_, AppState>) -> Result<Vec<app_core::IncomingEvent>, String> {
-    get_app(&state)?
-        .next_events()
-        .map_err(|e| e.to_string())
+async fn next_events(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<app_core::IncomingEvent>, String> {
+    let app = get_app(&state)?;
+    tauri::async_runtime::spawn_blocking(move || app.next_events().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -434,6 +434,19 @@ fn delete_identity(state: tauri::State<'_, AppState>) -> Result<(), String> {
     result
 }
 
+// ── Session management ─────────────────────────────────────────────────────────
+
+/// Drops the `Arc<AppCore>` handle so `get_app` returns "no account". Called by
+/// the frontend on logout / mode-switch. The TS-owned polling loop has already
+/// been stopped, so there is no background thread to cancel — this just releases
+/// the core so the old reconnect task + WS connection die on drop.
+#[tauri::command]
+#[specta::specta]
+fn clear_session(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    *state.app.lock().map_err(|e| format!("lock poisoned: {}", e))? = None;
+    Ok(())
+}
+
 // ── Projects ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -470,15 +483,23 @@ fn connection_state(state: tauri::State<'_, AppState>) -> Result<app_core::Conne
     Ok(get_app(&state)?.connection_state())
 }
 
+/// Async + `spawn_blocking` for the same reason as `next_events`: this parks on
+/// `ffi_runtime().block_on(rx.changed().await)` until the connection state
+/// changes, so it must not run on the main thread or it freezes the WebView.
+/// `startConnectionLoop` long-polls this concurrently with the event loop.
 #[tauri::command]
 #[specta::specta]
-fn wait_for_connection_state_change(
+async fn wait_for_connection_state_change(
     state: tauri::State<'_, AppState>,
     last: app_core::ConnectionState,
 ) -> Result<app_core::ConnectionState, String> {
-    get_app(&state)?
-        .wait_for_connection_state_change(last)
-        .map_err(|e| e.to_string())
+    let app = get_app(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.wait_for_connection_state_change(last)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Groups ────────────────────────────────────────────────────────────────────
@@ -757,3 +778,4 @@ fn load_message_revisions(
         .load_message_revisions(conversation_id, author, sent_at_ms)
         .map_err(|e| e.to_string())
 }
+

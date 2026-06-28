@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { FiArrowLeft, FiUser } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
 import type { InviteInfo } from "../../models/InviteToken";
 import "./NewAccountView.css";
@@ -39,7 +40,7 @@ export default function NewAccountView(props: Props) {
     <div class="new-account">
         <div class="na-title">New Identity</div>
         <div class="na-subtitle">on {props.inviteInfo.serverName}</div>
-        <div class="na-avatar">👤</div>
+        <div class="na-avatar"><FiUser size={32} /></div>
         <input
           class="text-input na-input"
           type="text"
@@ -60,7 +61,7 @@ export default function NewAccountView(props: Props) {
           {isCreating() ? "Creating…" : "Create Identity"}
         </button>
         {props.onBack && !isCreating() && (
-          <button class="back-btn na-back" onClick={props.onBack}>← Back</button>
+          <button class="back-btn na-back" onClick={props.onBack}><FiArrowLeft size={14} />Back</button>
         )}
     </div>
   );

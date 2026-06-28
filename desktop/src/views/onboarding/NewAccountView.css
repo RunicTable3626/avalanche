@@ -37,14 +37,6 @@
   text-align: center;
   box-sizing: border-box;
 }
-.na-error {
-  color: var(--color-error);
-  font-size: 13px;
-  margin: 8px 0 0;
-  text-align: center;
-  max-width: 440px;
-  width: 100%;
-}
 .na-btn {
   margin-top: 20px;
   width: 100%;
@@ -53,6 +45,9 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
+}
+.na-recover {
+  margin-top: 20px;
 }
 .na-back {
   margin-top: 16px;

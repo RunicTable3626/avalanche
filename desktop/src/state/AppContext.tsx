@@ -9,6 +9,12 @@ import {
 import { createStore, produce, reconcile } from "solid-js/store";
 import { load as loadStore } from "@tauri-apps/plugin-store";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import type { Account, Conversation, InviteInfo, ServerInfo } from "../models";
 import { displayHost } from "../lib/format";
 import { DeliveryStatus, type Message } from "../models/Message";
@@ -1496,6 +1502,27 @@ export function AppProvider(props: { children: JSX.Element }) {
     return did;
   }
 
+  // Fire a native notification for an inbound message (mirrors iOS
+  // NotificationPresenter.present). Suppressed when the user is already viewing
+  // this conversation in a focused window; shown otherwise (window unfocused, or
+  // focused on a different conversation). Permission is requested on first use.
+  async function maybeNotify(conversationId: string, senderDid: string, body: string) {
+    const text = body.trim();
+    if (!text) return;
+    try {
+      const focused = await getCurrentWindow().isFocused().catch(() => false);
+      if (focused && selectedConversationId() === conversationId) return;
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (!granted) return;
+      const title = displayNameCache[senderDid] || senderDid;
+      const preview = text.length > 120 ? text.slice(0, 120) + "…" : text;
+      sendNotification({ title, body: preview });
+    } catch (e) {
+      console.warn("notification failed:", e);
+    }
+  }
+
   // ── Event loop ────────────────────────────────────────────────────────────
 
   // Drain a batch of decrypted events (mirrors iOS `AppState.eventLoop`,
@@ -1636,6 +1663,9 @@ export function AppProvider(props: { children: JSX.Element }) {
       ...(prev ?? []),
       msg,
     ]);
+    // Fire a native notification for the inbound message (suppressed when the
+    // user is already viewing this conversation in a focused window).
+    void maybeNotify(conversationId, m.senderDid, body);
     // Persist the incoming message. app-core does NOT persist messages on the
     // receive path (the client owns local history), so without this every
     // received message is lost on app restart/refresh while sent messages

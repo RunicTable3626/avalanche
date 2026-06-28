@@ -435,16 +435,32 @@ struct ConversationView: View {
         Task {
             do {
                 if conversation.isGroup {
+                    // Generate a link preview for the first URL (docs/35),
+                    // best-effort, before sending — same as the DM path.
+                    let previews = await appState.linkPreviews(for: text, accountId: conversation.accountId)
+                    if !previews.isEmpty,
+                       let idx = appState.messagesByConversation[conversation.id]?.firstIndex(where: { $0.id == messageId }) {
+                        appState.messagesByConversation[conversation.id]?[idx].previews = previews
+                    }
                     try await appState.sendGroupMessage(
                         conversation: conversation,
                         text: text,
                         messageId: messageId,
-                        sentAtMs: nowMs
+                        sentAtMs: nowMs,
+                        previews: previews
                     )
                 } else {
                     guard let recipientDid = conversation.recipientDid else {
                         errorMessage = "Cannot send: no recipient"
                         return
+                    }
+                    // Generate a link preview for the first URL (docs/35),
+                    // best-effort, before sending. Reflect it on the optimistic
+                    // row so the card shows immediately.
+                    let previews = await appState.linkPreviews(for: text, accountId: conversation.accountId)
+                    if !previews.isEmpty,
+                       let idx = appState.messagesByConversation[conversation.id]?.firstIndex(where: { $0.id == messageId }) {
+                        appState.messagesByConversation[conversation.id]?[idx].previews = previews
                     }
                     try await appState.sendMessage(
                         conversationId: conversation.id,
@@ -452,7 +468,8 @@ struct ConversationView: View {
                         recipientDid: recipientDid,
                         senderAccountId: conversation.accountId,
                         messageId: messageId,
-                        sentAtMs: nowMs
+                        sentAtMs: nowMs,
+                        previews: previews
                     )
                 }
             } catch {

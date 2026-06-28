@@ -160,6 +160,10 @@ dependencies {
     // JSON persistence (SharedPreferences-backed metadata; mirrors iOS Codable)
     implementation(libs.kotlinx.serialization.json)
 
+    // HTML parsing for link-preview OpenGraph extraction (docs/35). The iOS
+    // analog is LPMetadataProvider; Jsoup is the JVM standard.
+    implementation(libs.jsoup)
+
     // Rust core via UniFFI. The generated Kotlin binding (uniffi.app_core) calls
     // into libapp_core.so through JNA, so JNA's own native dispatch library
     // (libjnidispatch.so) must be bundled into the APK — which only happens when

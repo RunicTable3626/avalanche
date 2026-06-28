@@ -182,6 +182,11 @@ fun MessageBubble(
             }
             }
 
+            // Link-preview cards (docs/35) below the text bubble.
+            message.previews.forEach { preview ->
+                LinkPreviewCard(preview = preview, isMe = isMe, loader = attachmentLoader)
+            }
+
             // Reaction clusters
             val clusters = reactionClusters(reactions, myDid)
             if (clusters.isNotEmpty()) {

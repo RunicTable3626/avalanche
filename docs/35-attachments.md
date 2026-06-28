@@ -147,7 +147,9 @@ For PDFs/docs we render an icon + `file_name` + size; no thumbnail unless the se
 
 ## Link previews
 
-When a message body contains a URL, we show a rich preview card (title, description, image, source domain) — and it reuses the attachment system wholesale, so it needs no new storage machinery. This follows Signal's `Preview` shape exactly.
+*Status: implemented (2026-06-28).* When a message body contains a URL, we show a rich preview card (title, description, image, source domain) — and it reuses the attachment system wholesale, so it needs no new storage machinery. This follows Signal's `Preview` shape exactly.
+
+**Where generation runs (revised 2026-06-28).** The earlier plan had app-core fetch + parse the page. We moved the *fetch + OpenGraph parse to the native client layer* — iOS uses `LPMetadataProvider` (the OS's own link-metadata fetcher, what iMessage uses); Android uses **Jsoup** (the JVM-standard HTML parser) to fetch + extract the OG tags — both real parsers, no hand-rolled HTML parsing. Rationale: it keeps outbound-HTTP-to-arbitrary-URLs + an HTML-parsing dependency out of app-core (which also runs in bots/server contexts — an SSRF surface), and iOS gets a much higher-quality result for free. **app-core keeps the protocol parts only**: the `LinkPreview` wire type, taking the native-supplied og:image bytes through the *existing* `upload_attachment` path (so the image is a normal encrypted blob), threading previews through send/receive/store, and enforcing the anti-spoof rule on receive (`anti_spoof_previews`). Generation is client-invoked only (never automatic in core). Wired for both DM and group sends; the card renders for both.
 
 The load-bearing privacy invariant: **the sender generates the preview at compose time; the recipient never fetches the URL.** The sender's client fetches the page's Open Graph metadata, downloads the `og:image`, and uploads it as a *normal encrypted attachment*. The whole preview travels inside the E2E message. The recipient just renders embedded data and downloads the image like any other attachment by `attachment_id` — nothing on the receive side ever reaches out to the link. (If recipients auto-fetched, a sender could paste a tracking URL and harvest the IP of everyone the message reaches.) Generating previews is a per-account opt-out; off means the bare URL is sent with no fetch at all.
 
@@ -234,7 +236,7 @@ All resolved; this section is the record. Numbers marked *(config)* are tunables
 
 ### Deferred to the immediate follow-up (not this increment)
 
-- **Link previews** (the `LinkPreview` proto, OG-metadata fetch at compose time, the anti-spoofing render rule). Additive, reuses the attachment system wholesale, has its own privacy invariant — cleaner as the next step right after core attachments land. **Wanted next, explicitly out of the first cut.**
+- ~~**Link previews**~~ — **implemented 2026-06-28** (see *Link previews* above). The remaining follow-up here is the S3 `BlobStore` backend.
 
 ### Federation
 

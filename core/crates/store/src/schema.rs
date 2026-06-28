@@ -306,6 +306,30 @@ CREATE TABLE IF NOT EXISTS message_attachments (
 CREATE INDEX IF NOT EXISTS idx_message_attachments_msg
     ON message_attachments (message_id, ordinal);
 
+-- Link-preview cards for a message (docs/35 \"Link previews\"). Holds the
+-- decrypted preview metadata plus the og:image pointer (so the image can be
+-- re-fetched on demand). No image local-download state is kept here — preview
+-- images are small and re-fetched within the blob TTL.
+CREATE TABLE IF NOT EXISTS message_link_previews (
+    id                  TEXT    NOT NULL PRIMARY KEY,   -- local UUID
+    message_id          TEXT    NOT NULL,               -- message_history.id
+    ordinal             INTEGER NOT NULL DEFAULT 0,
+    url                 TEXT    NOT NULL,               -- previewed URL (must occur in body)
+    title               TEXT    NOT NULL DEFAULT '',
+    description         TEXT    NOT NULL DEFAULT '',
+    date_ms             INTEGER NOT NULL DEFAULT 0,     -- published date; 0 = unknown
+    -- og:image pointer (NULL columns when the preview has no image)
+    image_url           TEXT,
+    image_content_type  TEXT,
+    image_key           BLOB,
+    image_digest        BLOB,
+    image_size_bytes    INTEGER,
+    image_width         INTEGER,
+    image_height        INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_message_link_previews_msg
+    ON message_link_previews (message_id, ordinal);
+
 -- One reaction per (target message, reactor): PK enforces one-per-person.
 CREATE TABLE IF NOT EXISTS reactions (
     conversation_id  TEXT    NOT NULL,
@@ -385,6 +409,7 @@ pub const IDENTITY_TABLES: &[&str] = &[
     "recovery_blob_key",
     "message_history",
     "message_attachments",
+    "message_link_previews",
     "message_revisions",
     "reactions",
     "account_info_cache",

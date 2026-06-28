@@ -59,6 +59,10 @@ struct MessageBubble: View {
                 if !message.body.isEmpty || message.attachments.isEmpty || message.isDeleted {
                     bubble
                 }
+                // Link-preview cards (docs/35) below the text bubble.
+                ForEach(Array(message.previews.enumerated()), id: \.offset) { _, preview in
+                    LinkPreviewCard(preview: preview, isMe: isMe, loader: attachmentLoader)
+                }
                 if !reactionClusters.isEmpty {
                     reactionCluster
                 }

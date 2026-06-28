@@ -51,8 +51,29 @@ message TextMessage {
   // captioned photo, an album, or a "file + caption" is one TextMessage with a
   // `body` and one or more pointers — no separate media-message type.
   repeated AttachmentPointer attachments = 2;
+  // Rich link preview cards (docs/35 "Link previews"). The SENDER generates
+  // these at compose time (fetches the page's OpenGraph metadata and uploads
+  // the og:image as a normal encrypted attachment); the recipient never fetches
+  // the URL. Anti-spoofing: a client renders a preview only if its `url`
+  // actually occurs in `body`.
+  repeated LinkPreview preview = 3;
   // Future: mentions, reply_to, formatting.
-  reserved 3 to 10;
+  reserved 4 to 10;
+}
+
+// A rich preview card for a URL in `TextMessage.body` (docs/35 "Link previews").
+// The whole preview travels inside the E2E message — the load-bearing privacy
+// invariant is that the SENDER generates it at compose time and the recipient
+// NEVER fetches the URL (auto-fetching would leak the recipients' IPs to a
+// pasted tracking link). The `image` (og:image) rides the normal attachment
+// system, so previews need no extra storage machinery.
+message LinkPreview {
+  string            url         = 1;  // must occur in TextMessage.body (anti-spoof)
+  string            title       = 2;  // og:title
+  AttachmentPointer image       = 3;  // og:image, via the attachment system (optional)
+  string            description = 4;  // og:description
+  uint64            date        = 5;  // article published date, unix millis; 0 = unknown
+  reserved 6 to 10;
 }
 
 // Pointer to an end-to-end-encrypted attachment blob (docs/35-attachments.md).

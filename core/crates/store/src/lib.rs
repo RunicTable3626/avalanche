@@ -38,6 +38,7 @@
 pub mod account;
 pub mod attachments;
 pub mod contacts;
+pub mod link_previews;
 pub mod conversations;
 pub mod db;
 pub mod error;

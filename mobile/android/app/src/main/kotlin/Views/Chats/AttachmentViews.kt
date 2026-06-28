@@ -29,12 +29,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.height
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.io.ByteArrayOutputStream
 import uniffi.app_core.AttachmentFfi
+import uniffi.app_core.LinkPreviewFfi
 
 /**
  * Renders a single message attachment (docs/35-attachments.md). Images show the
@@ -130,4 +134,66 @@ fun makeAttachmentThumbnail(data: ByteArray, maxDimension: Int = 320): Triple<By
     val out = ByteArrayOutputStream()
     thumb.compress(Bitmap.CompressFormat.JPEG, 60, out)
     return Triple(out.toByteArray(), w, h)
+}
+
+/**
+ * A rich link-preview card (docs/35 "Link previews"): the og:image (if any) on
+ * top, then title and source domain. Tapping opens the URL. The image is a
+ * normal attachment downloaded via the same [loader] as message attachments.
+ * Mirrors iOS `LinkPreviewCard`.
+ */
+@Composable
+fun LinkPreviewCard(
+    preview: LinkPreviewFfi,
+    isMe: Boolean,
+    loader: suspend (AttachmentFfi) -> ByteArray?,
+) {
+    val colors = LocalAvalancheColors.current
+    val uriHandler = LocalUriHandler.current
+    var imageData by remember(preview.url) { mutableStateOf<ByteArray?>(null) }
+
+    LaunchedEffect(preview.url) {
+        val img = preview.image
+        if (imageData == null && img != null) imageData = loader(img)
+    }
+    val bitmap = remember(imageData) {
+        imageData?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+    }
+    val domain = remember(preview.url) {
+        runCatching { java.net.URI(preview.url).host?.removePrefix("www.") }.getOrNull() ?: preview.url
+    }
+
+    Column(
+        modifier = Modifier
+            .sizeIn(maxWidth = 260.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (isMe) colors.outgoingBubble.copy(alpha = 0.6f) else colors.incomingBubble)
+            .clickable { runCatching { uriHandler.openUri(preview.url) } },
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = preview.title.ifEmpty { domain },
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxWidth().height(130.dp),
+            )
+        }
+        Column(modifier = Modifier.padding(10.dp)) {
+            if (preview.title.isNotEmpty()) {
+                Text(
+                    text = preview.title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Text(
+                text = domain,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
 }

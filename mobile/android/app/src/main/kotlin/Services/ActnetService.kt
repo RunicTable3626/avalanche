@@ -3,6 +3,7 @@ package net.theavalanche.app
 import uniffi.app_core.AccountInfoFfi
 import uniffi.app_core.AppCore
 import uniffi.app_core.AttachmentFfi
+import uniffi.app_core.LinkPreviewFfi
 import uniffi.app_core.AppErrorFfi
 import uniffi.app_core.ConnectionState
 import uniffi.app_core.ContactRowFfi
@@ -222,7 +223,7 @@ interface AppCoreProtocol {
 
     @Throws(AppErrorFfi::class) fun sendDm(recipientDid: String, plaintext: ByteArray, sentAtMs: Long)
     @Throws(AppErrorFfi::class) fun sendMessage(target: MessageTarget, plaintext: ByteArray, sentAtMs: Long)
-    @Throws(AppErrorFfi::class) fun sendMessageWithAttachments(target: MessageTarget, body: String, attachments: List<AttachmentFfi>, sentAtMs: Long)
+    @Throws(AppErrorFfi::class) fun sendMessageWithAttachments(target: MessageTarget, body: String, attachments: List<AttachmentFfi>, previews: List<LinkPreviewFfi>, sentAtMs: Long)
     @Throws(AppErrorFfi::class) fun uploadAttachment(plaintext: ByteArray, contentType: String, fileName: String?, width: Int, height: Int, durationMs: Int, thumbnail: ByteArray, flags: Int): AttachmentFfi
     @Throws(AppErrorFfi::class) fun downloadAttachment(attachment: AttachmentFfi): ByteArray
     @Throws(AppErrorFfi::class) fun setAttachmentDownloaded(attachmentId: String, localPath: String)
@@ -405,8 +406,8 @@ class LiveAppCoreProtocol(private val core: AppCore) : AppCoreProtocol {
         core.sendDm(recipientDid, plaintext, sentAtMs)
     override fun sendMessage(target: MessageTarget, plaintext: ByteArray, sentAtMs: Long) =
         core.sendMessage(target, plaintext, sentAtMs)
-    override fun sendMessageWithAttachments(target: MessageTarget, body: String, attachments: List<AttachmentFfi>, sentAtMs: Long) =
-        core.sendMessageWithAttachments(target, body, attachments, sentAtMs)
+    override fun sendMessageWithAttachments(target: MessageTarget, body: String, attachments: List<AttachmentFfi>, previews: List<LinkPreviewFfi>, sentAtMs: Long) =
+        core.sendMessageWithAttachments(target, body, attachments, previews, sentAtMs)
     override fun uploadAttachment(plaintext: ByteArray, contentType: String, fileName: String?, width: Int, height: Int, durationMs: Int, thumbnail: ByteArray, flags: Int): AttachmentFfi =
         core.uploadAttachment(plaintext, contentType, fileName, width, height, durationMs, thumbnail, flags)
     override fun downloadAttachment(attachment: AttachmentFfi): ByteArray =
@@ -622,7 +623,7 @@ open class MockAppCoreProtocol : AppCoreProtocol {
 
     override fun sendDm(recipientDid: String, plaintext: ByteArray, sentAtMs: Long) {}
     override fun sendMessage(target: MessageTarget, plaintext: ByteArray, sentAtMs: Long) {}
-    override fun sendMessageWithAttachments(target: MessageTarget, body: String, attachments: List<AttachmentFfi>, sentAtMs: Long) {}
+    override fun sendMessageWithAttachments(target: MessageTarget, body: String, attachments: List<AttachmentFfi>, previews: List<LinkPreviewFfi>, sentAtMs: Long) {}
     override fun uploadAttachment(plaintext: ByteArray, contentType: String, fileName: String?, width: Int, height: Int, durationMs: Int, thumbnail: ByteArray, flags: Int): AttachmentFfi =
         AttachmentFfi(id = "", url = "", contentType = contentType, key = ByteArray(0), digest = ByteArray(0), sizeBytes = plaintext.size.toLong(), fileName = fileName, width = width, height = height, durationMs = durationMs, blurhash = null, thumbnail = thumbnail, caption = null, flags = flags, localPath = null, downloadedAtMs = null)
     override fun downloadAttachment(attachment: AttachmentFfi): ByteArray = ByteArray(0)

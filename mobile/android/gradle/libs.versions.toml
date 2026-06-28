@@ -14,8 +14,10 @@ zxing = "4.3.0"
 jna = "5.19.1"
 googleServices = "4.4.2"
 firebaseBom = "33.7.0"
+jsoup = "1.18.3"
 
 [libraries]
+jsoup = { group = "org.jsoup", name = "jsoup", version.ref = "jsoup" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }

@@ -3,6 +3,7 @@ package net.theavalanche.app
 import org.json.JSONObject
 import java.util.Date
 import uniffi.app_core.AttachmentFfi
+import uniffi.app_core.LinkPreviewFfi
 import uniffi.app_core.GroupEventKind
 
 // `GroupEventKind` is the UniFFI-generated enum (from Generated/uniffi/app_core/app_core.kt).
@@ -84,6 +85,8 @@ data class Message(
     var expireAtMs: Long? = null,
     /// Attachments on this message (docs/35); empty for plain text.
     var attachments: List<AttachmentFfi> = emptyList(),
+    /// Link-preview cards on this message (docs/35); empty for plain text.
+    var previews: List<LinkPreviewFfi> = emptyList(),
 ) {
     val sentAt: Date get() = Date(sentAtMs)
 

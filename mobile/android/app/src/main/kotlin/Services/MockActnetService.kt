@@ -174,6 +174,7 @@ class MockAppCore(
                         expireTimerSecs = msg.expireTimerSecs,
                         expireAtMs = msg.expireAtMs,
                         attachments = msg.attachments,
+                        previews = msg.previews,
                     )
                 } else {
                     msg
@@ -360,6 +361,7 @@ class MockAppCore(
                 profileKey = null,
                 isRequest = false,
                 attachments = emptyList(),
+                previews = emptyList(),
             )
             pendingMessages.add(msg)
         }

@@ -108,6 +108,24 @@ in the same session.** iOS is the reference — when behavior is ambiguous, chec
 the iOS source. See `mobile/CLAUDE.md` and `desktop/CLAUDE.md` for platform-specific
 workflows and per-platform checklists.
 
+## DM / Group Parity Rule
+
+**DMs and groups are two targets of the *same* conversation, not two features.
+Any change to a message/content flow for DMs must be made for groups in the same
+session, and vice versa** — sending, attachments, link previews, reactions,
+edits, deletes, read state, rendering. Treat this with the same discipline as the
+cross-platform parity rule above: audit both before considering the change done.
+
+This matters because the split is easy to miss: app-core already unifies the two
+behind a `MessageTarget` (`send_to_target`, `send_message(target:)`), but the
+mobile layer still has *separate* `sendMessage` (DM) and `sendGroupMessage`
+(group) methods in `AppState`/`AppViewModel`, and `ConversationView` branches on
+`conversation.isGroup`. So "add it to the send path" is two edits, and wiring
+only the one in front of you (usually DM) silently leaves groups behind. When you
+touch one branch, grep for its sibling and change both. (The deeper fix is to
+collapse the mobile send onto the unified `send_message(target:)` path so the
+split can't exist — do that when it's in scope.)
+
 ## Subsystem docs
 
 Each subsystem has its own CLAUDE.md with workflow and conventions specific to that layer:

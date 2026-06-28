@@ -1,4 +1,6 @@
 import SwiftUI
+import LinkPresentation
+import UIKit
 
 enum ServiceMode: String, CaseIterable {
     case mock = "Mock (no server)"
@@ -965,7 +967,7 @@ final class AppState: ObservableObject {
 
     // MARK: - Messaging
 
-    func sendMessage(conversationId: String, text: String, recipientDid: String, senderAccountId: String, messageId: String, sentAtMs: Int64) async throws {
+    func sendMessage(conversationId: String, text: String, recipientDid: String, senderAccountId: String, messageId: String, sentAtMs: Int64, previews: [LinkPreviewFfi] = []) async throws {
         guard let core = cores[senderAccountId] else { return }
         let plaintext = Data(text.utf8)
         let nowMs = sentAtMs
@@ -992,20 +994,30 @@ final class AppState: ObservableObject {
             metadata: nil,
             expireTimerSecs: timer,
             expireAtMs: nil,
-            attachments: []
+            attachments: [],
+            previews: previews
         )
         try await Task.detached { try core.saveMessage(msg: pending) }.value
 
         do {
+            // A message carrying a link preview (docs/35) goes through the rich
+            // send so the preview rides the envelope; otherwise the plain DM path.
             try await Task.detached {
-                try core.sendDm(recipientDid: recipientDid, plaintext: plaintext, sentAtMs: nowMs)
+                if previews.isEmpty {
+                    try core.sendDm(recipientDid: recipientDid, plaintext: plaintext, sentAtMs: nowMs)
+                } else {
+                    try core.sendMessageWithAttachments(
+                        target: .dm(recipientDid: recipientDid), body: text,
+                        attachments: [], previews: previews, sentAtMs: nowMs
+                    )
+                }
             }.value
             updateMessageStatus(messageId: messageId, conversationId: conversationId, newStatus: .sent)
             let sent = StoredMessageFfi(
                 id: messageId, conversationId: conversationId, senderDid: senderAccountId,
                 body: text, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
                 deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil,
-                expireTimerSecs: timer, expireAtMs: nil, attachments: []
+                expireTimerSecs: timer, expireAtMs: nil, attachments: [], previews: previews
             )
             Task.detached { try? core.saveMessage(msg: sent) }
         } catch {
@@ -1015,7 +1027,7 @@ final class AppState: ObservableObject {
                 id: messageId, conversationId: conversationId, senderDid: senderAccountId,
                 body: text, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
                 deliveryStatus: UInt8(DeliveryStatus.failed.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil,
-                expireTimerSecs: timer, expireAtMs: nil, attachments: []
+                expireTimerSecs: timer, expireAtMs: nil, attachments: [], previews: []
             )
             Task.detached { try? core.saveMessage(msg: failed) }
             throw error
@@ -1048,14 +1060,14 @@ final class AppState: ObservableObject {
         }.value
         try await Task.detached {
             try core.sendMessageWithAttachments(
-                target: target, body: caption, attachments: [pointer], sentAtMs: nowMs
+                target: target, body: caption, attachments: [pointer], previews: [], sentAtMs: nowMs
             )
         }.value
         let stored = StoredMessageFfi(
             id: messageId, conversationId: conversationId, senderDid: senderAccountId,
             body: caption, sentAtMs: nowMs, editedAtMs: nil, readAtMs: nowMs,
             deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false,
-            kind: 0, metadata: nil, expireTimerSecs: 0, expireAtMs: nil, attachments: [pointer]
+            kind: 0, metadata: nil, expireTimerSecs: 0, expireAtMs: nil, attachments: [pointer], previews: []
         )
         try await Task.detached { try core.saveMessage(msg: stored) }.value
         let optimistic = AppState.message(from: stored)
@@ -1090,6 +1102,66 @@ final class AppState: ObservableObject {
             }
             return data
         }.value
+    }
+
+    /// Generate a link-preview card (docs/35 "Link previews") for the first URL
+    /// in `body`, if any: the sender's device fetches the page's metadata via
+    /// `LPMetadataProvider`, uploads the og:image as an encrypted attachment, and
+    /// returns the pointer. Best-effort — returns `[]` on no URL / fetch failure;
+    /// the recipient never fetches the URL. Returns 0 or 1 preview.
+    func linkPreviews(for body: String, accountId: String) async -> [LinkPreviewFfi] {
+        guard let url = Self.firstURL(in: body), let core = cores[accountId] else { return [] }
+        // Fetch metadata off-actor and extract only Sendable values (title +
+        // image JPEG bytes) inside the callbacks — `LPLinkMetadata` and its
+        // `NSItemProvider` are not Sendable and must not cross the boundary.
+        let fetched: (title: String, imageData: Data?)
+        do {
+            fetched = try await withCheckedThrowingContinuation { cont in
+                let provider = LPMetadataProvider()
+                provider.timeout = 8
+                provider.startFetchingMetadata(for: url) { meta, error in
+                    guard let meta else {
+                        cont.resume(throwing: error ?? URLError(.badServerResponse))
+                        return
+                    }
+                    let title = meta.title ?? ""
+                    if let imageProvider = meta.imageProvider {
+                        imageProvider.loadObject(ofClass: UIImage.self) { obj, _ in
+                            let data = (obj as? UIImage)?.jpegData(compressionQuality: 0.8)
+                            cont.resume(returning: (title, data))
+                        }
+                    } else {
+                        cont.resume(returning: (title, nil))
+                    }
+                }
+            }
+        } catch {
+            return []
+        }
+        var image: AttachmentFfi?
+        if let data = fetched.imageData {
+            let (thumb, w, h) = makeAttachmentThumbnail(data)
+            image = try? await Task.detached {
+                try core.uploadAttachment(
+                    plaintext: data, contentType: "image/jpeg", fileName: nil,
+                    width: w, height: h, durationMs: 0, thumbnail: thumb, flags: 0
+                )
+            }.value
+        }
+        return [LinkPreviewFfi(
+            url: url.absoluteString,
+            title: fetched.title,
+            description: "",  // LinkPresentation doesn't expose og:description
+            dateMs: 0,
+            image: image
+        )]
+    }
+
+    /// First http(s) URL in `body`, via `NSDataDetector`.
+    nonisolated static func firstURL(in body: String) -> URL? {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return nil }
+        let ns = body as NSString
+        return detector.firstMatch(in: body, range: NSRange(location: 0, length: ns.length))?.url
     }
 
     /// Update an in-memory message's delivery status by id.
@@ -1399,7 +1471,8 @@ final class AppState: ObservableObject {
             metadata: m.metadata,
             expireTimerSecs: m.expireTimerSecs,
             expireAtMs: m.expireAtMs,
-            attachments: m.attachments
+            attachments: m.attachments,
+            previews: m.previews
         )
     }
 
@@ -1572,7 +1645,8 @@ final class AppState: ObservableObject {
         conversation: Conversation,
         text: String,
         messageId: String,
-        sentAtMs: Int64
+        sentAtMs: Int64,
+        previews: [LinkPreviewFfi] = []
     ) async throws {
         guard let groupId = conversation.groupId else { return }
         guard let core = cores[conversation.accountId] else { return }
@@ -1598,20 +1672,30 @@ final class AppState: ObservableObject {
             metadata: nil,
             expireTimerSecs: timer,
             expireAtMs: nil,
-            attachments: []
+            attachments: [],
+            previews: previews
         )
         try await Task.detached { try core.saveMessage(msg: pending) }.value
 
         do {
+            // A message carrying a link preview (docs/35) goes through the rich
+            // send so the preview rides the envelope; otherwise the plain group path.
             try await Task.detached {
-                try core.sendGroupMessage(groupId: groupId, plaintext: plaintext, sentAtMs: sentAtMs)
+                if previews.isEmpty {
+                    try core.sendGroupMessage(groupId: groupId, plaintext: plaintext, sentAtMs: sentAtMs)
+                } else {
+                    try core.sendMessageWithAttachments(
+                        target: .group(groupId: groupId), body: text,
+                        attachments: [], previews: previews, sentAtMs: sentAtMs
+                    )
+                }
             }.value
             updateMessageStatus(messageId: messageId, conversationId: conversation.id, newStatus: .sent)
             let sent = StoredMessageFfi(
                 id: messageId, conversationId: conversation.id, senderDid: conversation.accountId,
                 body: text, sentAtMs: sentAtMs, editedAtMs: nil, readAtMs: sentAtMs,
                 deliveryStatus: UInt8(DeliveryStatus.sent.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil,
-                expireTimerSecs: timer, expireAtMs: nil, attachments: []
+                expireTimerSecs: timer, expireAtMs: nil, attachments: [], previews: previews
             )
             Task.detached { try? core.saveMessage(msg: sent) }
         } catch {
@@ -1621,7 +1705,7 @@ final class AppState: ObservableObject {
                 id: messageId, conversationId: conversation.id, senderDid: conversation.accountId,
                 body: text, sentAtMs: sentAtMs, editedAtMs: nil, readAtMs: sentAtMs,
                 deliveryStatus: UInt8(DeliveryStatus.failed.rawValue), editCount: 0, deleted: false, kind: 0, metadata: nil,
-                expireTimerSecs: timer, expireAtMs: nil, attachments: []
+                expireTimerSecs: timer, expireAtMs: nil, attachments: [], previews: []
             )
             Task.detached { try? core.saveMessage(msg: failed) }
             throw error
@@ -2079,7 +2163,8 @@ final class AppState: ObservableObject {
             readAtMs: readAtMs,
             deliveryStatus: .sent,
             expireTimerSecs: msg.expireTimerSecs,
-            attachments: msg.attachments
+            attachments: msg.attachments,
+            previews: msg.previews
         )
         // Only append to the in-memory list if it's already loaded; otherwise
         // leave the entry nil so loadMessagesFromStore() does a full DB load
@@ -2126,7 +2211,8 @@ final class AppState: ObservableObject {
                 // the countdown when this message is marked read.
                 expireTimerSecs: msg.expireTimerSecs,
                 expireAtMs: nil,
-                attachments: msg.attachments
+                attachments: msg.attachments,
+                previews: msg.previews
             )
             Task.detached {
                 try? core.saveMessage(msg: stored)

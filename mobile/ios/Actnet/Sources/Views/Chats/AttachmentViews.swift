@@ -89,3 +89,59 @@ func makeAttachmentThumbnail(_ data: Data, maxDimension: CGFloat = 320) -> (thum
     let jpeg = thumb.jpegData(compressionQuality: 0.6) ?? Data()
     return (jpeg, Int32(size.width), Int32(size.height))
 }
+
+/// A rich link-preview card (docs/35 "Link previews"): the og:image (if any) on
+/// top, then the title and source domain. Tapping opens the URL. The image is a
+/// normal attachment, downloaded via the same `loader` as message attachments.
+struct LinkPreviewCard: View {
+    let preview: LinkPreviewFfi
+    let isMe: Bool
+    let loader: (AttachmentFfi) async -> Data?
+
+    @State private var imageData: Data?
+    @Environment(\.openURL) private var openURL
+
+    private var domain: String {
+        guard let host = URL(string: preview.url)?.host else { return preview.url }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let imageData, let img = UIImage(data: imageData) {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: 260, maxHeight: 140)
+                    .clipped()
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                if !preview.title.isEmpty {
+                    Text(preview.title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(2)
+                }
+                Text(domain)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+        }
+        .frame(maxWidth: 260, alignment: .leading)
+        .background(isMe ? Color.avOutgoingBubble.opacity(0.6) : Color.avIncomingBubble)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(Color.avMuted.opacity(0.25), lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { if let url = URL(string: preview.url) { openURL(url) } }
+        .task(id: preview.url) {
+            if imageData == nil, let image = preview.image {
+                imageData = await loader(image)
+            }
+        }
+    }
+}

@@ -249,17 +249,31 @@ fun ConversationView(
         scope.launch {
             try {
                 if (conversation.isGroup) {
+                    // Generate a link preview for the first URL (docs/35),
+                    // best-effort, before sending — same as the DM path.
+                    val previews = viewModel.linkPreviews(text, conversation.accountId)
+                    if (previews.isNotEmpty()) {
+                        viewModel.setMessagePreviews(conversation.id, messageId, previews)
+                    }
                     viewModel.sendGroupMessage(
                         conversation = conversation,
                         text = text,
                         messageId = messageId,
                         sentAtMs = nowMs,
+                        previews = previews,
                     )
                 } else {
                     val recipientDid = conversation.recipientDid
                     if (recipientDid == null) {
                         errorMessage = "Cannot send: no recipient"
                         return@launch
+                    }
+                    // Generate a link preview for the first URL (docs/35),
+                    // best-effort, before sending. Reflect it on the optimistic
+                    // row so the card shows immediately.
+                    val previews = viewModel.linkPreviews(text, conversation.accountId)
+                    if (previews.isNotEmpty()) {
+                        viewModel.setMessagePreviews(conversation.id, messageId, previews)
                     }
                     viewModel.sendMessage(
                         conversationId = conversation.id,
@@ -268,6 +282,7 @@ fun ConversationView(
                         senderAccountId = conversation.accountId,
                         messageId = messageId,
                         sentAtMs = nowMs,
+                        previews = previews,
                     )
                 }
             } catch (e: Exception) {

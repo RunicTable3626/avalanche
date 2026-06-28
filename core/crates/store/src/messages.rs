@@ -746,6 +746,13 @@ impl IdentityStore {
                     rusqlite::params![conv],
                 )?;
                 conn.execute(
+                    "DELETE FROM message_link_previews
+                     WHERE message_id IN (
+                         SELECT id FROM message_history WHERE conversation_id = ?1
+                     )",
+                    rusqlite::params![conv],
+                )?;
+                conn.execute(
                     "DELETE FROM message_history WHERE conversation_id = ?1",
                     rusqlite::params![conv],
                 )?;

@@ -25,6 +25,7 @@ import uniffi.app_core.GroupEventKind
 import uniffi.app_core.IncomingEvent
 import uniffi.app_core.MessageRevisionFfi
 import uniffi.app_core.AttachmentFfi
+import uniffi.app_core.LinkPreviewFfi
 import uniffi.app_core.MessageTarget
 import uniffi.app_core.PreparedAccount
 import uniffi.app_core.ReactionFfi
@@ -1228,6 +1229,7 @@ class AppViewModel(
         senderAccountId: String,
         messageId: String,
         sentAtMs: Long,
+        previews: List<LinkPreviewFfi> = emptyList(),
     ) {
         val core = cores[senderAccountId] ?: return
         val plaintext = text.toByteArray(Charsets.UTF_8)
@@ -1254,12 +1256,21 @@ class AppViewModel(
             expireTimerSecs = timer,
             expireAtMs = null,
             attachments = emptyList(),
+            previews = previews,
         )
         withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = pending) } }
 
         runCatching {
+            // A message carrying a link preview (docs/35) goes through the rich
+            // send so the preview rides the envelope; otherwise the plain DM path.
             withContext(Dispatchers.IO) {
-                core.sendDm(recipientDid = recipientDid, plaintext = plaintext, sentAtMs = nowMs)
+                if (previews.isEmpty()) {
+                    core.sendDm(recipientDid = recipientDid, plaintext = plaintext, sentAtMs = nowMs)
+                } else {
+                    core.sendMessageWithAttachments(
+                        MessageTarget.Dm(recipientDid = recipientDid), text, emptyList(), previews, nowMs
+                    )
+                }
             }
             updateMessageStatus(
                 messageId = messageId,
@@ -1271,7 +1282,7 @@ class AppViewModel(
                 body = text, sentAtMs = nowMs, editedAtMs = null, readAtMs = nowMs,
                 deliveryStatus = DeliveryStatus.SENT.code.toUByte(), editCount = 0u, deleted = false,
                 kind = 0L, metadata = null, expireTimerSecs = timer, expireAtMs = null,
-                attachments = emptyList(),
+                attachments = emptyList(), previews = previews,
             )
             withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = sent) } }
         }.onFailure { error ->
@@ -1286,7 +1297,7 @@ class AppViewModel(
                 body = text, sentAtMs = nowMs, editedAtMs = null, readAtMs = nowMs,
                 deliveryStatus = DeliveryStatus.FAILED.code.toUByte(), editCount = 0u, deleted = false,
                 kind = 0L, metadata = null, expireTimerSecs = timer, expireAtMs = null,
-                attachments = emptyList(),
+                attachments = emptyList(), previews = emptyList(),
             )
             withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = failed) } }
             throw error
@@ -1317,14 +1328,14 @@ class AppViewModel(
             core.uploadAttachment(data, contentType, fileName, width, height, 0, thumbnail, 0)
         }
         withContext(Dispatchers.IO) {
-            core.sendMessageWithAttachments(target, caption, listOf(pointer), nowMs)
+            core.sendMessageWithAttachments(target, caption, listOf(pointer), emptyList(), nowMs)
         }
         val stored = StoredMessageFfi(
             id = messageId, conversationId = conversationId, senderDid = senderAccountId,
             body = caption, sentAtMs = nowMs, editedAtMs = null, readAtMs = nowMs,
             deliveryStatus = DeliveryStatus.SENT.code.toUByte(), editCount = 0u, deleted = false,
             kind = 0L, metadata = null, expireTimerSecs = 0u, expireAtMs = null,
-            attachments = listOf(pointer),
+            attachments = listOf(pointer), previews = emptyList(),
         )
         withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = stored) } }
         val optimistic = messageFromFfi(stored)
@@ -1357,6 +1368,44 @@ class AppViewModel(
                 }
                 data
             }.getOrNull()
+        }
+    }
+
+    /**
+     * Generate a link-preview card (docs/35 "Link previews") for the first URL
+     * in [body], if any: fetch the page's OpenGraph metadata on this device,
+     * upload the og:image as an encrypted attachment, and return the pointer.
+     * Best-effort — returns `[]` on no URL / failure. Mirrors iOS `linkPreviews`.
+     */
+    suspend fun linkPreviews(body: String, accountId: String): List<LinkPreviewFfi> {
+        val core = cores[accountId] ?: return emptyList()
+        val fetched = fetchLinkPreview(body) ?: return emptyList()
+        var image: AttachmentFfi? = null
+        val data = fetched.imageData
+        if (data != null) {
+            val (thumb, w, h) = makeAttachmentThumbnail(data)
+            image = withContext(Dispatchers.IO) {
+                runCatching { core.uploadAttachment(data, "image/jpeg", null, w, h, 0, thumb, 0) }.getOrNull()
+            }
+        }
+        return listOf(
+            LinkPreviewFfi(
+                url = fetched.url,
+                title = fetched.title,
+                description = fetched.description,
+                dateMs = 0L,
+                image = image,
+            )
+        )
+    }
+
+    /** Reflect generated link previews on an in-memory optimistic message row. */
+    fun setMessagePreviews(conversationId: String, messageId: String, previews: List<LinkPreviewFfi>) {
+        _messagesByConversation.update { map ->
+            val msgs = map[conversationId] ?: return@update map
+            map + (conversationId to msgs.map {
+                if (it.id == messageId) it.copy(previews = previews) else it
+            })
         }
     }
 
@@ -1715,6 +1764,7 @@ class AppViewModel(
         expireTimerSecs = m.expireTimerSecs,
         expireAtMs = m.expireAtMs,
         attachments = m.attachments,
+        previews = m.previews,
     )
 
     /**
@@ -1895,6 +1945,7 @@ class AppViewModel(
         text: String,
         messageId: String,
         sentAtMs: Long,
+        previews: List<LinkPreviewFfi> = emptyList(),
     ) {
         val groupId = conversation.groupId ?: return
         val core = cores[conversation.accountId] ?: return
@@ -1920,16 +1971,25 @@ class AppViewModel(
             expireTimerSecs = timer,
             expireAtMs = null,
             attachments = emptyList(),
+            previews = previews,
         )
         withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = pending) } }
 
         runCatching {
+            // A message carrying a link preview (docs/35) goes through the rich
+            // send so the preview rides the envelope; otherwise the plain group path.
             withContext(Dispatchers.IO) {
-                core.sendGroupMessage(
-                    groupId = groupId,
-                    plaintext = plaintext,
-                    sentAtMs = sentAtMs,
-                )
+                if (previews.isEmpty()) {
+                    core.sendGroupMessage(
+                        groupId = groupId,
+                        plaintext = plaintext,
+                        sentAtMs = sentAtMs,
+                    )
+                } else {
+                    core.sendMessageWithAttachments(
+                        MessageTarget.Group(groupId = groupId), text, emptyList(), previews, sentAtMs
+                    )
+                }
             }
             updateMessageStatus(
                 messageId = messageId,
@@ -1942,7 +2002,7 @@ class AppViewModel(
                 editedAtMs = null, readAtMs = sentAtMs,
                 deliveryStatus = DeliveryStatus.SENT.code.toUByte(), editCount = 0u, deleted = false,
                 kind = 0L, metadata = null, expireTimerSecs = timer, expireAtMs = null,
-                attachments = emptyList(),
+                attachments = emptyList(), previews = previews,
             )
             withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = sent) } }
         }.onFailure { error ->
@@ -1958,7 +2018,7 @@ class AppViewModel(
                 editedAtMs = null, readAtMs = sentAtMs,
                 deliveryStatus = DeliveryStatus.FAILED.code.toUByte(), editCount = 0u, deleted = false,
                 kind = 0L, metadata = null, expireTimerSecs = timer, expireAtMs = null,
-                attachments = emptyList(),
+                attachments = emptyList(), previews = emptyList(),
             )
             withContext(Dispatchers.IO) { runCatching { core.saveMessage(msg = failed) } }
             throw error
@@ -2570,6 +2630,7 @@ class AppViewModel(
             deliveryStatus = DeliveryStatus.SENT,
             expireTimerSecs = msg.expireTimerSecs,
             attachments = msg.attachments,
+            previews = msg.previews,
         )
         // Only append to the in-memory list if it's already loaded; otherwise
         // leave the entry absent so loadMessagesFromStore() does a full DB load
@@ -2619,6 +2680,7 @@ class AppViewModel(
                 expireTimerSecs = msg.expireTimerSecs,
                 expireAtMs = null,
                 attachments = msg.attachments,
+                previews = msg.previews,
             )
             val profileKey = msg.profileKey
             val isRequest = msg.isRequest

@@ -395,6 +395,7 @@ impl AppCoreInner {
             is_request: false,
             // Populated when `process_decrypted` unwraps the inner text body.
             attachments: Vec::new(),
+            previews: Vec::new(),
         })
     }
 
@@ -1141,6 +1142,7 @@ impl AppCoreInner {
                             let body = text.body;
                             let attachments: Vec<crate::AttachmentFfi> =
                                 text.attachments.into_iter().map(crate::pointer_to_ffi).collect();
+                            let previews = crate::anti_spoof_previews(text.preview, &body);
                             let sent_at = if content.timestamp_ms > 0 {
                                 Some(content.timestamp_ms as i64)
                             } else {
@@ -1186,6 +1188,7 @@ impl AppCoreInner {
                                 profile_key,
                                 is_request,
                                 attachments,
+                                previews,
                                 ..raw
                             });
                         }
@@ -1371,6 +1374,7 @@ impl AppCoreInner {
             // Populated from the text body's pointers in `process_decrypted` /
             // `receive_messages`.
             attachments: Vec::new(),
+            previews: Vec::new(),
         })
     }
 }
@@ -1436,6 +1440,7 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
             let body = text.body;
             let attachments: Vec<crate::AttachmentFfi> =
                 text.attachments.into_iter().map(crate::pointer_to_ffi).collect();
+            let previews = crate::anti_spoof_previews(text.preview, &body);
             let sent_at = if msg.timestamp_ms > 0 {
                 Some(msg.timestamp_ms as i64)
             } else {
@@ -1492,6 +1497,7 @@ pub(crate) async fn process_decrypted(core: &AppCore, decrypted: DecryptedMessag
                 profile_key,
                 is_request,
                 attachments,
+                previews,
                 ..decrypted
             };
             let _ = core.event_tx.send(IncomingEvent::Message { msg: out });
@@ -1707,11 +1713,13 @@ pub(crate) async fn apply_sync_sent(
             // upserts in place rather than duplicating.
             let sent_at = sync.timestamp as i64;
             let msg_id = format!("synced-{conv_id}-{sent_at}");
+            let body = text.body;
+            let previews = crate::anti_spoof_previews(text.preview, &body);
             let msg = store::messages::HistoryMessage {
                 id: msg_id.clone(),
                 conversation_id: conv_id.clone(),
                 sender_did: my_did.to_string(),
-                body: text.body,
+                body,
                 sent_at: Timestamp(sent_at),
                 edited_at: None,
                 read_at: Some(Timestamp(sent_at)),
@@ -1735,6 +1743,15 @@ pub(crate) async fn apply_sync_sent(
                     })
                     .collect();
                 let _ = store.save_attachments(&msg_id, &rows).await;
+            }
+            // Mirror link previews too.
+            if saved && !previews.is_empty() {
+                let rows: Vec<store::link_previews::LinkPreviewRow> = previews
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| crate::ffi_to_link_preview_row(&msg_id, i as i64, p))
+                    .collect();
+                let _ = store.save_link_previews(&msg_id, &rows).await;
             }
             saved
         }
@@ -1836,10 +1853,27 @@ mod tests {
 
     use super::{apply_sync_read, apply_sync_sent};
     use crate::proto::{
-        content_message::Body, read_mark, sync_sent, ContentMessage, ReadMark, SyncRead, SyncSent,
-        TextMessage, TimerChangeMessage,
+        content_message::Body, read_mark, sync_sent, ContentMessage, LinkPreview, ReadMark,
+        SyncRead, SyncSent, TextMessage, TimerChangeMessage,
     };
     use types::Timestamp;
+
+    #[test]
+    fn anti_spoof_previews_keeps_only_urls_present_in_body() {
+        let body = "see https://vox.com/article and stuff";
+        let previews = vec![
+            // url in body -> kept
+            LinkPreview { url: "https://vox.com/article".into(), title: "Real".into(), ..Default::default() },
+            // url NOT in body -> dropped (a spoofed card pointing elsewhere)
+            LinkPreview { url: "https://evil.example/phish".into(), title: "Fake".into(), ..Default::default() },
+            // empty url -> dropped
+            LinkPreview { url: String::new(), title: "Empty".into(), ..Default::default() },
+        ];
+        let kept = crate::anti_spoof_previews(previews, body);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].url, "https://vox.com/article");
+        assert_eq!(kept[0].title, "Real");
+    }
 
     #[test]
     fn sender_gate_passes_for_curated_or_bot_only() {

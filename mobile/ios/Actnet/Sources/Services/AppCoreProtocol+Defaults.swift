@@ -65,7 +65,7 @@ extension AppCoreProtocol {
 
     func sendDm(recipientDid: String, plaintext: Data, sentAtMs: Int64) throws {}
     func sendMessage(target: MessageTarget, plaintext: Data, sentAtMs: Int64) throws {}
-    func sendMessageWithAttachments(target: MessageTarget, body: String, attachments: [AttachmentFfi], sentAtMs: Int64) throws {}
+    func sendMessageWithAttachments(target: MessageTarget, body: String, attachments: [AttachmentFfi], previews: [LinkPreviewFfi], sentAtMs: Int64) throws {}
     func uploadAttachment(plaintext: Data, contentType: String, fileName: String?, width: Int32, height: Int32, durationMs: Int32, thumbnail: Data, flags: Int32) throws -> AttachmentFfi {
         AttachmentFfi(id: "", url: "", contentType: contentType, key: Data(), digest: Data(), sizeBytes: Int64(plaintext.count), fileName: fileName, width: width, height: height, durationMs: durationMs, blurhash: nil, thumbnail: thumbnail, caption: nil, flags: flags, localPath: nil, downloadedAtMs: nil)
     }

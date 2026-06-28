@@ -79,6 +79,8 @@ struct Message: Identifiable {
     var expireAtMs: Int64? = nil
     /// Attachments on this message (docs/35); empty for plain text.
     var attachments: [AttachmentFfi] = []
+    /// Link-preview cards on this message (docs/35); empty for plain text.
+    var previews: [LinkPreviewFfi] = []
 
     var sentAt: Date { Date(timeIntervalSince1970: Double(sentAtMs) / 1000.0) }
     var isEdited: Bool { editedAtMs != nil }

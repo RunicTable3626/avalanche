@@ -61,7 +61,7 @@ use error::{AppError, AppErrorFfi};
 use net::types::{RegisterRequest, ReplaceDeviceRequest};
 use proto::{
     content_message::Body, delete_message, receipt_message, AttachmentPointer, ContentMessage,
-    DeleteMessage, EditMessage, ReactionMessage, ReceiptMessage, TextMessage,
+    DeleteMessage, EditMessage, LinkPreview, ReactionMessage, ReceiptMessage, TextMessage,
 };
 use prost::Message as _;
 use rand::TryRngCore as _;
@@ -277,6 +277,110 @@ fn ffi_to_attachment_row(
     }
 }
 
+/// A rich link-preview card (docs/35). The sender generates it at compose time;
+/// `image` (the og:image) is a normal [`AttachmentFfi`] so it rides the E2E
+/// attachment path and the client downloads it like any other blob. `None`
+/// image means a text-only card.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct LinkPreviewFfi {
+    /// The previewed URL — must occur in the message body (anti-spoof).
+    pub url: String,
+    pub title: String,
+    pub description: String,
+    /// Article published date, unix millis; 0 = unknown.
+    pub date_ms: i64,
+    pub image: Option<AttachmentFfi>,
+}
+
+/// Anti-spoofing filter (docs/35 "Link previews"): a received preview is only
+/// surfaced if its `url` actually occurs in the message `body`. Otherwise a
+/// sender could attach a trustworthy-looking card that points elsewhere. Applied
+/// on the receive path so a buggy renderer can't forget it.
+pub(crate) fn anti_spoof_previews(previews: Vec<LinkPreview>, body: &str) -> Vec<LinkPreviewFfi> {
+    previews
+        .into_iter()
+        .filter(|p| !p.url.is_empty() && body.contains(&p.url))
+        .map(preview_to_ffi)
+        .collect()
+}
+
+/// Decode a wire `LinkPreview` into its FFI shape.
+fn preview_to_ffi(p: LinkPreview) -> LinkPreviewFfi {
+    LinkPreviewFfi {
+        url: p.url,
+        title: p.title,
+        description: p.description,
+        date_ms: p.date as i64,
+        image: p.image.map(pointer_to_ffi),
+    }
+}
+
+/// Encode an FFI link preview back to its wire form.
+fn ffi_to_preview(p: &LinkPreviewFfi) -> LinkPreview {
+    LinkPreview {
+        url: p.url.clone(),
+        title: p.title.clone(),
+        description: p.description.clone(),
+        date: p.date_ms.max(0) as u64,
+        image: p.image.as_ref().map(ffi_to_pointer),
+    }
+}
+
+/// Convert a stored link-preview row to its FFI shape (image carries no local
+/// download state — preview images are re-fetched on demand).
+fn link_preview_row_to_ffi(r: store::link_previews::LinkPreviewRow) -> LinkPreviewFfi {
+    let image = r.image_url.map(|url| AttachmentFfi {
+        id: String::new(),
+        url,
+        content_type: r.image_content_type.unwrap_or_default(),
+        key: r.image_key.unwrap_or_default(),
+        digest: r.image_digest.unwrap_or_default(),
+        size_bytes: r.image_size_bytes.unwrap_or(0),
+        file_name: None,
+        width: r.image_width.unwrap_or(0) as i32,
+        height: r.image_height.unwrap_or(0) as i32,
+        duration_ms: 0,
+        blurhash: None,
+        thumbnail: Vec::new(),
+        caption: None,
+        flags: 0,
+        local_path: None,
+        downloaded_at_ms: None,
+    });
+    LinkPreviewFfi {
+        url: r.url,
+        title: r.title,
+        description: r.description,
+        date_ms: r.date_ms,
+        image,
+    }
+}
+
+/// Build a store link-preview row from an FFI preview for `message_id`.
+fn ffi_to_link_preview_row(
+    message_id: &str,
+    ordinal: i64,
+    p: &LinkPreviewFfi,
+) -> store::link_previews::LinkPreviewRow {
+    let img = p.image.as_ref();
+    store::link_previews::LinkPreviewRow {
+        id: uuid::Uuid::new_v4().to_string(),
+        message_id: message_id.to_string(),
+        ordinal,
+        url: p.url.clone(),
+        title: p.title.clone(),
+        description: p.description.clone(),
+        date_ms: p.date_ms,
+        image_url: img.map(|a| a.url.clone()),
+        image_content_type: img.map(|a| a.content_type.clone()),
+        image_key: img.map(|a| a.key.clone()),
+        image_digest: img.map(|a| a.digest.clone()),
+        image_size_bytes: img.map(|a| a.size_bytes),
+        image_width: img.map(|a| a.width as i64),
+        image_height: img.map(|a| a.height as i64),
+    }
+}
+
 /// A decrypted inbound message.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct DecryptedMessage {
@@ -310,6 +414,9 @@ pub struct DecryptedMessage {
     /// with no attachments. The consumer persists these via `save_message` and
     /// fetches the blobs via `download_attachment`.
     pub attachments: Vec<AttachmentFfi>,
+    /// Link-preview cards (docs/35). Already anti-spoof-filtered: only previews
+    /// whose `url` occurs in the body are surfaced.
+    pub previews: Vec<LinkPreviewFfi>,
 }
 
 /// A message from local history (persisted in SQLCipher).
@@ -345,6 +452,9 @@ pub struct StoredMessageFfi {
     /// Attachments on this message (docs/35), ordered. Empty for plain text.
     /// Populated by `load_messages`; persisted by `save_message`.
     pub attachments: Vec<AttachmentFfi>,
+    /// Link-preview cards on this message (docs/35), ordered. Populated by
+    /// `load_messages`; persisted by `save_message`.
+    pub previews: Vec<LinkPreviewFfi>,
 }
 
 /// A reaction on a message (docs/33-reactions.md), keyed by the target's wire
@@ -404,9 +514,10 @@ fn stored_to_ffi(m: store::messages::HistoryMessage) -> StoredMessageFfi {
         metadata: m.metadata,
         expire_timer_secs: m.expire_timer_secs as u32,
         expire_at_ms: m.expire_at.map(|t| t.as_millis()),
-        // Attachments are loaded and merged separately (load_messages); a bare
-        // conversion carries none.
+        // Attachments and previews are loaded and merged separately
+        // (load_messages); a bare conversion carries none.
         attachments: Vec::new(),
+        previews: Vec::new(),
     }
 }
 
@@ -1781,10 +1892,11 @@ impl AppCore {
         }).map_err(AppErrorFfi::from)
     }
 
-    /// Send a text message with attachments to a [`MessageTarget`] (docs/35).
-    /// The attachments must already be uploaded via [`Self::upload_attachment`]
-    /// (the caller passes the returned pointers here). `body` may be empty for
-    /// an attachment-only message. Works for both DMs and groups.
+    /// Send a text message with attachments and/or link previews to a
+    /// [`MessageTarget`] (docs/35). Attachments must already be uploaded via
+    /// [`Self::upload_attachment`]; each preview's `image` (if any) is itself an
+    /// uploaded attachment pointer. `body` may be empty for an attachment-only
+    /// message. Works for both DMs and groups.
     ///
     /// Call from a background thread — this blocks until complete.
     pub fn send_message_with_attachments(
@@ -1792,6 +1904,7 @@ impl AppCore {
         target: MessageTarget,
         body: String,
         attachments: Vec<AttachmentFfi>,
+        previews: Vec<LinkPreviewFfi>,
         sent_at_ms: i64,
     ) -> Result<(), AppErrorFfi> {
         ffi_runtime().block_on(async {
@@ -1801,11 +1914,12 @@ impl AppCore {
                 inner.ensure_not_blocked(recipient_did).await?;
             }
             let attachments = attachments.iter().map(ffi_to_pointer).collect();
+            let preview = previews.iter().map(ffi_to_preview).collect();
             inner
                 .send_to_target(
                     ws.as_ref(),
                     &target,
-                    Body::Text(TextMessage { body, attachments }),
+                    Body::Text(TextMessage { body, attachments, preview }),
                     sent_at_ms as u64,
                 )
                 .await?;
@@ -2268,6 +2382,12 @@ impl AppCore {
             .enumerate()
             .map(|(i, a)| ffi_to_attachment_row(&msg_id, i as i64, a))
             .collect();
+        let preview_rows: Vec<store::link_previews::LinkPreviewRow> = msg
+            .previews
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ffi_to_link_preview_row(&msg_id, i as i64, p))
+            .collect();
         ffi_runtime().block_on(async {
             let inner = self.inner.lock().await;
             inner.store.save_message(&store::messages::HistoryMessage {
@@ -2298,6 +2418,10 @@ impl AppCore {
             // re-saving on a status transition preserves prior download state.
             if !attachment_rows.is_empty() {
                 inner.store.save_attachments(&msg_id, &attachment_rows).await.map_err(AppError::from)?;
+            }
+            // Persist link previews (docs/35).
+            if !preview_rows.is_empty() {
+                inner.store.save_link_previews(&msg_id, &preview_rows).await.map_err(AppError::from)?;
             }
             Ok::<_, AppError>(())
         }).map_err(AppErrorFfi::from)?;
@@ -2344,10 +2468,24 @@ impl AppCore {
             for a in atts {
                 by_msg.entry(a.message_id.clone()).or_default().push(attachment_row_to_ffi(a));
             }
+            // Same one-query-then-group for link previews (docs/35).
+            let previews = inner
+                .store
+                .load_link_previews_for_conversation(&conversation_id)
+                .await
+                .map_err(AppError::from)?;
+            let mut prev_by_msg: std::collections::HashMap<String, Vec<LinkPreviewFfi>> =
+                std::collections::HashMap::new();
+            for p in previews {
+                prev_by_msg.entry(p.message_id.clone()).or_default().push(link_preview_row_to_ffi(p));
+            }
             Ok::<_, AppError>(msgs.into_iter().map(|m| {
                 let mut ffi = stored_to_ffi(m);
                 if let Some(a) = by_msg.remove(&ffi.id) {
                     ffi.attachments = a;
+                }
+                if let Some(p) = prev_by_msg.remove(&ffi.id) {
+                    ffi.previews = p;
                 }
                 ffi
             }).collect())
@@ -4142,12 +4280,13 @@ impl AppCore {
         inner.download_attachment_inner(attachment).await
     }
 
-    /// Async send-with-attachments for tests (docs/35).
+    /// Async send-with-attachments/previews for tests (docs/35).
     pub async fn send_message_with_attachments_async(
         &self,
         target: MessageTarget,
         body: &str,
         attachments: Vec<AttachmentFfi>,
+        previews: Vec<LinkPreviewFfi>,
         sent_at_ms: i64,
     ) -> Result<(), AppError> {
         let ws = self.ws.lock().expect("ws mutex poisoned").clone();
@@ -4156,11 +4295,12 @@ impl AppCore {
             inner.ensure_not_blocked(recipient_did).await?;
         }
         let attachments = attachments.iter().map(ffi_to_pointer).collect();
+        let preview = previews.iter().map(ffi_to_preview).collect();
         inner
             .send_to_target(
                 ws.as_ref(),
                 &target,
-                Body::Text(TextMessage { body: body.to_string(), attachments }),
+                Body::Text(TextMessage { body: body.to_string(), attachments, preview }),
                 sent_at_ms as u64,
             )
             .await

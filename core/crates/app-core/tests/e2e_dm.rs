@@ -92,6 +92,7 @@ async fn alice_sends_dm_with_attachment_bob_downloads_and_decrypts() {
             MessageTarget::Dm { recipient_did: bob_did.clone() },
             "look at this",
             vec![pointer],
+            vec![],
             now_ms(),
         )
         .await

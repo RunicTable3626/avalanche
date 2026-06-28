@@ -18,7 +18,7 @@ use app_core::{
     self as core, AccountInfoFfi, AttachmentFfi, ConnectionState, ContactRowFfi,
     ConversationSummaryFfi, CreatedGroupFfi, DecryptedMessage, DeliveryStatusUpdate,
     GroupMemberFfi, GroupPendingFfi, AdminEvent, GroupSummaryFfi, IncomingEvent, InviteInfo,
-    JoinResultFfi, MessageTarget, ProjectInfoFfi, StoredMessageFfi,
+    JoinResultFfi, LinkPreviewFfi, MessageTarget, ProjectInfoFfi, StoredMessageFfi,
 };
 
 // ── Error mapping ───────────────────────────────────────────────────────────
@@ -114,6 +114,41 @@ impl From<AttachmentJs> for AttachmentFfi {
     }
 }
 
+/// A link-preview card (docs/35). `image` is an attachment pointer (the
+/// og:image), `None` for a text-only card.
+#[napi(object)]
+pub struct LinkPreviewJs {
+    pub url: String,
+    pub title: String,
+    pub description: String,
+    pub date_ms: i64,
+    pub image: Option<AttachmentJs>,
+}
+
+impl From<LinkPreviewFfi> for LinkPreviewJs {
+    fn from(p: LinkPreviewFfi) -> Self {
+        Self {
+            url: p.url,
+            title: p.title,
+            description: p.description,
+            date_ms: p.date_ms,
+            image: p.image.map(Into::into),
+        }
+    }
+}
+
+impl From<LinkPreviewJs> for LinkPreviewFfi {
+    fn from(p: LinkPreviewJs) -> Self {
+        Self {
+            url: p.url,
+            title: p.title,
+            description: p.description,
+            date_ms: p.date_ms,
+            image: p.image.map(Into::into),
+        }
+    }
+}
+
 #[napi(object)]
 pub struct DecryptedMessageJs {
     pub server_id: i64,
@@ -132,6 +167,8 @@ pub struct DecryptedMessageJs {
     pub is_request: bool,
     /// Attachments carried on the message (docs/35); empty for plain text.
     pub attachments: Vec<AttachmentJs>,
+    /// Link-preview cards (docs/35), anti-spoof-filtered.
+    pub previews: Vec<LinkPreviewJs>,
 }
 
 impl From<DecryptedMessage> for DecryptedMessageJs {
@@ -146,6 +183,7 @@ impl From<DecryptedMessage> for DecryptedMessageJs {
             profile_key: m.profile_key.map(Into::into),
             is_request: m.is_request,
             attachments: m.attachments.into_iter().map(Into::into).collect(),
+            previews: m.previews.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -166,6 +204,8 @@ pub struct StoredMessageJs {
     pub metadata: Option<String>,
     /// Attachments on this message (docs/35); empty for plain text.
     pub attachments: Vec<AttachmentJs>,
+    /// Link-preview cards on this message (docs/35); empty for plain text.
+    pub previews: Vec<LinkPreviewJs>,
 }
 
 impl From<StoredMessageFfi> for StoredMessageJs {
@@ -182,6 +222,7 @@ impl From<StoredMessageFfi> for StoredMessageJs {
             kind: m.kind,
             metadata: m.metadata,
             attachments: m.attachments.into_iter().map(Into::into).collect(),
+            previews: m.previews.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -209,6 +250,7 @@ impl From<StoredMessageJs> for StoredMessageFfi {
             expire_timer_secs: 0,
             expire_at_ms: None,
             attachments: m.attachments.into_iter().map(Into::into).collect(),
+            previews: m.previews.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -939,21 +981,24 @@ impl AppCore {
             .map_err(to_napi)
     }
 
-    /// Send a text message with attachments (docs/35) to a DM or group target.
-    /// The attachments must already be uploaded via `uploadAttachment`.
+    /// Send a text message with attachments and/or link previews (docs/35) to a
+    /// DM or group target. Attachments (and each preview's image) must already
+    /// be uploaded via `uploadAttachment`.
     #[napi]
     pub async fn send_message_with_attachments(
         &self,
         target: MessageTargetJs,
         body: String,
         attachments: Vec<AttachmentJs>,
+        previews: Vec<LinkPreviewJs>,
         sent_at_ms: i64,
     ) -> napi::Result<()> {
         let core = self.inner.clone();
         let target = target.into_ffi()?;
         let attachments: Vec<AttachmentFfi> = attachments.into_iter().map(Into::into).collect();
+        let previews: Vec<LinkPreviewFfi> = previews.into_iter().map(Into::into).collect();
         tokio::task::spawn_blocking(move || {
-            core.send_message_with_attachments(target, body, attachments, sent_at_ms)
+            core.send_message_with_attachments(target, body, attachments, previews, sent_at_ms)
         })
         .await
         .map_err(join_err)?

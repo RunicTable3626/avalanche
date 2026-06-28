@@ -239,6 +239,25 @@ export interface Attachment {
   downloadedAt?: Temporal.Instant;
 }
 
+/**
+ * A rich link-preview card (docs/35). The sender generates it at compose time;
+ * `image` (the og:image) is an {@link Attachment} downloaded like any other
+ * blob. On receive these are anti-spoof-filtered: only previews whose `url`
+ * occurs in the message body are surfaced.
+ *
+ * @category Types
+ */
+export interface LinkPreview {
+  /** The previewed URL — occurs in the message body. */
+  url: string;
+  title: string;
+  description: string;
+  /** Article published date; `undefined` if unknown. */
+  date?: Temporal.Instant;
+  /** og:image as an attachment; `undefined` for a text-only card. */
+  image?: Attachment;
+}
+
 export interface DecryptedMessage {
   /** Server-assigned monotonic id. Used for acking. */
   serverId: number;
@@ -282,6 +301,8 @@ export interface DecryptedMessage {
   isRequest: boolean;
   /** Attachments carried on the message (docs/35); empty for plain text. */
   attachments: Attachment[];
+  /** Link-preview cards (docs/35), anti-spoof-filtered; empty for plain text. */
+  previews: LinkPreview[];
 }
 
 /**
@@ -324,6 +345,8 @@ export interface StoredMessage {
   metadata?: string;
   /** Attachments on this message (docs/35); empty for plain text. */
   attachments?: Attachment[];
+  /** Link-preview cards on this message (docs/35); empty for plain text. */
+  previews?: LinkPreview[];
 }
 
 /**
@@ -587,6 +610,22 @@ const attachmentToNative = (a: Attachment): native.AttachmentJs => ({
   downloadedAtMs: a.downloadedAt ? instantToMs(a.downloadedAt) : undefined,
 });
 
+const linkPreviewFromNative = (p: native.LinkPreviewJs): LinkPreview => ({
+  url: p.url,
+  title: p.title,
+  description: p.description,
+  date: p.dateMs > 0 ? instantFromMs(p.dateMs) : undefined,
+  image: p.image ? attachmentFromNative(p.image) : undefined,
+});
+
+const linkPreviewToNative = (p: LinkPreview): native.LinkPreviewJs => ({
+  url: p.url,
+  title: p.title,
+  description: p.description,
+  dateMs: p.date ? instantToMs(p.date) : 0,
+  image: p.image ? attachmentToNative(p.image) : undefined,
+});
+
 const decryptedMessageFromNative = (m: native.DecryptedMessageJs): DecryptedMessage => {
   const plaintext = asU8(m.plaintext);
   return {
@@ -600,6 +639,7 @@ const decryptedMessageFromNative = (m: native.DecryptedMessageJs): DecryptedMess
     profileKey: m.profileKey ? asU8(m.profileKey) : undefined,
     isRequest: m.isRequest,
     attachments: (m.attachments ?? []).map(attachmentFromNative),
+    previews: (m.previews ?? []).map(linkPreviewFromNative),
   };
 };
 
@@ -615,6 +655,7 @@ const storedMessageFromNative = (m: native.StoredMessageJs): StoredMessage => ({
   kind: m.kind,
   metadata: m.metadata ?? undefined,
   attachments: (m.attachments ?? []).map(attachmentFromNative),
+  previews: (m.previews ?? []).map(linkPreviewFromNative),
 });
 
 const storedMessageToNative = (m: StoredMessage): native.StoredMessageJs => ({
@@ -630,6 +671,7 @@ const storedMessageToNative = (m: StoredMessage): native.StoredMessageJs => ({
   kind: m.kind ?? 0,
   metadata: m.metadata ?? undefined,
   attachments: (m.attachments ?? []).map(attachmentToNative),
+  previews: (m.previews ?? []).map(linkPreviewToNative),
 });
 
 const conversationSummaryFromNative = (c: native.ConversationSummaryJs): ConversationSummary => ({
@@ -1058,9 +1100,10 @@ export class AppCore {
   }
 
   /**
-   * Send a text message with attachments to a {@link SendTarget}. The
-   * attachments must already be uploaded via {@link uploadAttachment}. `body`
-   * may be empty for an attachment-only message.
+   * Send a text message with attachments and/or link previews to a
+   * {@link SendTarget}. Attachments (and each preview's `image`) must already be
+   * uploaded via {@link uploadAttachment}. `body` may be empty for an
+   * attachment-only message.
    *
    * @category Direct Messages
    */
@@ -1068,6 +1111,7 @@ export class AppCore {
     target: SendTarget,
     body: string,
     attachments: Attachment[],
+    previews: LinkPreview[] = [],
     sentAt?: Temporal.Instant,
   ): Promise<void> {
     const ts = sentAt ?? Temporal.Now.instant();
@@ -1075,6 +1119,7 @@ export class AppCore {
       sendTargetToNative(target),
       body,
       attachments.map(attachmentToNative),
+      previews.map(linkPreviewToNative),
       instantToMs(ts),
     );
   }

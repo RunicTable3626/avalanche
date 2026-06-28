@@ -444,6 +444,13 @@ export type InviteInfo = {
 	 *  auto-DM can show the inviter's name from the very first frame.
 	 */
 	inviterProfileKey: number[] | null,
+	/**
+	 *  Operator's privacy policy URL for `server_url`, resolved server-side as
+	 *  part of invite validation (same source as `GET /v1/info`). `None` when
+	 *  the operator configured none. Onboarding screens read this directly
+	 *  instead of making a separate server call.
+	 */
+	privacyPolicyUrl: string | null,
 };
 
 /**  Outcome of `join_via_link`. */

@@ -8,13 +8,17 @@ import InviteLinkEntryView from "./InviteLinkEntryView";
 import IdentityPickerView from "./IdentityPickerView";
 import NewAccountView from "./NewAccountView";
 import JoiningServerView from "./JoiningServerView";
+import RecoveryExplainerView from "./RecoveryExplainerView";
+import RecoveryConsoleView from "./RecoveryConsoleView";
 
 type Screen =
   | { name: "splash" }
   | { name: "inviteLinkEntry" }
   | { name: "identityPicker"; inviteInfo: InviteInfo; inviteToken: string }
   | { name: "newAccount"; inviteInfo: InviteInfo; inviteToken: string }
-  | { name: "joiningServer"; inviteInfo: InviteInfo; inviteToken: string; account: Account };
+  | { name: "joiningServer"; inviteInfo: InviteInfo; inviteToken: string; account: Account }
+  | { name: "recoveryExplainer" }
+  | { name: "recoveryConsole"; phrase: string; serverUrl: string };
 
 export default function OnboardingFlow() {
   const { store, validateInvite, setPendingInviteToken } = useApp();
@@ -88,11 +92,17 @@ export default function OnboardingFlow() {
       ? (current() as Extract<Screen, { name: "joiningServer" }>)
       : null;
 
+  const recoveryConsoleScreen = () =>
+    current().name === "recoveryConsole"
+      ? (current() as Extract<Screen, { name: "recoveryConsole" }>)
+      : null;
+
   return (
     <Switch>
       <Match when={current().name === "splash"}>
         <SplashView
           onEnterLink={() => navigate({ name: "inviteLinkEntry" })}
+          onRecover={() => navigate({ name: "recoveryExplainer" })}
         />
       </Match>
 
@@ -124,6 +134,7 @@ export default function OnboardingFlow() {
             inviteInfo={s().inviteInfo}
             token={s().inviteToken}
             showRecoverLink={true}
+            onRecover={() => navigate({ name: "recoveryExplainer" })}
             onBack={goBack}
           />
         )}
@@ -136,6 +147,19 @@ export default function OnboardingFlow() {
             account={s().account}
             onBack={goBack}
           />
+        )}
+      </Match>
+
+      <Match when={current().name === "recoveryExplainer"}>
+        <RecoveryExplainerView
+          onBack={goBack}
+          onRecover={(phrase, serverUrl) => navigate({ name: "recoveryConsole", phrase, serverUrl })}
+        />
+      </Match>
+
+      <Match when={recoveryConsoleScreen()}>
+        {(s) => (
+          <RecoveryConsoleView phrase={s().phrase} serverUrl={s().serverUrl} onBack={goBack} />
         )}
       </Match>
     </Switch>

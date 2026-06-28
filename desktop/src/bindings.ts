@@ -38,6 +38,23 @@ export const commands = {
 	updateRecoveryBlob: (prfOutput: number[], servers: string[]) => typedError<null, string>(__TAURI_INVOKE("update_recovery_blob", { prfOutput, servers })),
 	/**  This account's home (primary) server URL. */
 	homeServer: () => typedError<string, string>(__TAURI_INVOKE("home_server")),
+	/**
+	 *  Generate a fresh 12-word BIP39 recovery phrase. Stateless — drives the
+	 *  recovery-phrase *setup* flow (desktop has no passkey/PRF path).
+	 */
+	generateRecoveryPhrase: () => typedError<string, string>(__TAURI_INVOKE("generate_recovery_phrase")),
+	/**
+	 *  Validate a BIP39 recovery phrase and derive its 32-byte seed (the PRF-output
+	 *  stand-in for `update_recovery_blob` / `derive_did_from_passkey`).
+	 */
+	recoveryPhraseToSeed: (phrase: string) => typedError<number[], string>(__TAURI_INVOKE("recovery_phrase_to_seed", { phrase })),
+	/**
+	 *  Recompute the DID a given seed + signup server URL would produce, without
+	 *  fetching anything. The recovery-phrase restore flow needs the DID before it
+	 *  can download the recovery blob (the phrase carries no DID, unlike a passkey
+	 *  userHandle).
+	 */
+	deriveDidFromPasskey: (prfOutput: number[], signupServerUrl: string) => typedError<string, string>(__TAURI_INVOKE("derive_did_from_passkey", { prfOutput, signupServerUrl })),
 	contactDisplayName: (did: string) => typedError<string, string>(__TAURI_INVOKE("contact_display_name", { did })),
 	getAccountInfo: (did: string) => typedError<AccountInfoFfi, string>(__TAURI_INVOKE("get_account_info", { did })),
 	refreshContactProfile: (did: string) => typedError<boolean, string>(__TAURI_INVOKE("refresh_contact_profile", { did })),

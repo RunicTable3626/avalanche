@@ -60,6 +60,9 @@ pub fn run() {
             has_recovery,
             update_recovery_blob,
             home_server,
+            generate_recovery_phrase,
+            recovery_phrase_to_seed,
+            derive_did_from_passkey,
             contact_display_name,
             get_account_info,
             refresh_contact_profile,
@@ -391,6 +394,32 @@ fn update_recovery_blob(
 #[specta::specta]
 fn home_server(state: tauri::State<'_, AppState>) -> Result<String, String> {
     Ok(get_app(&state)?.home_server())
+}
+
+/// Generate a fresh 12-word BIP39 recovery phrase. Stateless — drives the
+/// recovery-phrase *setup* flow (desktop has no passkey/PRF path).
+#[tauri::command]
+#[specta::specta]
+fn generate_recovery_phrase() -> Result<String, String> {
+    app_core::generate_recovery_phrase().map_err(|e| e.to_string())
+}
+
+/// Validate a BIP39 recovery phrase and derive its 32-byte seed (the PRF-output
+/// stand-in for `update_recovery_blob` / `derive_did_from_passkey`).
+#[tauri::command]
+#[specta::specta]
+fn recovery_phrase_to_seed(phrase: String) -> Result<Vec<u8>, String> {
+    app_core::recovery_phrase_to_seed(phrase).map_err(|e| e.to_string())
+}
+
+/// Recompute the DID a given seed + signup server URL would produce, without
+/// fetching anything. The recovery-phrase restore flow needs the DID before it
+/// can download the recovery blob (the phrase carries no DID, unlike a passkey
+/// userHandle).
+#[tauri::command]
+#[specta::specta]
+fn derive_did_from_passkey(prf_output: Vec<u8>, signup_server_url: String) -> Result<String, String> {
+    app_core::derive_did_from_passkey(prf_output, signup_server_url).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

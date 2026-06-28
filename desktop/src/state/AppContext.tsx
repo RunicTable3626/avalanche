@@ -123,6 +123,9 @@ interface AppContextValue {
   leaveServer: () => Promise<void>;
   deleteIdentity: () => Promise<void>;
   hasRecovery: () => Promise<boolean>;
+  generateRecoveryPhrase: () => Promise<string>;
+  setupRecoveryFromPhrase: (phrase: string) => Promise<void>;
+  recoverFromPhrase: (phrase: string, serverUrl: string, displayName: string) => Promise<void>;
 }
 
 const AppContext = createContext<AppContextValue | undefined>(undefined);
@@ -395,12 +398,15 @@ export function AppProvider(props: { children: JSX.Element }) {
     const result = await service().createAccount(
       serverUrl,
       dbPath,
-      // TODO: replace with real key-derivation when PRF is wired.
+      // DB key: a placeholder until OS-keychain integration. Mirrors mobile's
+      // "dev-placeholder-key" (iOS uses the Secure Enclave; desktop has no
+      // equivalent wired yet).
       "dev-placeholder-key",
-      // TODO(assumption): AppCore::create_account must accept empty PRF output
-      // (the desktop no-passkey path).  If it validates non-empty bytes,
-      // account creation fails with an opaque backend error.  Verify when
-      // T31 wires the real command.
+      // Empty PRF output is deliberate: desktop has no WebAuthn passkey/PRF
+      // authenticator, so signup is the single-shot empty-PRF path. This is a
+      // sanctioned divergence from iOS's two-stage PreparedAccount handle — see
+      // "Passkey / recovery divergence" in desktop/CLAUDE.md. Recovery is
+      // offered via a 12-word phrase instead (RecoveryPhraseSetupView).
       [],
       displayName,
       inviteToken
@@ -555,6 +561,63 @@ export function AppProvider(props: { children: JSX.Element }) {
       console.warn("hasRecovery failed:", e);
       return false;
     });
+  }
+
+  function generateRecoveryPhrase(): Promise<string> {
+    return service().generateRecoveryPhrase();
+  }
+
+  // Recovery SETUP: derive the 32-byte seed from the freshly-generated phrase and
+  // upload the encrypted recovery blob for the signed-in account's servers.
+  // Desktop has no passkey/PRF, so the phrase-derived seed is the PRF stand-in
+  // (see desktop/CLAUDE.md passkey divergence).
+  async function setupRecoveryFromPhrase(phrase: string) {
+    const seed = await service().recoveryPhraseToSeed(phrase);
+    const accountId = getSoleAccountId();
+    const servers =
+      store.accounts.find((a) => a.id === accountId)?.servers.map((s) => s.url) ?? [];
+    await service().updateRecoveryBlob(seed, servers);
+  }
+
+  // Recovery RESTORE: recompute the DID from the phrase seed + home server URL,
+  // then restore the account from its recovery blob. Mirrors iOS
+  // RecoveryExplainerView.recoverWithPhrase → recoverAccount. On success the
+  // account is added and the app enters the main UI (same path as createAccount).
+  async function recoverFromPhrase(phrase: string, serverUrl: string, displayName: string) {
+    const seed = await service().recoveryPhraseToSeed(phrase);
+    const did = await service().deriveDidFromPasskey(seed, serverUrl);
+    if (store.accounts.some((a) => a.id === did)) {
+      throw new Error("This identity is already signed in on this device.");
+    }
+    const dbPath = `account-${Math.random().toString(36).slice(2, 10)}.db`;
+    const result = await service().recoverFromPhrase(
+      phrase,
+      serverUrl,
+      did,
+      dbPath,
+      "dev-placeholder-key",
+      displayName
+    );
+    const serverInfo: ServerInfo = {
+      id: serverUrl,
+      name: serverUrl,
+      url: serverUrl,
+      displayHost: displayHost(serverUrl, serverUrl),
+    };
+    const account: Account = {
+      id: result.did,
+      displayName: result.displayName || displayName || `Account ${result.did.slice(-6)}`,
+      avatarData: null,
+      servers: [serverInfo],
+    };
+    setStore("accounts", (prev) => [...prev, account]);
+    await addPersistedAccount({
+      did: result.did,
+      displayName: account.displayName,
+      dbPath,
+      servers: [{ id: serverUrl, name: serverUrl, url: serverUrl }],
+    });
+    enterApp();
   }
 
   // ── Messaging ─────────────────────────────────────────────────────────────
@@ -1842,6 +1905,9 @@ export function AppProvider(props: { children: JSX.Element }) {
     leaveServer,
     deleteIdentity,
     hasRecovery,
+    generateRecoveryPhrase,
+    setupRecoveryFromPhrase,
+    recoverFromPhrase,
   };
 
   return (

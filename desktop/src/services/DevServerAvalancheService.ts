@@ -128,6 +128,18 @@ export class DevServerAvalancheService implements AvalancheService {
     return ok(commands.homeServer());
   }
 
+  async generateRecoveryPhrase(): Promise<string> {
+    return ok(commands.generateRecoveryPhrase());
+  }
+
+  async recoveryPhraseToSeed(phrase: string): Promise<number[]> {
+    return ok(commands.recoveryPhraseToSeed(phrase));
+  }
+
+  async deriveDidFromPasskey(prfOutput: number[], signupServerUrl: string): Promise<string> {
+    return ok(commands.deriveDidFromPasskey(prfOutput, signupServerUrl));
+  }
+
   async contactDisplayName(did: string): Promise<string> {
     return ok(commands.contactDisplayName(did));
   }

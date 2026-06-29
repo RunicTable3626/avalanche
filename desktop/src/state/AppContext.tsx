@@ -442,6 +442,22 @@ export function AppProvider(props: { children: JSX.Element }) {
     .catch(() => { /* Tauri event API unavailable (browser/test) */ });
   onCleanup(() => deeplinkUnlisten?.());
 
+  // ── Foreground hook ───────────────────────────────────────────────────────
+  // Push window focus/blur to the core so it can gate the WS keepalive and probe
+  // the connection on resume (T77, mirrors iOS `scenePhase` → `setAppActiveAll`).
+  // Becoming active triggers an opportunistic reconnect, and the core's
+  // connection loop resyncs durable storage on that reconnect — so a message I
+  // sent or read on another linked device surfaces here without a restart.
+  // No-op before sign-in: the command short-circuits when there's no account.
+  let focusUnlisten: (() => void) | undefined;
+  getCurrentWindow()
+    .onFocusChanged(({ payload: focused }) => {
+      void service().setAppActive(focused).catch(() => { /* offline / signed out */ });
+    })
+    .then((un) => { focusUnlisten = un; })
+    .catch(() => { /* Tauri window API unavailable (browser/test) */ });
+  onCleanup(() => focusUnlisten?.());
+
   // ── Account lifecycle ─────────────────────────────────────────────────────
 
   // Shared completion step for every onboarding path: resets the conversation
@@ -1898,6 +1914,17 @@ export function AppProvider(props: { children: JSX.Element }) {
           // Notify any open ConversationView for this group to re-check
           // membership (e.g. you were removed by another admin while viewing).
           setGroupMetaChange((p) => ({ groupId: gm.event.groupId, n: p.n + 1 }));
+          needsConversationReload = true;
+          break;
+        }
+        case "conversationUpdated": {
+          // A `SyncSent`/`SyncRead` transcript from another of my own linked
+          // devices changed exactly this conversation's stored content (a
+          // message I sent, an edit/delete/reaction I made, or read-state I
+          // cleared). Re-read just this timeline so it surfaces live, then
+          // refresh the chat-list preview. Mirrors iOS `conversationUpdated`.
+          const cu = ev as Extract<IncomingEvent, { type: "conversationUpdated" }>;
+          reloadMessagesIfLoaded(cu.conversation_id);
           needsConversationReload = true;
           break;
         }

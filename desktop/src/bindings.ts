@@ -210,6 +210,18 @@ export const commands = {
 	 *  bundle. Returns true when done; the TS layer polls this.
 	 */
 	linkSendBundleStep: () => typedError<boolean, string>(__TAURI_INVOKE("link_send_bundle_step")),
+	/**
+	 *  Tell the core whether the desktop window is foreground-active (focused).
+	 *  Gates the WS keepalive (foreground-only) and, on a transition to active,
+	 *  triggers an opportunistic reconnect + liveness probe so a socket that died
+	 *  while the window was hidden/blurred recovers promptly — the reconnect path
+	 *  resyncs durable storage via the core connection loop (no separate
+	 *  `sync_storage` call needed, matching iOS, which only drives `setAppActive`
+	 *  from `scenePhase`). Sync + infallible. No-op before sign-in (no core yet):
+	 *  focus events can fire on the onboarding screens, where there's nothing to
+	 *  gate.
+	 */
+	setAppActive: (active: boolean) => typedError<null, string>(__TAURI_INVOKE("set_app_active", { active })),
 };
 
 /* Types */

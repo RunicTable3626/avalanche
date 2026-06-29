@@ -5,6 +5,16 @@
 *, *::before, *::after { box-sizing: border-box; }
 body, html { margin: 0; padding: 0; height: 100%; }
 
+/* Global defaults so every surface and any text without an explicit color tracks
+   the theme. Without these, un-colored labels fall back to the UA default
+   (black) — fine on the light background, invisible on the dark one. Views that
+   set their own color/background still override these. */
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
 /* Semantic color tokens. Light values live in :root; the dark overrides live in
    the `prefers-color-scheme: dark` block below. Views reference only the semantic
    names (never raw hex), so they adapt for free — mirrors the iOS palette in

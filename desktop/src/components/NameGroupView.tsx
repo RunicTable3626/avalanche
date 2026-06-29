@@ -5,6 +5,8 @@ import DisappearingMessagesPicker from "./DisappearingMessagesPicker";
 import "./NameGroupView.css";
 
 interface Props {
+  // The identity that will own + create the group (chosen in NewConversationView).
+  accountId: string;
   memberDids: string[];
   onBack: () => void;
   onClose: () => void;
@@ -19,7 +21,7 @@ interface Props {
  */
 export default function NameGroupView(props: Props) {
   const app = useApp();
-  const accountId = (): string => app.store.accounts[0]?.id ?? "";
+  const accountId = (): string => props.accountId;
 
   const [name, setName] = createSignal("");
   const [expirySeconds, setExpirySeconds] = createSignal(0);

@@ -1,4 +1,4 @@
-import { createSignal, onMount, For, Show } from "solid-js";
+import { createSignal, createEffect, For, Show } from "solid-js";
 import { FiX } from "solid-icons/fi";
 import { useApp } from "../state/AppContext";
 import type { ContactRowFfi } from "../services/AvalancheService";
@@ -18,17 +18,30 @@ interface Props {
  */
 export default function NewConversationView(props: Props) {
   const app = useApp();
-  const accountId = (): string => app.store.accounts[0]?.id ?? "";
+  // Which identity starts this conversation. Defaults to the first account; a
+  // picker (below) lets the user choose when more than one is signed in — mirrors
+  // iOS ComposeMessageView's accountPicker.
+  const accounts = () => app.store.accounts;
+  const [selectedAccountId, setSelectedAccountId] = createSignal(
+    accounts()[0]?.id ?? ""
+  );
+  const accountId = (): string => selectedAccountId() || accounts()[0]?.id || "";
 
   const [chips, setChips] = createSignal<string[]>([]);
   const [contacts, setContacts] = createSignal<ContactRowFfi[]>([]);
   const [showGroup, setShowGroup] = createSignal(false);
 
-  onMount(() => {
+  // Reload contacts from the selected account's store whenever it changes
+  // (contacts are per-account).
+  createEffect(() => {
+    const id = accountId();
+    if (!id) {
+      setContacts([]);
+      return;
+    }
     void (async () => {
       try {
-        const rows = await app.service().listContacts();
-        setContacts(rows);
+        setContacts(await app.serviceFor(id).listContacts());
       } catch {
         setContacts([]);
       }
@@ -77,6 +90,7 @@ export default function NewConversationView(props: Props) {
           when={!showGroup()}
           fallback={
             <NameGroupView
+              accountId={accountId()}
               memberDids={chips()}
               onBack={() => setShowGroup(false)}
               onClose={props.onClose}
@@ -93,6 +107,21 @@ export default function NewConversationView(props: Props) {
               <FiX size={18} />
             </button>
           </div>
+
+          <Show when={accounts().length > 1}>
+            <div class="newconv-account">
+              <label class="newconv-account-label">From</label>
+              <select
+                class="text-input newconv-account-select"
+                value={accountId()}
+                onChange={(e) => setSelectedAccountId(e.currentTarget.value)}
+              >
+                <For each={accounts()}>
+                  {(a) => <option value={a.id}>{a.displayName}</option>}
+                </For>
+              </select>
+            </div>
+          </Show>
 
           <div class="newconv-recipients">
             <RecipientTokenField

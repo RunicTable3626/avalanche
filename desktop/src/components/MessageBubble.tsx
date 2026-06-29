@@ -91,7 +91,12 @@ export default function MessageBubble(props: Props) {
             <Show when={attachments().length > 0}>
               <div class="attachment-list" onContextMenu={openMenu}>
                 <For each={attachments()}>
-                  {(a) => <AttachmentView attachment={a} />}
+                  {(a) => (
+                    <AttachmentView
+                      attachment={a}
+                      accountId={props.conversation.accountId}
+                    />
+                  )}
                 </For>
               </div>
             </Show>
@@ -118,7 +123,12 @@ export default function MessageBubble(props: Props) {
             <Show when={previews().length > 0}>
               <div class="preview-list" onContextMenu={openMenu}>
                 <For each={previews()}>
-                  {(p) => <LinkPreviewCard preview={p} />}
+                  {(p) => (
+                    <LinkPreviewCard
+                      preview={p}
+                      accountId={props.conversation.accountId}
+                    />
+                  )}
                 </For>
               </div>
             </Show>

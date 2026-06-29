@@ -123,6 +123,7 @@ export default function ComposeMessageView(props: Props) {
       let image: AttachmentFfi | null = null;
       if (meta.imageBytes.length > 0) {
         image = await uploadAttachment(
+          props.conversation.accountId,
           meta.imageBytes,
           meta.imageContentType ?? "image/jpeg",
           null,
@@ -187,6 +188,7 @@ export default function ComposeMessageView(props: Props) {
         }
       }
       const pointer = await uploadAttachment(
+        props.conversation.accountId,
         Array.from(buf),
         contentType,
         file.name,
@@ -312,7 +314,13 @@ export default function ComposeMessageView(props: Props) {
             {(att, i) => <StagedAttachmentChip attachment={att} onRemove={() => removeStagedAttachment(i())} />}
           </For>
           <Show when={stagedPreview()}>
-            {(p) => <LinkPreviewCard preview={p()} onDismiss={dismissPreview} />}
+            {(p) => (
+              <LinkPreviewCard
+                preview={p()}
+                accountId={props.conversation.accountId}
+                onDismiss={dismissPreview}
+              />
+            )}
           </Show>
         </div>
       </Show>

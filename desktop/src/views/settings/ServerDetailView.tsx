@@ -29,8 +29,8 @@ export default function ServerDetailView(props: Props) {
     setLeaving(true);
     setError(null);
     try {
-      await leaveServer();
-      // leaveServer flips the app back to onboarding on success; nothing else to do.
+      await leaveServer(props.account.id);
+      // leaveServer drops this account (back to onboarding if it was the last).
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't leave server");
       setLeaving(false);

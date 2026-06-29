@@ -7,6 +7,8 @@ import "./AttachmentView.css";
 
 interface Props {
   attachment: AttachmentFfi;
+  // The owning conversation's account — attachments decrypt with its keys.
+  accountId: string;
 }
 
 function blobUrl(bytes: number[], contentType: string): string {
@@ -49,7 +51,7 @@ export default function AttachmentView(props: Props) {
     }
     if (isImage()) {
       void app
-        .downloadAttachment(props.attachment)
+        .downloadAttachment(props.accountId, props.attachment)
         .then((bytes) => {
           if (disposed || bytes.length === 0) return;
           setFullUrl(track(blobUrl(bytes, props.attachment.contentType)));
@@ -70,7 +72,7 @@ export default function AttachmentView(props: Props) {
     if (saving()) return;
     setSaving(true);
     try {
-      const bytes = await app.downloadAttachment(props.attachment);
+      const bytes = await app.downloadAttachment(props.accountId, props.attachment);
       const url = blobUrl(bytes, props.attachment.contentType);
       const a = document.createElement("a");
       a.href = url;

@@ -73,7 +73,9 @@ export default function ConversationView(props: Props) {
     // app-core's store, so read it with recipientDid — not the conversation id.
     const recipientDid = props.conversation.recipientDid;
     if (isDm() && recipientDid) {
-      void getConversationTimer(recipientDid).then((s) => setTimerSecs(s ?? 0));
+      void getConversationTimer(props.conversation.accountId, recipientDid).then((s) =>
+        setTimerSecs(s ?? 0)
+      );
     } else {
       setTimerSecs(0);
     }
@@ -84,7 +86,7 @@ export default function ConversationView(props: Props) {
     setGroupMember(true);
     if (props.conversation.isGroup && groupId) {
       void app
-        .service()
+        .serviceFor(props.conversation.accountId)
         .isGroupMember(groupId)
         .then((m) => {
           // Ignore a resolve that lost the race to a later conversation switch.
@@ -103,7 +105,7 @@ export default function ConversationView(props: Props) {
     if (!props.conversation.isGroup || !groupId || change.groupId !== groupId) return;
     const gen = ++groupMemberGen;
     void app
-      .service()
+      .serviceFor(props.conversation.accountId)
       .isGroupMember(groupId)
       .then((m) => {
         if (gen === groupMemberGen) setGroupMember(m);
@@ -140,10 +142,11 @@ export default function ConversationView(props: Props) {
     const recipientDid = props.conversation.recipientDid;
     if (!recipientDid) return;
     setTimerSecs(secs); // optimistic
-    void setConversationTimer(recipientDid, secs === 0 ? null : secs).finally(() => {
+    const accountId = props.conversation.accountId;
+    void setConversationTimer(accountId, recipientDid, secs === 0 ? null : secs).finally(() => {
       // Re-read the authoritative stored value so the picker reverts if the
       // write failed (mirrors the group setExpiry reload-after-write path).
-      void getConversationTimer(recipientDid).then((s) => setTimerSecs(s ?? 0));
+      void getConversationTimer(accountId, recipientDid).then((s) => setTimerSecs(s ?? 0));
     });
   }
 
@@ -253,7 +256,12 @@ export default function ConversationView(props: Props) {
             <Show when={props.conversation.recipientDid}>
               <button
                 class="blocked-unblock-btn"
-                onClick={() => void unblockContact(props.conversation.recipientDid!)}
+                onClick={() =>
+                  void unblockContact(
+                    props.conversation.accountId,
+                    props.conversation.recipientDid!
+                  )
+                }
               >
                 Unblock
               </button>

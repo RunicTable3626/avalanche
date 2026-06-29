@@ -182,6 +182,12 @@ dependencies {
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
 
+    // UnifiedPush transport for degoogled Android (no Play Services). The app
+    // picks FCM when Play Services is present and falls back to a user-installed
+    // UnifiedPush distributor otherwise (docs/15). Same relay-routed pseudonym
+    // model as FCM/APNs — the endpoint URL is just another "device token".
+    implementation(libs.unifiedpush.connector)
+
     // QR scanning for onboarding (CameraX + ZXing; ZXing avoids Google Play Services
     // so the app works on de-Googled Android)
     implementation(libs.androidx.camera.core)

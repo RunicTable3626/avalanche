@@ -64,6 +64,18 @@
             </intent-filter>
         </service>
 
+        <!-- UnifiedPush (degoogled Android, docs/15): the connector library's own
+             receiver forwards distributor events (endpoint, wakeup, (un)register)
+             to this bound PushService. Not exported — the library's receiver is
+             the public entry point; the service is internal. -->
+        <service
+            android:name=".UnifiedPushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- Branded small icon + channel for any system-rendered FCM notifications. -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"

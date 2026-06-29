@@ -1,8 +1,9 @@
 # Deploying the push relay
 
 One push relay serves all environments (dev + production). It maps opaque
-per-(user, server) pseudonyms to APNs/FCM device tokens and fires
-content-free silent pushes when homeservers report offline messages.
+per-(user, server) pseudonyms to APNs / FCM / UnifiedPush targets and fires
+content-free silent pushes when homeservers report offline messages. APNs and
+FCM need credentials (below); UnifiedPush needs only outbound HTTPS.
 
 This guide walks through running it on a $5 DigitalOcean droplet.
 
@@ -106,6 +107,10 @@ APNS_KEY_PATH=/etc/actnet-relay/AuthKey_3WMG978DSL.p8
 APNS_KEY_ID=3WMG978DSL
 APNS_TEAM_ID=7FVK3RR3TV
 APNS_BUNDLE_ID=net.theavalanche.app
+# FCM (standard Android). Omit both to disable FCM (wakeups logged only).
+FCM_SA_PATH=/etc/actnet-relay/fcm-service-account.json
+# Optional — defaults to the service-account JSON's own project_id.
+#FCM_PROJECT_ID=avalanche-12345
 RUST_LOG=relay=info,tower_http=info
 EOF
 chmod 600 /etc/actnet-relay/env
@@ -116,6 +121,22 @@ builds one client per environment from the same `.p8` and routes each
 wakeup based on the `environment` field clients pass at registration
 (`sandbox` for Xcode/debug builds, `production` for TestFlight/App
 Store).
+
+**FCM credentials.** From the Firebase console (the same project that backs
+`app/google-services.json`): Project settings → Service accounts → *Generate
+new private key*. Copy the downloaded JSON to the droplet alongside the APNs
+key and lock it down:
+
+```bash
+scp fcm-service-account.json root@<droplet-ip>:/etc/actnet-relay/
+# on the droplet:
+chmod 600 /etc/actnet-relay/fcm-service-account.json
+chown actnet-relay:actnet-relay /etc/actnet-relay/fcm-service-account.json
+```
+
+The relay mints OAuth2 tokens from this key (FCM HTTP v1) and caches them. No
+config is needed for UnifiedPush — those wakeups are plain HTTPS POSTs to the
+client-supplied endpoint, SSRF-guarded (https only, global hosts only).
 
 ---
 

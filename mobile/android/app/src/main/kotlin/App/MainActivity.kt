@@ -98,7 +98,11 @@ class MainActivity : ComponentActivity() {
     // not need the permission — it only gates whether banners are shown).
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            PushManager.onPermissionResult(granted = granted, appViewModel = appViewModel)
+            PushManager.onPermissionResult(
+                granted = granted,
+                context = applicationContext,
+                appViewModel = appViewModel,
+            )
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {

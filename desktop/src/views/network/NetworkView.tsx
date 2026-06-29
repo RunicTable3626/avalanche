@@ -6,7 +6,7 @@ import { openProjectWindow } from "./ProjectWebView";
 import "./NetworkView.css";
 
 export default function NetworkView() {
-  const { store, service } = useApp();
+  const { store, serviceFor } = useApp();
 
   // Deduplicate servers across all accounts.
   const allServers = createMemo(() => {
@@ -19,20 +19,44 @@ export default function NetworkView() {
     return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
   });
 
-  // Fetch projects once per session.
-  const [projects, { refetch }] = createResource<ProjectInfoFfi[]>(
-    () => service().fetchProjects(),
+  // Projects are per-account; fetch from every account's servers and merge,
+  // tagging each with its owning account so the token request routes correctly.
+  // Re-runs when the set of signed-in accounts changes.
+  type Project = ProjectInfoFfi & { accountId: string };
+  const [projects, { refetch }] = createResource<Project[], string>(
+    () => store.accounts.map((a) => a.id).join(","),
+    async () => {
+      // Fetch each account's projects concurrently; dedup in account order.
+      const perAccount = await Promise.all(
+        store.accounts.map(async (account) => ({
+          account,
+          rows: await serviceFor(account.id)
+            .fetchProjects()
+            .catch(() => [] as ProjectInfoFfi[]),
+        }))
+      );
+      const out: Project[] = [];
+      const seen = new Set<string>();
+      for (const { account, rows } of perAccount) {
+        for (const p of rows) {
+          if (seen.has(p.url)) continue;
+          seen.add(p.url);
+          out.push({ ...p, accountId: account.id });
+        }
+      }
+      return out;
+    },
     { initialValue: [] }
   );
 
   const [openingUrl, setOpeningUrl] = createSignal<string | null>(null);
   const [openError, setOpenError] = createSignal<string | null>(null);
 
-  async function handleOpen(project: ProjectInfoFfi) {
+  async function handleOpen(project: Project) {
     setOpenError(null);
     setOpeningUrl(project.url);
     try {
-      const token = await service().requestProjectToken(project.url);
+      const token = await serviceFor(project.accountId).requestProjectToken(project.url);
       const ok = await openProjectWindow(project, token);
       if (!ok) {
         setOpenError("Could not open project window. Check that Tauri is running.");

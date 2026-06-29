@@ -10,7 +10,9 @@ interface Props {
 
 export default function BlockedContactsView(props: Props) {
   const app = useApp();
-  const [rows, setRows] = createSignal<ContactRowFfi[]>([]);
+  // Aggregated across all accounts; each row carries its owning accountId so an
+  // unblock routes to the right account's core.
+  const [rows, setRows] = createSignal<Array<ContactRowFfi & { accountId: string }>>([]);
   const [loading, setLoading] = createSignal(true);
 
   async function refresh() {
@@ -23,8 +25,8 @@ export default function BlockedContactsView(props: Props) {
     void refresh();
   });
 
-  async function unblock(did: string) {
-    await app.unblockContact(did);
+  async function unblock(accountId: string, did: string) {
+    await app.unblockContact(accountId, did);
     await refresh();
   }
 
@@ -52,7 +54,7 @@ export default function BlockedContactsView(props: Props) {
                     </div>
                     <button
                       class="btn-secondary blocked-unblock"
-                      onClick={() => void unblock(c.did)}
+                      onClick={() => void unblock(c.accountId, c.did)}
                     >
                       Unblock
                     </button>

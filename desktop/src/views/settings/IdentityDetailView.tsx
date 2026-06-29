@@ -1,5 +1,5 @@
 import { createSignal, Show } from "solid-js";
-import { FiArrowLeft, FiCopy, FiCheck, FiSlash } from "solid-icons/fi";
+import { FiArrowLeft, FiCopy, FiCheck, FiSlash, FiSmartphone, FiChevronRight } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
 import AccountAvatar from "../../components/AccountAvatar";
 import BlockedContactsView from "./BlockedContactsView";
@@ -10,13 +10,16 @@ import "./IdentityDetailView.css";
 interface Props {
   account: Account;
   onBack: () => void;
+  // Open the per-identity "Link a device" flow for this account.
+  onLinkDevice: () => void;
 }
 
 /**
  * Identity detail: edit display name, copy DID + contact link, view the home
- * server, open blocked contacts, and delete the identity. Mirrors iOS
- * IdentityDetailView, minus the QR image (desktop has no QR rendering — see the
- * documented QR divergence) and "Link a Device" (Day 6).
+ * server, link a device, open blocked contacts, and delete the identity. Mirrors
+ * iOS IdentityDetailView, minus the QR image (desktop has no QR rendering — see
+ * the documented QR divergence). Link-a-device is per-identity here (Day 7
+ * multi-account), reached via onLinkDevice.
  */
 export default function IdentityDetailView(props: Props) {
   const { setAccountDisplayName, deleteIdentity } = useApp();
@@ -62,8 +65,8 @@ export default function IdentityDetailView(props: Props) {
     setDeleting(true);
     setError(null);
     try {
-      await deleteIdentity();
-      // deleteIdentity flips the app back to onboarding on success.
+      await deleteIdentity(props.account.id);
+      // deleteIdentity drops this account (back to onboarding if it was the last).
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't delete identity");
       setDeleting(false);
@@ -140,6 +143,12 @@ export default function IdentityDetailView(props: Props) {
           Your home server is listed publicly so people can reach you. Your display
           name, other server memberships, contacts, and messages are not public.
         </p>
+
+        <button class="identity-row-btn" onClick={() => props.onLinkDevice()}>
+          <FiSmartphone size={16} />
+          <span>Link a device</span>
+          <FiChevronRight size={16} class="identity-row-chevron" />
+        </button>
 
         <button class="identity-row-btn" onClick={() => setShowBlocked(true)}>
           <FiSlash size={16} />

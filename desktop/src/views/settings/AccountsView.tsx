@@ -1,5 +1,5 @@
 import { For } from "solid-js";
-import { FiArrowLeft, FiChevronRight } from "solid-icons/fi";
+import { FiArrowLeft, FiChevronRight, FiPlus } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
 import AccountAvatar from "../../components/AccountAvatar";
 import type { Account, ServerInfo } from "../../models";
@@ -12,12 +12,13 @@ interface Props {
 }
 
 /**
- * Accounts list: each identity with its servers. Mirrors iOS AccountsView,
- * minus "Scan Invite" (QR divergence) and "Add an account" (the multi-account
- * refactor is a dedicated branch, out of Day-5 scope).
+ * Accounts list: each identity with its servers, plus "Sign in to another
+ * account" (Day-7 multi-account). Mirrors iOS AccountsView, minus "Scan Invite"
+ * (QR divergence). Adding an account runs onboarding over the live session
+ * (startAddAccount) without tearing down the signed-in identities.
  */
 export default function AccountsView(props: Props) {
-  const { store } = useApp();
+  const { store, startAddAccount } = useApp();
 
   const isHome = (account: Account, server: ServerInfo) =>
     account.servers[0]?.id === server.id;
@@ -53,6 +54,11 @@ export default function AccountsView(props: Props) {
             </section>
           )}
         </For>
+
+        <button class="accounts-add-row" onClick={() => startAddAccount()}>
+          <FiPlus size={18} />
+          <span>Sign in to another account</span>
+        </button>
       </div>
     </div>
   );

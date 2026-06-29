@@ -47,6 +47,7 @@ export default function ConversationRow(props: Props) {
       <ContactAvatar
         name={props.conversation.title}
         did={did}
+        accountId={props.conversation.accountId}
         isBot={props.conversation.isGroup ? false : undefined}
       />
 

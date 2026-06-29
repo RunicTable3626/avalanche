@@ -6,6 +6,8 @@ import "./ContactAvatar.css";
 interface Props {
   name: string;
   did: string;
+  // The account whose core resolves bot status (per-account contact store).
+  accountId: string;
   // Optional override; when omitted, bot status is resolved reactively from the
   // context cache (getAccountInfo).
   isBot?: boolean;
@@ -19,7 +21,7 @@ interface Props {
  */
 export default function ContactAvatar(props: Props) {
   const app = useApp();
-  const bot = () => props.isBot ?? app.isBot(props.did);
+  const bot = () => props.isBot ?? app.isBot(props.did, props.accountId);
 
   return (
     <div class={`contact-avatar avatar-c${avatarColorIndex(props.did)}${bot() ? " bot" : ""}`}>

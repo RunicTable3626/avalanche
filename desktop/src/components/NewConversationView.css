@@ -103,3 +103,18 @@
 .newconv-actions > button {
   flex: 1;
 }
+
+/* Account picker (shown only when more than one identity is signed in). */
+.newconv-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 0;
+}
+.newconv-account-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.newconv-account-select {
+  flex: 1;
+}

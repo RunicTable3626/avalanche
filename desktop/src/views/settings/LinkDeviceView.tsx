@@ -5,6 +5,8 @@ import QRCode from "../../components/QRCode";
 import "./LinkDeviceView.css";
 
 interface Props {
+  // The identity this device is authorizing a new device to join.
+  accountId: string;
   onBack: () => void;
 }
 
@@ -38,10 +40,10 @@ export default function LinkDeviceView(props: Props) {
     const gen = ++generation;
     setPhase({ name: "preparing" });
     try {
-      const c = await linkShowCode();
+      const c = await linkShowCode(props.accountId);
       if (gen !== generation) return;
       setPhase({ name: "showing", code: c });
-      await linkSendBundle();
+      await linkSendBundle(props.accountId);
       if (gen !== generation) return;
       setPhase({ name: "done" });
     } catch (e) {
@@ -56,9 +58,9 @@ export default function LinkDeviceView(props: Props) {
     const gen = ++generation;
     setPhase({ name: "waiting" });
     try {
-      await linkEnterCode(entered);
+      await linkEnterCode(props.accountId, entered);
       if (gen !== generation) return;
-      await linkSendBundle();
+      await linkSendBundle(props.accountId);
       if (gen !== generation) return;
       setPhase({ name: "done" });
     } catch (e) {

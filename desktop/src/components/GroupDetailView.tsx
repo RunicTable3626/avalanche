@@ -28,7 +28,9 @@ const ROLE_MEMBER = 0;
  */
 export default function GroupDetailView(props: Props) {
   const app = useApp();
-  const accountId = (): string => app.store.accounts[0]?.id ?? "";
+  // This group's owning account drives every group call + the "is this me?" check.
+  const accountId = (): string => props.conversation.accountId;
+  const svc = () => app.serviceFor(props.conversation.accountId);
   const groupId = props.conversation.groupId;
 
   const [summary, setSummary] = createSignal<GroupSummaryFfi | null>(null);
@@ -47,9 +49,9 @@ export default function GroupDetailView(props: Props) {
   async function load() {
     setLoading(true);
     try {
-      setSummary(await app.service().fetchGroupState(gid));
+      setSummary(await svc().fetchGroupState(gid));
     } catch {
-      const cached = await app.service().cachedGroupState(gid).catch(() => null);
+      const cached = await svc().cachedGroupState(gid).catch(() => null);
       setSummary(cached);
     } finally {
       setLoading(false);
@@ -59,9 +61,9 @@ export default function GroupDetailView(props: Props) {
   /** Re-fetch after a mutation; falls back to cached state if the fetch 404s. */
   async function reload() {
     try {
-      setSummary(await app.service().fetchGroupState(gid));
+      setSummary(await svc().fetchGroupState(gid));
     } catch {
-      const cached = await app.service().cachedGroupState(gid).catch(() => null);
+      const cached = await svc().cachedGroupState(gid).catch(() => null);
       if (cached) setSummary(cached);
     }
   }
@@ -96,7 +98,7 @@ export default function GroupDetailView(props: Props) {
       return;
     }
     try {
-      await app.service().setGroupTitle(gid, trimmed);
+      await svc().setGroupTitle(gid, trimmed);
       await reload();
       // Refresh the conversation list so the sidebar + header title update too;
       // reload() only refreshes this modal's local summary.
@@ -109,7 +111,7 @@ export default function GroupDetailView(props: Props) {
 
   async function setExpiry(seconds: number) {
     try {
-      await app.service().setGroupExpiry(gid, seconds);
+      await svc().setGroupExpiry(gid, seconds);
     } catch (e) {
       console.warn("setGroupExpiry failed:", e);
     }
@@ -119,7 +121,7 @@ export default function GroupDetailView(props: Props) {
 
   async function changeRole(member: GroupMemberFfi, newRole: number) {
     try {
-      await app.service().changeMemberRole(gid, member.encryptedMemberId, newRole);
+      await svc().changeMemberRole(gid, member.encryptedMemberId, newRole);
       await reload();
     } catch (e) {
       console.warn("changeMemberRole failed:", e);
@@ -128,7 +130,7 @@ export default function GroupDetailView(props: Props) {
 
   async function approve(pending: GroupPendingFfi) {
     try {
-      await app.service().approveJoinRequest(gid, pending.encryptedMemberId);
+      await svc().approveJoinRequest(gid, pending.encryptedMemberId);
       await reload();
     } catch (e) {
       console.warn("approveJoinRequest failed:", e);
@@ -137,7 +139,7 @@ export default function GroupDetailView(props: Props) {
 
   async function deny(pending: GroupPendingFfi) {
     try {
-      await app.service().denyJoinRequest(gid, pending.encryptedMemberId);
+      await svc().denyJoinRequest(gid, pending.encryptedMemberId);
       await reload();
     } catch (e) {
       console.warn("denyJoinRequest failed:", e);

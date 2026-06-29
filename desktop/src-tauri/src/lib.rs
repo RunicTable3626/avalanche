@@ -31,6 +31,13 @@ fn get_app(state: &tauri::State<'_, AppState>) -> Result<std::sync::Arc<AppCore>
         .ok_or_else(|| "no account".to_string())
 }
 
+/// Whether a process-arg looks like one of our deep links — the custom
+/// `avalanche://` scheme or a universal-link URL on our host. Used to pick the
+/// URL out of a second instance's argv (see the single-instance callback).
+fn is_deep_link_arg(arg: &str) -> bool {
+    arg.starts_with("avalanche://") || arg.contains("go.theavalanche.net")
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -58,6 +65,11 @@ pub fn run() {
             own_display_name,
             set_display_name,
             has_recovery,
+            update_recovery_blob,
+            home_server,
+            generate_recovery_phrase,
+            recovery_phrase_to_seed,
+            derive_did_from_passkey,
             contact_display_name,
             get_account_info,
             refresh_contact_profile,
@@ -130,7 +142,48 @@ pub fn run() {
 
     #[allow(unreachable_code)]
     tauri::Builder::default()
+        // Single-instance MUST be the first plugin. When a second launch occurs
+        // (e.g. opening an avalanche:// link while the app runs) the OS spawns a
+        // new process; this callback runs in the *existing* one. We focus the
+        // window and forward the deep-link URL from the new process's argv to the
+        // frontend (the deep-link plugin's on_open_url only fires for the
+        // cold-start launch, not this second-instance path on Windows/Linux).
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            use tauri::{Emitter, Manager};
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            if let Some(url) = argv.iter().find(|a| is_deep_link_arg(a)) {
+                eprintln!("[deep-link] second instance: {url}");
+                let _ = app.emit("avalanche-deeplink", url.clone());
+            }
+        }))
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_deep_link::init())
+        .setup(|app| {
+            use tauri::Emitter;
+            use tauri_plugin_deep_link::DeepLinkExt;
+
+            // Forward every opened deep link to the frontend as `avalanche-deeplink`
+            // (the raw URL string). AppContext owns parsing/routing — see its
+            // handleDeepLink (conversation/<did>, i/<token>). Fires for cold launch
+            // and while running. The frontend listener is the single consumer.
+            let handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    eprintln!("[deep-link] on_open_url: {url}");
+                    let _ = handle.emit("avalanche-deeplink", url.to_string());
+                }
+            });
+
+            // Best-effort runtime registration of the avalanche:// scheme — needed
+            // for dev on Windows/Linux where no installer has registered it. A
+            // failure here is non-fatal (e.g. already registered).
+            let _ = app.deep_link().register_all();
+            Ok(())
+        })
         .manage(AppState {
             app: Mutex::new(None),
         })
@@ -365,6 +418,56 @@ fn has_recovery(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     Ok(get_app(&state)?.has_recovery())
 }
 
+/// Re-encrypt and upload this account's recovery blob for the given PRF output
+/// and server list. The PRF output must be exactly 32 bytes — desktop has no
+/// passkey/PRF authenticator, so the only caller is the recovery-phrase setup
+/// flow, which feeds the 32-byte seed derived from the phrase
+/// (`recovery_phrase_to_seed`). See `desktop/CLAUDE.md` (passkey divergence).
+#[tauri::command]
+#[specta::specta]
+fn update_recovery_blob(
+    state: tauri::State<'_, AppState>,
+    prf_output: Vec<u8>,
+    servers: Vec<String>,
+) -> Result<(), String> {
+    get_app(&state)?
+        .update_recovery_blob(prf_output, servers)
+        .map_err(|e| e.to_string())
+}
+
+/// This account's home (primary) server URL.
+#[tauri::command]
+#[specta::specta]
+fn home_server(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    Ok(get_app(&state)?.home_server())
+}
+
+/// Generate a fresh 12-word BIP39 recovery phrase. Stateless — drives the
+/// recovery-phrase *setup* flow (desktop has no passkey/PRF path).
+#[tauri::command]
+#[specta::specta]
+fn generate_recovery_phrase() -> Result<String, String> {
+    app_core::generate_recovery_phrase().map_err(|e| e.to_string())
+}
+
+/// Validate a BIP39 recovery phrase and derive its 32-byte seed (the PRF-output
+/// stand-in for `update_recovery_blob` / `derive_did_from_passkey`).
+#[tauri::command]
+#[specta::specta]
+fn recovery_phrase_to_seed(phrase: String) -> Result<Vec<u8>, String> {
+    app_core::recovery_phrase_to_seed(phrase).map_err(|e| e.to_string())
+}
+
+/// Recompute the DID a given seed + signup server URL would produce, without
+/// fetching anything. The recovery-phrase restore flow needs the DID before it
+/// can download the recovery blob (the phrase carries no DID, unlike a passkey
+/// userHandle).
+#[tauri::command]
+#[specta::specta]
+fn derive_did_from_passkey(prf_output: Vec<u8>, signup_server_url: String) -> Result<String, String> {
+    app_core::derive_did_from_passkey(prf_output, signup_server_url).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 #[specta::specta]
 fn contact_display_name(
@@ -580,7 +683,6 @@ fn cached_group_state(
 ) -> Result<Option<app_core::GroupSummaryFfi>, String> {
     get_app(&state)?
         .cached_group_state(group_id)
-        .map(|opt| opt.map(Into::into))
         .map_err(|e| e.to_string())
 }
 

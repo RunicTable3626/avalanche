@@ -17,6 +17,7 @@ body, html { margin: 0; padding: 0; height: 100%; }
   --color-accent: #6B3E50;        /* primary action / accent */
   --color-error: #C0392B;         /* form error text */
   --color-offline: #F0A030;       /* offline/connecting banner */
+  --color-warning-soft: rgba(240, 160, 48, 0.16); /* soft warning fill (recovery banner) */
 
   /* Inputs / surfaces */
   --color-input-border: #D8C8BC;  /* default text-input border */
@@ -65,6 +66,47 @@ body, html { margin: 0; padding: 0; height: 100%; }
 .btn-secondary:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+.btn-danger {
+  padding: 14px;
+  border: 1.5px solid var(--color-error);
+  border-radius: var(--radius-button);
+  background: transparent;
+  color: var(--color-error);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+.btn-danger:hover {
+  background: rgba(192, 57, 43, 0.08);
+}
+.btn-danger:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Shared settings sub-screen header (Back + title), used by every
+   settings/*.tsx sub-view rendered inside the SettingsView hub. */
+.settings-subheader {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 24px 12px;
+  border-bottom: 1px solid var(--color-divider);
+}
+.settings-subheader h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.settings-error {
+  color: var(--color-error);
+  font-size: 14px;
+  margin: 0;
 }
 
 .text-input {

@@ -8,6 +8,13 @@ import {
 } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { load as loadStore } from "@tauri-apps/plugin-store";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import type { Account, Conversation, InviteInfo, ServerInfo } from "../models";
 import { displayHost } from "../lib/format";
 import { DeliveryStatus, type Message } from "../models/Message";
@@ -49,7 +56,8 @@ interface AppContextValue {
     serverUrl: string,
     serverName: string,
     displayName: string,
-    inviteToken: string | null
+    inviteToken: string | null,
+    prfOutput: number[]
   ) => Promise<void>;
   restoreAccounts: () => Promise<void>;
   logout: () => void;
@@ -77,6 +85,7 @@ interface AppContextValue {
   aggregateConnectionState: () => ConnectionState;
   unreadCount: (conversation: Conversation) => number;
   displayName: (did: string, accountId: string) => string;
+  isBot: (did: string) => boolean;
   setPendingInviteToken: (token: string | null) => void;
   validateInvite: (token: string) => Promise<InviteInfo>;
 
@@ -84,6 +93,8 @@ interface AppContextValue {
   selectedConversationId: () => string | null;
   selectConversation: (id: string | null) => void;
   reloadConversations: () => Promise<void>;
+  // Reactive: latest group whose metadata changed (T74 membership re-check).
+  groupMetaChange: () => { groupId: string; n: number };
 
   // Track A — message actions
   reactionsFor: (conversation: Conversation, message: Message) => ReactionFfi[];
@@ -117,6 +128,18 @@ interface AppContextValue {
   listBlocked: () => Promise<ContactRowFfi[]>;
   getConversationTimer: (conversationId: string) => Promise<number | null>;
   setConversationTimer: (recipientDid: string, expirySecs: number | null) => Promise<void>;
+
+  // Track E — settings / account lifecycle
+  setAccountDisplayName: (accountId: string, displayName: string) => Promise<void>;
+  leaveServer: () => Promise<void>;
+  deleteIdentity: () => Promise<void>;
+  hasRecovery: () => Promise<boolean>;
+  generateRecoveryPhrase: () => Promise<string>;
+  recoverFromPhrase: (phrase: string, serverUrl: string, displayName: string) => Promise<void>;
+
+  // Deep links — route a pasted/opened link (conversation/<did>, i/<token>)
+  isDeepLink: (raw: string) => boolean;
+  handleDeepLink: (raw: string) => void;
 }
 
 const AppContext = createContext<AppContextValue | undefined>(undefined);
@@ -145,6 +168,46 @@ function messageFromFfi(m: StoredMessageFfi): Message {
     metadata: m.metadata ?? undefined,
     expireTimerSecs: m.expireTimerSecs,
     expireAtMs: m.expireAtMs ?? undefined,
+  };
+}
+
+// Build a StoredMessageFfi row for service().saveMessage from the fields that
+// vary, defaulting the rest. The single source of truth for the persisted-row
+// shape, shared by the optimistic-send, retry, and incoming-message paths (T75)
+// so they can't drift field-by-field. `expireAtMs` is always null on write —
+// app-core's reaper computes the actual expiry on read.
+function buildStoredMessage(opts: {
+  id: string;
+  conversationId: string;
+  senderDid: string;
+  body: string;
+  sentAtMs: number;
+  deliveryStatus: DeliveryStatus;
+  readAtMs?: number | null;
+  editedAtMs?: number | null;
+  editCount?: number;
+  deleted?: boolean;
+  kind?: number;
+  metadata?: string | null;
+  expireTimerSecs: number;
+}): StoredMessageFfi {
+  return {
+    id: opts.id,
+    conversationId: opts.conversationId,
+    senderDid: opts.senderDid,
+    body: opts.body,
+    sentAtMs: opts.sentAtMs,
+    editedAtMs: opts.editedAtMs ?? null,
+    readAtMs: opts.readAtMs ?? null,
+    deliveryStatus: opts.deliveryStatus,
+    editCount: opts.editCount ?? 0,
+    deleted: opts.deleted ?? false,
+    kind: opts.kind ?? 0,
+    metadata: opts.metadata ?? null,
+    expireTimerSecs: opts.expireTimerSecs,
+    expireAtMs: null,
+    attachments: [],
+    previews: [],
   };
 }
 
@@ -186,11 +249,25 @@ export function AppProvider(props: { children: JSX.Element }) {
   // can programmatically open a conversation. ChatsView mirrors this signal.
   const [selectedConversationId, setSelectedConversationId] = createSignal<string | null>(null);
 
+  // Bumps each time a group's metadata changes (incoming GroupMetadataChanged),
+  // carrying the affected groupId. ConversationView tracks this to re-check
+  // membership for the open group without waiting for a conversation switch (T74).
+  const [groupMetaChange, setGroupMetaChange] = createSignal<{ groupId: string; n: number }>({
+    groupId: "",
+    n: 0,
+  });
+
   // Reactive display-name cache: reads are tracked by Solid so components
   // re-render when a resolved name arrives.  A separate plain Set tracks
   // in-flight fetches to prevent duplicate IPC calls per DID.
   const [displayNameCache, setDisplayNameCache] = createStore<Record<string, string>>({});
   const displayNamePending: Set<string> = new Set();
+
+  // Reactive is-bot cache, same pattern as displayNameCache: components read it
+  // in a tracking scope so a bot avatar (hexagon) resolves once getAccountInfo
+  // returns. A plain Set guards against duplicate in-flight fetches per DID.
+  const [isBotCache, setIsBotCache] = createStore<Record<string, boolean>>({});
+  const isBotPending: Set<string> = new Set();
 
   // Load-once guards
   const loadedConversations = { value: false };
@@ -230,12 +307,12 @@ export function AppProvider(props: { children: JSX.Element }) {
    * need to fan out over `store.accounts` / merge per-account state rather than
    * just swap which account this returns.
    */
-  function getSoleAccountId(): string {
-    // TODO(robustness): return `null` instead of `""` so callers can
-    // distinguish "no account" from a valid empty-string DID. An empty
-    // string as sentinel could collide with real data in edge cases
-    // (stale event loop after logout).
-    return store.accounts[0]?.id ?? "";
+  function getSoleAccountId(): string | null {
+    // Returns `null` (not `""`) when no account is signed in, so callers can
+    // distinguish "no account" from a valid DID — an empty-string sentinel
+    // could collide with real data in edge cases (e.g. a stale event loop
+    // after logout).
+    return store.accounts[0]?.id ?? null;
   }
 
   function getServerUrl(accountId: string): string {
@@ -319,6 +396,16 @@ export function AppProvider(props: { children: JSX.Element }) {
     } catch {}
   })();
 
+  // ── Deep-link listener ────────────────────────────────────────────────────
+  // Single consumer of `avalanche-deeplink` (emitted by the Rust deep-link
+  // plugin, see src-tauri/src/lib.rs). OnboardingFlow's pendingInviteToken
+  // effect still drives onboarding navigation for invite tokens.
+  let deeplinkUnlisten: (() => void) | undefined;
+  listen<string>("avalanche-deeplink", (ev) => handleDeepLink(ev.payload))
+    .then((un) => { deeplinkUnlisten = un; })
+    .catch(() => { /* Tauri event API unavailable (browser/test) */ });
+  onCleanup(() => deeplinkUnlisten?.());
+
   // ── Account lifecycle ─────────────────────────────────────────────────────
 
   // Shared completion step for every onboarding path: resets the conversation
@@ -383,19 +470,23 @@ export function AppProvider(props: { children: JSX.Element }) {
     serverUrl: string,
     serverName: string,
     displayName: string,
-    inviteToken: string | null
+    inviteToken: string | null,
+    prfOutput: number[]
   ) {
     const dbPath = `account-${Math.random().toString(36).slice(2, 10)}.db`;
     const result = await service().createAccount(
       serverUrl,
       dbPath,
-      // TODO: replace with real key-derivation when PRF is wired.
+      // DB key: a placeholder until OS-keychain integration. Mirrors mobile's
+      // "dev-placeholder-key" (iOS uses the Secure Enclave; desktop has no
+      // equivalent wired yet).
       "dev-placeholder-key",
-      // TODO(assumption): AppCore::create_account must accept empty PRF output
-      // (the desktop no-passkey path).  If it validates non-empty bytes,
-      // account creation fails with an opaque backend error.  Verify when
-      // T31 wires the real command.
-      [],
+      // Desktop has no WebAuthn passkey, so signup derives the recovery seed
+      // from a BIP39 phrase the user writes down (RecoveryPhraseSetupView) and
+      // passes it here as the PRF output — exactly iOS's phrase-account mode.
+      // This makes the rotation key + DID reproducible from the phrase, so
+      // recover_from_phrase can locate and decrypt the recovery blob later.
+      prfOutput,
       displayName,
       inviteToken
     );
@@ -456,6 +547,8 @@ export function AppProvider(props: { children: JSX.Element }) {
     // update on logout/mode-switch.
     setDisplayNameCache(reconcile({}));
     displayNamePending.clear();
+    setIsBotCache(reconcile({}));
+    isBotPending.clear();
     // Clear persisted accounts, then release the restore guard so a
     // subsequent manual restore or fresh session can proceed cleanly.
     void persistAccounts([]).finally(() => {
@@ -500,6 +593,192 @@ export function AppProvider(props: { children: JSX.Element }) {
     enterApp();
   }
 
+  // ── Track E: settings / account lifecycle ──────────────────────────────────
+
+  // Tear down all local session state and return to onboarding. Single-account
+  // desktop has one core, so removing the (only) account empties the session —
+  // identical teardown to logout(), but reached after a server-side leave or
+  // identity delete rather than a voluntary sign-out.
+  function removeAccountLocally() {
+    resetSession();
+    setService(makeService(store.serviceMode));
+  }
+
+  // Update the user's display name on the core, then mirror it into the in-memory
+  // account and the persisted entry so it survives a restart.
+  async function setAccountDisplayName(accountId: string, displayName: string) {
+    const trimmed = displayName.trim();
+    if (!trimmed) return;
+    await service().setDisplayName(trimmed);
+    const idx = store.accounts.findIndex((a) => a.id === accountId);
+    if (idx >= 0) setStore("accounts", idx, "displayName", trimmed);
+    const persisted = await persistedAccounts();
+    const pIdx = persisted.findIndex((p) => p.did === accountId);
+    if (pIdx >= 0) {
+      persisted[pIdx].displayName = trimmed;
+      await persistAccounts(persisted);
+    }
+  }
+
+  // Mirrors iOS AppState.leaveServer: leave the connected server on the core,
+  // then drop the account from the device. The UI only offers this for non-home
+  // memberships (ServerDetailView gates it). Throws on failure, leaving the
+  // account in place so the user can retry.
+  async function leaveServer() {
+    await service().leaveServer();
+    removeAccountLocally();
+  }
+
+  // Mirrors iOS AppState.deleteIdentity: the core leaves every server, submits a
+  // PLC tombstone, and wipes local rows; then we drop the account from the
+  // device. Throws (leaving state intact) if the tombstone couldn't be submitted.
+  async function deleteIdentity() {
+    await service().deleteIdentity();
+    removeAccountLocally();
+  }
+
+  function hasRecovery(): Promise<boolean> {
+    return service().hasRecovery().catch((e: unknown) => {
+      console.warn("hasRecovery failed:", e);
+      return false;
+    });
+  }
+
+  function generateRecoveryPhrase(): Promise<string> {
+    return service().generateRecoveryPhrase();
+  }
+
+  // ── Deep links (T61) ────────────────────────────────────────────────────────
+
+  // Parse a deep-link URL into (action, arg), accepting both the custom
+  // `avalanche://<action>/<arg>` scheme (what the desktop OS launches) and the
+  // universal-link form `https://go.theavalanche.net/<action>/<arg>` (iOS parity).
+  function parseDeepLink(raw: string): { action: string; arg: string } | null {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return null;
+    }
+    let segments: string[];
+    if (url.protocol === "avalanche:") {
+      // avalanche://a/b puts the first segment in `host`; the triple-slash form
+      // avalanche:///a/b puts everything in the path. Handle both.
+      segments = [url.host, ...url.pathname.split("/")].filter(Boolean);
+    } else if (url.host === "go.theavalanche.net") {
+      segments = url.pathname.split("/").filter(Boolean);
+    } else {
+      return null;
+    }
+    if (segments.length < 2) return null;
+    return { action: segments[0], arg: segments.slice(1).join("/") };
+  }
+
+  // Decode a base64url invite token ({s:serverUrl,d:inviterDid}) — the decode
+  // side of lib/format.makeInviteToken, matching iOS handleDeepLink.
+  function decodeInviteToken(
+    token: string
+  ): { serverUrl: string; inviterDid: string | null } | null {
+    try {
+      const b64 = token.replace(/-/g, "+").replace(/_/g, "/");
+      // Restore the padding makeInviteToken strips, so atob decodes reliably
+      // regardless of webview base64 strictness.
+      const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+      const obj = JSON.parse(atob(padded)) as { s?: unknown; d?: unknown };
+      if (typeof obj.s !== "string") return null;
+      return { serverUrl: obj.s, inviterDid: typeof obj.d === "string" ? obj.d : null };
+    } catch {
+      return null;
+    }
+  }
+
+  const trimSlashes = (s: string) => s.replace(/\/+$/, "");
+
+  // True if `raw` is a routable deep link (an avalanche:// or
+  // go.theavalanche.net URL with a recognized action) — lets the recipient
+  // field distinguish a pasted contact/invite link from a bare DID.
+  function isDeepLink(raw: string): boolean {
+    return parseDeepLink(raw) !== null;
+  }
+
+  // Route a deep link like iOS AppState.handleDeepLink: open a DM for
+  // conversation/<did>, and for i/<token> jump straight to the inviter's DM if
+  // already on that server, else hand the token to onboarding.
+  function handleDeepLink(raw: string) {
+    const parsed = parseDeepLink(raw);
+    if (!parsed) return;
+    const { action, arg } = parsed;
+
+    if (action === "conversation") {
+      const accountId = getSoleAccountId();
+      if (!arg || accountId === null) return;
+      const conv = findOrCreateDMConversation(arg, accountId);
+      setStore("selectedTab", "chats");
+      setSelectedConversationId(conv.id);
+      return;
+    }
+
+    if (action === "i" || action === "invite") {
+      const token = arg;
+      const decoded = decodeInviteToken(token);
+      if (decoded) {
+        const account = store.accounts.find((a) =>
+          a.servers.some((s) => trimSlashes(s.url) === trimSlashes(decoded.serverUrl))
+        );
+        if (account && decoded.inviterDid) {
+          // Already on this server — open the inviter's DM directly.
+          const conv = findOrCreateDMConversation(decoded.inviterDid, account.id);
+          setStore("selectedTab", "chats");
+          setSelectedConversationId(conv.id);
+          return;
+        }
+      }
+      // Not on the server (or undecodable) → start onboarding with the token.
+      setStore("pendingInviteToken", token);
+    }
+  }
+
+  // Recovery RESTORE: recompute the DID from the phrase seed + home server URL,
+  // then restore the account from its recovery blob. Mirrors iOS
+  // RecoveryExplainerView.recoverWithPhrase → recoverAccount. On success the
+  // account is added and the app enters the main UI (same path as createAccount).
+  async function recoverFromPhrase(phrase: string, serverUrl: string, displayName: string) {
+    const seed = await service().recoveryPhraseToSeed(phrase);
+    const did = await service().deriveDidFromPasskey(seed, serverUrl);
+    if (store.accounts.some((a) => a.id === did)) {
+      throw new Error("This identity is already signed in on this device.");
+    }
+    const dbPath = `account-${Math.random().toString(36).slice(2, 10)}.db`;
+    const result = await service().recoverFromPhrase(
+      phrase,
+      serverUrl,
+      did,
+      dbPath,
+      "dev-placeholder-key",
+      displayName
+    );
+    const serverInfo: ServerInfo = {
+      id: serverUrl,
+      name: serverUrl,
+      url: serverUrl,
+      displayHost: displayHost(serverUrl, serverUrl),
+    };
+    const account: Account = {
+      id: result.did,
+      displayName: result.displayName || displayName || `Account ${result.did.slice(-6)}`,
+      avatarData: null,
+      servers: [serverInfo],
+    };
+    setStore("accounts", (prev) => [...prev, account]);
+    await addPersistedAccount({
+      did: result.did,
+      displayName: account.displayName,
+      dbPath,
+      servers: [{ id: serverUrl, name: serverUrl, url: serverUrl }],
+    });
+    enterApp();
+  }
+
   // ── Messaging ─────────────────────────────────────────────────────────────
 
   async function loadConversationsFromStore() {
@@ -508,6 +787,13 @@ export function AppProvider(props: { children: JSX.Element }) {
 
     const summaries = await service().loadConversations().catch(() => [] as ConversationSummaryFfi[]);
     const accountId = getSoleAccountId();
+    if (accountId === null) {
+      // No account signed in — nothing to load. Reset the guard so a later load
+      // (once an account enters) isn't permanently suppressed.
+      loadedConversations.value = false;
+      setStore("conversations", []);
+      return;
+    }
     const serverUrl = getServerUrl(accountId);
 
     const convs: Conversation[] = summaries.map((s) => {
@@ -661,24 +947,18 @@ export function AppProvider(props: { children: JSX.Element }) {
     // send. "sending" is persisted up front (and awaited) so a crash or refresh
     // mid-send is recoverable. Matches iOS AppState.sendMessage.
     const persist = (status: DeliveryStatus) =>
-      service().saveMessage({
-        id: messageId,
-        conversationId,
-        senderDid: senderAccountId,
-        body: text,
-        sentAtMs,
-        editedAtMs: null,
-        readAtMs: sentAtMs,
-        deliveryStatus: status,
-        editCount: 0,
-        deleted: false,
-        kind: 0,
-        metadata: null,
-        expireTimerSecs,
-        expireAtMs: null,
-        attachments: [],
-        previews: [],
-      });
+      service().saveMessage(
+        buildStoredMessage({
+          id: messageId,
+          conversationId,
+          senderDid: senderAccountId,
+          body: text,
+          sentAtMs,
+          readAtMs: sentAtMs,
+          deliveryStatus: status,
+          expireTimerSecs,
+        })
+      );
 
     await persist(DeliveryStatus.sending);
 
@@ -1068,24 +1348,23 @@ export function AppProvider(props: { children: JSX.Element }) {
     // Persist each state (same contract as the original optimistic send) so the
     // retried message survives a reload regardless of outcome. Matches iOS.
     const persist = (status: DeliveryStatus) =>
-      service().saveMessage({
-        id: message.id,
-        conversationId: conversation.id,
-        senderDid: message.senderAccountId,
-        body: message.body,
-        sentAtMs,
-        editedAtMs: message.editedAtMs ?? null,
-        readAtMs: sentAtMs,
-        deliveryStatus: status,
-        editCount: message.editCount,
-        deleted: message.isDeleted,
-        kind: message.kind,
-        metadata: message.metadata ?? null,
-        expireTimerSecs: message.expireTimerSecs,
-        expireAtMs: null,
-        attachments: [],
-        previews: [],
-      });
+      service().saveMessage(
+        buildStoredMessage({
+          id: message.id,
+          conversationId: conversation.id,
+          senderDid: message.senderAccountId,
+          body: message.body,
+          sentAtMs,
+          readAtMs: sentAtMs,
+          deliveryStatus: status,
+          editedAtMs: message.editedAtMs ?? null,
+          editCount: message.editCount,
+          deleted: message.isDeleted,
+          kind: message.kind,
+          metadata: message.metadata ?? null,
+          expireTimerSecs: message.expireTimerSecs,
+        })
+      );
     await persist(DeliveryStatus.sending);
     const bytes = Array.from(new TextEncoder().encode(message.body));
     try {
@@ -1143,9 +1422,12 @@ export function AppProvider(props: { children: JSX.Element }) {
     return conv;
   }
 
-  // TODO(track-F): no in-app entry point calls joinViaLink yet. iOS joins a
-  // group purely via deep link (no dedicated UI), so the trigger lands with the
-  // deep-link plumbing in day 5. The handler itself is complete.
+  // The pasted-/opened-link entry (NewConversationView → handleDeepLink) covers
+  // contact and server-invite links (conversation/<did>, i/<token>). A *group*
+  // join link — which would carry the master key + invite-link password
+  // (docs/03 §3.10) into this handler — has no defined URL wire format in iOS or
+  // app-core yet, so there is deliberately no UI that builds those args here.
+  // Wire it once that format exists; the handler itself is complete.
   async function joinViaLink(
     masterKey: number[],
     hostingServerUrl: string,
@@ -1278,6 +1560,50 @@ export function AppProvider(props: { children: JSX.Element }) {
     return did;
   }
 
+  // Reactive is-bot lookup (docs/54 bot presentation). Returns the cached value
+  // (default false) and fires a getAccountInfo fetch to populate it; the read is
+  // tracked by Solid, so a bot avatar re-renders as a hexagon once resolved. Own
+  // accounts are never bots. Mirrors the displayName cache pattern.
+  function isBot(did: string): boolean {
+    if (store.accounts.some((a) => a.id === did)) return false;
+    const cached = isBotCache[did];
+    if (cached !== undefined) return cached;
+    if (!isBotPending.has(did)) {
+      isBotPending.add(did);
+      void service()
+        .getAccountInfo(did)
+        .then((info) => setIsBotCache(did, info.isBot))
+        .catch((e: unknown) => {
+          console.warn("getAccountInfo (isBot) failed:", did, e);
+        })
+        .finally(() => {
+          isBotPending.delete(did);
+        });
+    }
+    return false;
+  }
+
+  // Fire a native notification for an inbound message (mirrors iOS
+  // NotificationPresenter.present). Suppressed when the user is already viewing
+  // this conversation in a focused window; shown otherwise (window unfocused, or
+  // focused on a different conversation). Permission is requested on first use.
+  async function maybeNotify(conversationId: string, senderDid: string, body: string) {
+    const text = body.trim();
+    if (!text) return;
+    try {
+      const focused = await getCurrentWindow().isFocused().catch(() => false);
+      if (focused && selectedConversationId() === conversationId) return;
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (!granted) return;
+      const title = displayNameCache[senderDid] || senderDid;
+      const preview = text.length > 120 ? text.slice(0, 120) + "…" : text;
+      sendNotification({ title, body: preview });
+    } catch (e) {
+      console.warn("notification failed:", e);
+    }
+  }
+
   // ── Event loop ────────────────────────────────────────────────────────────
 
   // Drain a batch of decrypted events (mirrors iOS `AppState.eventLoop`,
@@ -1342,7 +1668,11 @@ export function AppProvider(props: { children: JSX.Element }) {
           // so it appears, then refresh the conversation list/preview.
           const gm = ev as Extract<IncomingEvent, { type: "groupMetadataChanged" }>;
           reloadMessagesIfLoaded(`group-${gm.event.groupId}`);
+          // Notify any open ConversationView for this group to re-check
+          // membership (e.g. you were removed by another admin while viewing).
+          setGroupMetaChange((p) => ({ groupId: gm.event.groupId, n: p.n + 1 }));
           needsConversationReload = true;
+          break;
         }
         case "groupInvite":
         case "storageSynced":
@@ -1359,7 +1689,11 @@ export function AppProvider(props: { children: JSX.Element }) {
 
     // Apply phase — run once for the whole batch.
     const accountId = getSoleAccountId();
-    for (const m of messages) handleIncomingMessage(m, accountId);
+    // No account (e.g. a stale event-loop drain mid-logout): can't attribute
+    // incoming messages to a conversation, so skip them.
+    if (accountId !== null) {
+      for (const m of messages) handleIncomingMessage(m, accountId);
+    }
     if (receiptUpdates.length) applyDeliveryStatusUpdates(receiptUpdates);
     if (needsConversationReload) void reloadConversations();
   }
@@ -1414,6 +1748,9 @@ export function AppProvider(props: { children: JSX.Element }) {
       ...(prev ?? []),
       msg,
     ]);
+    // Fire a native notification for the inbound message (suppressed when the
+    // user is already viewing this conversation in a focused window).
+    void maybeNotify(conversationId, m.senderDid, body);
     // Persist the incoming message. app-core does NOT persist messages on the
     // receive path (the client owns local history), so without this every
     // received message is lost on app restart/refresh while sent messages
@@ -1421,24 +1758,18 @@ export function AppProvider(props: { children: JSX.Element }) {
     // conversation is opened; the store starts the disappearing-messages
     // countdown on read. Mirrors iOS AppState.
     void service()
-      .saveMessage({
-        id: msg.id,
-        conversationId,
-        senderDid: m.senderDid,
-        body,
-        sentAtMs: msg.sentAtMs,
-        editedAtMs: null,
-        readAtMs: null,
-        deliveryStatus: msg.deliveryStatus,
-        editCount: 0,
-        deleted: false,
-        kind: 0,
-        metadata: null,
-        expireTimerSecs: m.expireTimerSecs,
-        expireAtMs: null,
-        attachments: [],
-        previews: [],
-      })
+      .saveMessage(
+        buildStoredMessage({
+          id: msg.id,
+          conversationId,
+          senderDid: m.senderDid,
+          body,
+          sentAtMs: msg.sentAtMs,
+          readAtMs: null,
+          deliveryStatus: msg.deliveryStatus,
+          expireTimerSecs: m.expireTimerSecs,
+        })
+      )
       .catch((err: unknown) => {
         console.warn("saveMessage (incoming) failed:", err);
       });
@@ -1533,9 +1864,13 @@ export function AppProvider(props: { children: JSX.Element }) {
   }
 
   // Apply an inbound edit (iOS `applyInboundEdit`).
-  // TODO(robustness): matching solely on senderAccountId+sentAtMs can collide
-  // if two messages share the same millisecond timestamp. Additionally match on
-  // serverId once echo reconciliation assigns it.
+  // Matches the target by (senderAccountId, sentAtMs) — identical to iOS
+  // applyInboundEdit. T66 (also match on serverId, to disambiguate two messages
+  // that share a millisecond) is blocked: the messageEdited/messageDeleted wire
+  // events carry no server_id (only conversation_id, author_did, sent_at_ms), so
+  // there is nothing to match against. Closing this needs server_id added to
+  // those events across the protocol + all platforms — a contract change to
+  // raise with the maintainer, not a desktop-only edit.
   function applyInboundEdit(
     cid: string,
     authorDid: string,
@@ -1758,11 +2093,13 @@ export function AppProvider(props: { children: JSX.Element }) {
     aggregateConnectionState,
     unreadCount,
     displayName,
+    isBot,
     setPendingInviteToken: (token) => setStore("pendingInviteToken", token),
     validateInvite,
     selectedConversationId,
     selectConversation: (id) => setSelectedConversationId(id),
     reloadConversations,
+    groupMetaChange,
     reactionsFor,
     loadReactions,
     toggleReaction,
@@ -1781,6 +2118,14 @@ export function AppProvider(props: { children: JSX.Element }) {
     listBlocked,
     getConversationTimer,
     setConversationTimer,
+    setAccountDisplayName,
+    leaveServer,
+    deleteIdentity,
+    hasRecovery,
+    generateRecoveryPhrase,
+    recoverFromPhrase,
+    isDeepLink,
+    handleDeepLink,
   };
 
   return (

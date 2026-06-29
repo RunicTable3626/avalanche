@@ -1,5 +1,4 @@
-import { createEffect, createSignal, Match, onCleanup, onMount, Switch } from "solid-js";
-import { listen } from "@tauri-apps/api/event";
+import { createEffect, createSignal, Match, Switch } from "solid-js";
 import { useApp } from "../../state/AppContext";
 import type { InviteInfo } from "../../models/InviteToken";
 import type { Account } from "../../models/Account";
@@ -8,13 +7,19 @@ import InviteLinkEntryView from "./InviteLinkEntryView";
 import IdentityPickerView from "./IdentityPickerView";
 import NewAccountView from "./NewAccountView";
 import JoiningServerView from "./JoiningServerView";
+import RecoveryPhraseSetupView from "./RecoveryPhraseSetupView";
+import RecoveryExplainerView from "./RecoveryExplainerView";
+import RecoveryConsoleView from "./RecoveryConsoleView";
 
 type Screen =
   | { name: "splash" }
   | { name: "inviteLinkEntry" }
   | { name: "identityPicker"; inviteInfo: InviteInfo; inviteToken: string }
   | { name: "newAccount"; inviteInfo: InviteInfo; inviteToken: string }
-  | { name: "joiningServer"; inviteInfo: InviteInfo; inviteToken: string; account: Account };
+  | { name: "recoveryPhraseSetup"; inviteInfo: InviteInfo; inviteToken: string; displayName: string }
+  | { name: "joiningServer"; inviteInfo: InviteInfo; inviteToken: string; account: Account }
+  | { name: "recoveryExplainer" }
+  | { name: "recoveryConsole"; phrase: string; serverUrl: string };
 
 export default function OnboardingFlow() {
   const { store, validateInvite, setPendingInviteToken } = useApp();
@@ -35,31 +40,9 @@ export default function OnboardingFlow() {
     setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
   }
 
-  // TODO: "avalanche-deeplink" is NOT yet emitted by the backend — no deep-link
-  // plugin is wired in src-tauri/src/lib.rs. This listener is a placeholder
-  // for when the Rust side wires deep links. Likewise, setPendingInviteToken
-  // has no producer yet; the createEffect below is also a forward-looking stub.
-  onMount(() => {
-    let unlisten: (() => void) | undefined;
-    listen<string>("avalanche-deeplink", (ev) => {
-      void validateInvite(ev.payload)
-        .then((info) => {
-          // Deep-link success: root + identityPicker so Back returns to splash.
-          setStack([{ name: "splash" }, { name: "identityPicker", inviteInfo: info, inviteToken: ev.payload }]);
-        })
-        .catch(() => {
-          // Token invalid — land on link entry so the user can try manually.
-          // Stack is root + inviteLinkEntry so Back returns to splash.
-          setStack([{ name: "splash" }, { name: "inviteLinkEntry" }]);
-        });
-    })
-      .then((fn) => { unlisten = fn; })
-      .catch(() => { /* Tauri not available in pure browser mode */ });
-    onCleanup(() => unlisten?.());
-  });
-
-  // Consume pendingInviteToken set by AppContext (e.g. from a URL opened before
-  // the listener registered), then validate and navigate.
+  // Deep links are handled centrally in AppContext (handleDeepLink), which sets
+  // pendingInviteToken for invite tokens that need onboarding. The effect below
+  // consumes that token; there is no separate listener here.
   createEffect(() => {
     const token = store.pendingInviteToken;
     if (!token) return;
@@ -83,9 +66,19 @@ export default function OnboardingFlow() {
       ? (current() as Extract<Screen, { name: "newAccount" }>)
       : null;
 
+  const recoveryPhraseSetupScreen = () =>
+    current().name === "recoveryPhraseSetup"
+      ? (current() as Extract<Screen, { name: "recoveryPhraseSetup" }>)
+      : null;
+
   const joiningServerScreen = () =>
     current().name === "joiningServer"
       ? (current() as Extract<Screen, { name: "joiningServer" }>)
+      : null;
+
+  const recoveryConsoleScreen = () =>
+    current().name === "recoveryConsole"
+      ? (current() as Extract<Screen, { name: "recoveryConsole" }>)
       : null;
 
   return (
@@ -93,6 +86,7 @@ export default function OnboardingFlow() {
       <Match when={current().name === "splash"}>
         <SplashView
           onEnterLink={() => navigate({ name: "inviteLinkEntry" })}
+          onRecover={() => navigate({ name: "recoveryExplainer" })}
         />
       </Match>
 
@@ -122,8 +116,22 @@ export default function OnboardingFlow() {
         {(s) => (
           <NewAccountView
             inviteInfo={s().inviteInfo}
-            token={s().inviteToken}
             showRecoverLink={true}
+            onContinue={(displayName) =>
+              navigate({ name: "recoveryPhraseSetup", inviteInfo: s().inviteInfo, inviteToken: s().inviteToken, displayName })
+            }
+            onRecover={() => navigate({ name: "recoveryExplainer" })}
+            onBack={goBack}
+          />
+        )}
+      </Match>
+
+      <Match when={recoveryPhraseSetupScreen()}>
+        {(s) => (
+          <RecoveryPhraseSetupView
+            inviteInfo={s().inviteInfo}
+            token={s().inviteToken}
+            displayName={s().displayName}
             onBack={goBack}
           />
         )}
@@ -136,6 +144,19 @@ export default function OnboardingFlow() {
             account={s().account}
             onBack={goBack}
           />
+        )}
+      </Match>
+
+      <Match when={current().name === "recoveryExplainer"}>
+        <RecoveryExplainerView
+          onBack={goBack}
+          onRecover={(phrase, serverUrl) => navigate({ name: "recoveryConsole", phrase, serverUrl })}
+        />
+      </Match>
+
+      <Match when={recoveryConsoleScreen()}>
+        {(s) => (
+          <RecoveryConsoleView phrase={s().phrase} serverUrl={s().serverUrl} onBack={goBack} />
         )}
       </Match>
     </Switch>

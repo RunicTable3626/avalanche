@@ -129,6 +129,34 @@ Before closing any branch that adds or changes Desktop UI:
 
 ---
 
+## Passkey / recovery divergence (sanctioned)
+
+Desktop has **no WebAuthn passkey / PRF authenticator path**, so it uses iOS's
+**recovery-phrase account mode** for every signup (iOS offers passkey *or*
+phrase; desktop offers phrase only):
+
+- **The recovery phrase is the signup credential.** New-account creation routes
+  through `RecoveryPhraseSetupView` (in `views/onboarding/`): generate a 12-word
+  BIP39 phrase, have the user write it down and confirm three words, then derive
+  the 32-byte seed (`recoveryPhraseToSeed`) and pass it to `createAccount` as the
+  **PRF output**. The seed therefore derives the PLC rotation key and the DID,
+  and `AppCore::create_account` uploads the recovery blob keyed to that DID — so
+  the phrase alone can reconstruct the account.
+  - This is **load-bearing**: an empty PRF would make `prepare` generate a
+    *random* rotation key (`app-core/src/lib.rs` `prepare`), so the DID would be
+    unreproducible and `recover_from_phrase` could never locate or decrypt the
+    blob. Never pass `[]` to `createAccount` on the human signup path.
+- **Restore.** `RecoveryExplainerView` → `RecoveryConsoleView` take the phrase +
+  home-server URL, recompute the DID from the seed (`deriveDidFromPasskey`), and
+  call `recoverFromPhrase` (→ `recover_from_blob`). DID + rotation key match the
+  originals because both come from the same phrase seed.
+- **No two-stage handle, no passkey views, no post-hoc setup.** iOS's
+  `PreparedAccount` (`prepareAccount`/`finalizeAccount`), `PasskeyExplainerView`,
+  and any "secure your account later" banner are intentionally omitted — recovery
+  is established once, at signup. `RecoveryKeyBanner` is an inert stub (as on iOS).
+
+If a desktop WebAuthn/PRF path is ever added, revisit all of the above.
+
 ## Security constraints
 
 The shell is the only WebView with Tauri command access. Keep these invariants:

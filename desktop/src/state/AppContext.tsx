@@ -17,6 +17,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import type { Account, Conversation, InviteInfo, ServerInfo } from "../models";
 import { displayHost, attachmentPlaceholder } from "../lib/format";
+import { parseGroupEventMeta } from "../lib/groupEvents";
 import { DeliveryStatus, type Message } from "../models/Message";
 import { ServiceMode, type AvalancheService, type ConnectionState, type StoredMessageFfi, type ConversationSummaryFfi, type IncomingEvent, type ReactionFfi, type MessageRevisionFfi, type MessageTarget, type JoinResultFfi, type ContactRowFfi, type AttachmentFfi, type LinkPreviewFfi, type LinkPreviewMetaFfi } from "../services/AvalancheService";
 import { MockAvalancheService } from "../services/MockAvalancheService";
@@ -188,6 +189,13 @@ function makeService(mode: ServiceMode): AvalancheService {
   return mode === ServiceMode.Mock
     ? new MockAvalancheService()
     : new DevServerAvalancheService();
+}
+
+// A conversation summary is a group iff it carries a group title or its id uses
+// the `group-` prefix (DM ids are `dm-<account>-<peer>`). Single source of truth
+// for the group/DM split, used by both the name-warm pass and the row builder.
+function isGroupSummary(s: ConversationSummaryFfi): boolean {
+  return s.groupTitle !== null || s.conversationId.startsWith("group-");
 }
 
 function messageFromFfi(m: StoredMessageFfi): Message {
@@ -478,16 +486,26 @@ export function AppProvider(props: { children: JSX.Element }) {
   onCleanup(() => deeplinkUnlisten?.());
 
   // ── Foreground hook ───────────────────────────────────────────────────────
-  // Push window focus/blur to the core so it can gate the WS keepalive and probe
-  // the connection on resume (T77, mirrors iOS `scenePhase` → `setAppActiveAll`).
-  // Becoming active triggers an opportunistic reconnect, and the core's
-  // connection loop resyncs durable storage on that reconnect — so a message I
-  // sent or read on another linked device surfaces here without a restart.
+  // On window focus, tell the core the app is active (T77). This wakes the
+  // reconnect loop and probes a possibly-dead socket — so after the machine
+  // resumes from sleep or a network change, a stale connection (and any
+  // messages sent/read on another linked device meanwhile) recovers promptly
+  // via the reconnect + storage resync, without a restart.
+  //
+  // We deliberately do NOT deactivate on blur, unlike iOS's scenePhase gating.
+  // Desktop has no OS suspension and no push fallback, and close-to-tray
+  // explicitly promises that messages/notifications keep arriving while the
+  // window is hidden — so the keepalive (and its dead-socket detection) must
+  // stay on whenever the process is running. The core defaults to active, so
+  // never calling `setAppActive(false)` keeps the connection alive for the
+  // app's lifetime; focus is purely an opportunistic reconnect trigger.
   // No-op before sign-in: the command short-circuits when there's no account.
   let focusUnlisten: (() => void) | undefined;
   getCurrentWindow()
     .onFocusChanged(({ payload: focused }) => {
-      void service().setAppActive(focused).catch(() => { /* offline / signed out */ });
+      if (focused) {
+        void service().setAppActive(true).catch(() => { /* offline / signed out */ });
+      }
     })
     .then((un) => { focusUnlisten = un; })
     .catch(() => { /* Tauri window API unavailable (browser/test) */ });
@@ -965,22 +983,16 @@ export function AppProvider(props: { children: JSX.Element }) {
   ): string[] {
     const dids = new Set<string>();
     for (const s of summaries) {
-      const isGroup = s.groupTitle !== null || s.conversationId.startsWith("group-");
-      if (isGroup) {
+      if (isGroupSummary(s)) {
         const last = s.lastMessage;
         if (!last) continue;
         if (last.senderDid) dids.add(last.senderDid);
-        if (last.kind > 0 && last.metadata) {
-          try {
-            const m = JSON.parse(last.metadata) as {
-              actor_did?: string;
-              target_did?: string;
-            };
-            if (m.actor_did) dids.add(m.actor_did);
-            if (m.target_did) dids.add(m.target_did);
-          } catch {
-            // Unparseable metadata — the preview falls back to the stored body.
-          }
+        if (last.kind > 0) {
+          // System-event previews resolve actor/target DIDs (e.g. "Alice made
+          // Bob an admin"), so warm those too.
+          const m = parseGroupEventMeta(last.metadata ?? undefined);
+          if (m?.actor_did) dids.add(m.actor_did);
+          if (m?.target_did) dids.add(m.target_did);
         }
       } else {
         const recipientDid = recipientDidFromConvId(s.conversationId, accountId);
@@ -1024,7 +1036,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     }
 
     const convs: Conversation[] = summaries.map((s) => {
-      const isGroup = s.groupTitle !== null || s.conversationId.startsWith("group-");
+      const isGroup = isGroupSummary(s);
       const groupId = s.conversationId.startsWith("group-")
         ? s.conversationId.slice("group-".length)
         : undefined;

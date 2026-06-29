@@ -38,6 +38,87 @@
   background: var(--color-bg);
 }
 
+/* ── Attachment button + hidden file input ─────────────────────────────── */
+
+.compose-attach-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: none;
+  color: var(--color-text-secondary);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 150ms;
+}
+.compose-attach-btn:hover { color: var(--color-accent); }
+.compose-attach-btn:disabled { opacity: 0.4; cursor: default; }
+
+.compose-file-input {
+  display: none;
+}
+
+/* ── Staged attachments / preview strip ────────────────────────────────── */
+
+.compose-staging {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 18px 0;
+  align-items: flex-start;
+}
+
+.staged-chip {
+  position: relative;
+}
+
+.staged-chip-image {
+  display: block;
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--color-input-border);
+}
+
+.staged-chip-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 160px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--color-input-bg);
+  border: 1px solid var(--color-input-border);
+  font-size: 0.82rem;
+}
+.staged-chip-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.staged-chip-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* ── Pill input wrap ───────────────────────────────────────────────────── */
 
 .compose-input-wrap {

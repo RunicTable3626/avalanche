@@ -39,6 +39,36 @@
   border-bottom-left-radius: 4px;
 }
 
+/* Clickable links inside a bubble. Inherit the bubble's text color so links
+   stay legible on both the plum (mine) and sand (theirs) backgrounds. */
+.bubble-link {
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* Attachment thumbnails / file chips stacked above the text bubble. */
+.attachment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.mine .attachment-list {
+  align-items: flex-end;
+}
+
+/* Link-preview cards rendered below the text bubble. */
+.preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.mine .preview-list {
+  align-items: flex-end;
+}
+
 .deleted-tombstone {
   padding: 9px 13px;
   border: 1.5px dashed var(--color-text-secondary);

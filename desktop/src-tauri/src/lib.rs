@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use app_core::AppCore;
+use tauri::Manager;
 
 // Desktop-specific convenience type (not in app-core).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
@@ -14,6 +15,22 @@ use app_core::AppCore;
 struct AccountResult {
     did: String,
     display_name: String,
+}
+
+/// Raw OG/meta scrape for a URL (A4). Desktop-specific (not in app-core) — the
+/// frontend turns the og:image bytes into an encrypted `AttachmentFfi` via
+/// `upload_attachment`, then assembles a `LinkPreviewFfi` for the send path
+/// (mirrors iOS `AppState.fetchLinkPreview`). `image_bytes` is empty for a
+/// text-only card.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+struct LinkPreviewMetaFfi {
+    url: String,
+    title: String,
+    description: String,
+    date_ms: i64,
+    image_bytes: Vec<u8>,
+    image_content_type: Option<String>,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -123,6 +140,14 @@ pub fn run() {
             get_conversation_timer,
             set_conversation_timer,
             delete_expired_messages,
+            // Attachments + link previews + external links (Day-6 A2/A3/A4).
+            // download_attachment caches to disk + records the path internally,
+            // so set_attachment_downloaded is not a separate JS-facing command.
+            upload_attachment,
+            download_attachment,
+            send_message_with_attachments,
+            open_external,
+            fetch_link_preview,
         ]);
 
     // Codegen path (never compiled into the shipped app): write bindings.ts and
@@ -1049,5 +1074,270 @@ fn join_via_link(
     get_app(&state)?
         .join_via_link(master_key, hosting_server_url, password)
         .map_err(|e| e.to_string())
+}
+
+// ── Attachments ────────────────────────────────────────────────────────────────
+
+/// Encrypt and upload an attachment blob, returning the pointer to send. Async +
+/// `spawn_blocking` because the upload does network I/O (mirrors `next_events`'s
+/// off-thread pattern so the WebView never freezes).
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+async fn upload_attachment(
+    state: tauri::State<'_, AppState>,
+    plaintext: Vec<u8>,
+    content_type: String,
+    file_name: Option<String>,
+    width: i32,
+    height: i32,
+    duration_ms: i32,
+    thumbnail: Vec<u8>,
+    flags: i32,
+) -> Result<app_core::AttachmentFfi, String> {
+    let app = get_app(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.upload_attachment(
+            plaintext, content_type, file_name, width, height, duration_ms, thumbnail, flags,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Deterministic on-disk cache path for an attachment id, under the app cache
+/// dir. `None` for an unsaved pointer (empty id) — those aren't cached.
+fn attachment_cache_path(app_handle: &tauri::AppHandle, id: &str) -> Option<std::path::PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    let dir = app_handle.path().app_cache_dir().ok()?.join("attachments");
+    // Sanitize the id into a safe filename (ids are local row ids / uuids).
+    let safe: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    Some(dir.join(safe))
+}
+
+/// Download, verify, and decrypt an attachment blob; returns the plaintext bytes.
+/// Caches the decrypted blob on disk and records the path via app-core's
+/// `set_attachment_downloaded`, so re-opening a transcript (or restarting) reads
+/// from disk instead of re-fetching + re-decrypting (mirrors iOS). Async +
+/// `spawn_blocking` (network + filesystem I/O).
+#[tauri::command]
+#[specta::specta]
+async fn download_attachment(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    attachment: app_core::AttachmentFfi,
+) -> Result<Vec<u8>, String> {
+    let app = get_app(&state)?;
+    let cache_path = attachment_cache_path(&app_handle, &attachment.id);
+    tauri::async_runtime::spawn_blocking(move || {
+        // Disk-cache hit: skip the network fetch + decryption entirely.
+        if let Some(path) = &cache_path {
+            if let Ok(bytes) = std::fs::read(path) {
+                if !bytes.is_empty() {
+                    return Ok(bytes);
+                }
+            }
+        }
+        let bytes = app
+            .download_attachment(attachment.clone())
+            .map_err(|e| e.to_string())?;
+        // Best-effort: persist to the disk cache and record the path so later
+        // loads (this session and after restart) hit the cache. A failure here
+        // never fails the download — the caller still gets the bytes.
+        if let Some(path) = &cache_path {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if std::fs::write(path, &bytes).is_ok() {
+                let _ = app.set_attachment_downloaded(
+                    attachment.id.clone(),
+                    path.to_string_lossy().into_owned(),
+                );
+            }
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Send a message carrying attachments and/or link previews to a DM or group.
+/// One path for both targets (the `MessageTarget` fork lives in app-core). Async
+/// + `spawn_blocking` (network I/O).
+#[tauri::command]
+#[specta::specta]
+async fn send_message_with_attachments(
+    state: tauri::State<'_, AppState>,
+    target: app_core::MessageTarget,
+    body: String,
+    attachments: Vec<app_core::AttachmentFfi>,
+    previews: Vec<app_core::LinkPreviewFfi>,
+    sent_at_ms: i64,
+) -> Result<(), String> {
+    let app = get_app(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.send_message_with_attachments(target, body, attachments, previews, sent_at_ms)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ── External browser ───────────────────────────────────────────────────────────
+
+/// Whether `url` is an `http`/`https` URL we'll hand to the OS browser. Rejects
+/// every other scheme (`file:`, `javascript:`, `data:`, custom schemes, …) so a
+/// crafted message body can't open a local file or a dangerous handler. Matches
+/// iOS, which only linkifies http(s) (NSDataDetector `.link`).
+fn is_web_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// Open a validated http(s) URL in the OS default browser. The WebView must never
+/// navigate to message URLs in-app (A2); link clicks and link-preview card taps
+/// route here. Non-web schemes are rejected.
+#[tauri::command]
+#[specta::specta]
+fn open_external(url: String) -> Result<(), String> {
+    if !is_web_url(&url) {
+        return Err("refusing to open non-http(s) url".to_string());
+    }
+    open::that(&url).map_err(|e| e.to_string())
+}
+
+// ── Link-preview OG fetch (A4) ───────────────────────────────────────────────
+
+const PREVIEW_MAX_HTML_BYTES: usize = 1024 * 1024; // 1 MiB of HTML is plenty for <head>
+const PREVIEW_MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024; // 5 MiB og:image cap
+const PREVIEW_TIMEOUT_SECS: u64 = 10;
+// A normal-looking UA — some sites serve no OG tags to obvious bots.
+const PREVIEW_USER_AGENT: &str =
+    "Mozilla/5.0 (compatible; AvalancheLinkPreview/1.0; +https://theavalanche.net)";
+
+/// Read a response body but stop once `cap` bytes have been buffered, so a
+/// hostile or huge URL can't exhaust memory.
+async fn read_body_capped(mut resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        buf.extend_from_slice(&chunk);
+        if buf.len() >= cap {
+            buf.truncate(cap);
+            break;
+        }
+    }
+    Ok(buf)
+}
+
+/// Extract `(title, description, image_url)` from OG / Twitter-card / standard
+/// `<meta>` tags, falling back to `<title>`. `image_url` may be relative — the
+/// caller resolves it against the fetched page URL.
+fn parse_preview_meta(html: &str) -> (String, String, Option<String>) {
+    let doc = scraper::Html::parse_document(html);
+    let meta_sel = scraper::Selector::parse("meta").expect("valid meta selector");
+    let mut title: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut image: Option<String> = None;
+    for el in doc.select(&meta_sel) {
+        let key = el
+            .value()
+            .attr("property")
+            .or_else(|| el.value().attr("name"));
+        let content = el.value().attr("content");
+        if let (Some(key), Some(content)) = (key, content) {
+            if content.trim().is_empty() {
+                continue;
+            }
+            match key.trim().to_ascii_lowercase().as_str() {
+                "og:title" | "twitter:title" if title.is_none() => {
+                    title = Some(content.to_string())
+                }
+                "og:description" | "twitter:description" | "description"
+                    if description.is_none() =>
+                {
+                    description = Some(content.to_string())
+                }
+                "og:image" | "og:image:url" | "og:image:secure_url" | "twitter:image"
+                    if image.is_none() =>
+                {
+                    image = Some(content.to_string())
+                }
+                _ => {}
+            }
+        }
+    }
+    if title.is_none() {
+        let title_sel = scraper::Selector::parse("title").expect("valid title selector");
+        if let Some(t) = doc.select(&title_sel).next() {
+            let txt = t.text().collect::<String>().trim().to_string();
+            if !txt.is_empty() {
+                title = Some(txt);
+            }
+        }
+    }
+    (title.unwrap_or_default(), description.unwrap_or_default(), image)
+}
+
+/// Fetch a URL and scrape its OG/meta tags + og:image bytes (A4). Lives in Rust
+/// because the WebView's CSP forbids external fetches (`connect-src ipc:`).
+/// Size-capped, timed out, and http(s)-only. Returns a text-only card when no
+/// image is found or the image fetch fails — never errors on a missing image.
+#[tauri::command]
+#[specta::specta]
+async fn fetch_link_preview(url: String) -> Result<LinkPreviewMetaFfi, String> {
+    if !is_web_url(&url) {
+        return Err("refusing to fetch non-http(s) url".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(PREVIEW_TIMEOUT_SECS))
+        .user_agent(PREVIEW_USER_AGENT)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    // The post-redirect URL is the base for resolving a relative og:image.
+    let base_url = resp.url().clone();
+    let html_bytes = read_body_capped(resp, PREVIEW_MAX_HTML_BYTES).await?;
+    let html = String::from_utf8_lossy(&html_bytes).into_owned();
+    let (title, description, image_ref) = parse_preview_meta(&html);
+
+    let mut image_bytes = Vec::new();
+    let mut image_content_type = None;
+    if let Some(image_ref) = image_ref {
+        if let Ok(image_url) = base_url.join(&image_ref) {
+            if is_web_url(image_url.as_str()) {
+                if let Ok(img_resp) = client.get(image_url).send().await {
+                    let ct = img_resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    if let Ok(bytes) = read_body_capped(img_resp, PREVIEW_MAX_IMAGE_BYTES).await {
+                        if !bytes.is_empty() {
+                            image_bytes = bytes;
+                            image_content_type = ct;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(LinkPreviewMetaFfi {
+        url,
+        title,
+        description,
+        // No reliable published-date source without a date parser; iOS's
+        // LPMetadataProvider doesn't surface one either. 0 = unknown.
+        date_ms: 0,
+        image_bytes,
+        image_content_type,
+    })
 }
 

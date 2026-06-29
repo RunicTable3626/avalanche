@@ -85,4 +85,9 @@ commands.allow = [
   "get_conversation_timer",
   "set_conversation_timer",
   "delete_expired_messages",
+  "upload_attachment",
+  "download_attachment",
+  "send_message_with_attachments",
+  "open_external",
+  "fetch_link_preview",
 ]

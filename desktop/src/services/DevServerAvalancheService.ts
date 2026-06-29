@@ -373,4 +373,43 @@ export class DevServerAvalancheService implements AvalancheService {
   async loadMessageRevisions(conversationId: string, author: string, sentAtMs: number): Promise<import("../bindings").MessageRevisionFfi[]> {
     return ok(commands.loadMessageRevisions(conversationId, author, sentAtMs));
   }
+
+  // ── Attachments / link previews / external links ───────────────────
+
+  async uploadAttachment(
+    plaintext: number[],
+    contentType: string,
+    fileName: string | null,
+    width: number,
+    height: number,
+    durationMs: number,
+    thumbnail: number[],
+    flags: number,
+  ): Promise<import("../bindings").AttachmentFfi> {
+    return ok(
+      commands.uploadAttachment(plaintext, contentType, fileName, width, height, durationMs, thumbnail, flags),
+    );
+  }
+
+  async downloadAttachment(attachment: import("../bindings").AttachmentFfi): Promise<number[]> {
+    return ok(commands.downloadAttachment(attachment));
+  }
+
+  async sendMessageWithAttachments(
+    target: import("../bindings").MessageTarget,
+    body: string,
+    attachments: import("../bindings").AttachmentFfi[],
+    previews: import("../bindings").LinkPreviewFfi[],
+    sentAtMs: number,
+  ): Promise<void> {
+    await ok(commands.sendMessageWithAttachments(target, body, attachments, previews, sentAtMs));
+  }
+
+  async openExternal(url: string): Promise<void> {
+    await ok(commands.openExternal(url));
+  }
+
+  async fetchLinkPreview(url: string): Promise<import("../bindings").LinkPreviewMetaFfi> {
+    return ok(commands.fetchLinkPreview(url));
+  }
 }

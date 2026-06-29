@@ -1,3 +1,5 @@
+import type { AttachmentFfi, LinkPreviewFfi } from "../bindings";
+
 export enum DeliveryStatus {
   sending = 0,
   sent = 1,
@@ -21,4 +23,8 @@ export interface Message {
   metadata?: string;
   expireTimerSecs: number;
   expireAtMs?: number;
+  // Attachments (docs/35) and link-preview cards on this message. Absent on
+  // plain-text messages; treat undefined as empty when rendering.
+  attachments?: AttachmentFfi[];
+  previews?: LinkPreviewFfi[];
 }

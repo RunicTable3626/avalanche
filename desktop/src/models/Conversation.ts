@@ -13,6 +13,11 @@ export interface Conversation {
   isGroup: boolean;
   isRequest: boolean;
   isBlocked: boolean;
+  // Authoritative unread count seeded from ConversationSummaryFfi.unreadCount at
+  // load (core excludes own + expired messages). Backs the chat-list badge for
+  // conversations whose transcript isn't loaded yet; once loaded, per-message
+  // read state takes over. Optimistically cleared to 0 on open. (A5)
+  unreadCount?: number;
   // Group only: true once the user has left (or was removed). The conversation
   // stays visible (read-only) instead of vanishing — the composer is replaced
   // with a "no longer a member" notice, Signal-style.

@@ -16,6 +16,10 @@ import type {
   InviteInfo,
   JoinResultFfi,
   DeliveryStatusUpdate,
+  AttachmentFfi,
+  LinkPreviewFfi,
+  LinkPreviewMetaFfi,
+  MessageTarget,
 } from "./AvalancheService";
 
 const MOCK_SERVER_URL = "https://mock.avalancheapp.net";
@@ -607,5 +611,93 @@ export class MockAvalancheService implements AvalancheService {
     _sentAtMs: number
   ): Promise<MessageRevisionFfi[]> {
     return [];
+  }
+
+  // ── Attachments / link previews / external links ───────────────────
+
+  async sendMessageWithAttachments(
+    target: MessageTarget,
+    body: string,
+    attachments: AttachmentFfi[],
+    previews: LinkPreviewFfi[],
+    _sentAtMs: number
+  ): Promise<void> {
+    await new Promise((r) => setTimeout(r, 100));
+    const plaintext = Array.from(new TextEncoder().encode(body));
+    const isDm = target.type === "dm";
+    const convId = isDm
+      ? `dm-${this.mockDid}-${target.recipient_did}`
+      : `group-${target.group_id}`;
+    const senderDid = isDm ? target.recipient_did : "did:plc:organizer";
+    const groupId = isDm ? null : target.group_id;
+    void convId;
+    setTimeout(() => {
+      this.pushEvent({
+        type: "message",
+        msg: {
+          serverId: 0,
+          senderDid,
+          senderDeviceId: 1,
+          plaintext,
+          sentAtMs: Date.now(),
+          groupId,
+          expireTimerSecs: 0,
+          profileKey: null,
+          isRequest: false,
+          attachments,
+          previews,
+        },
+      });
+    }, 1000);
+  }
+
+  async uploadAttachment(
+    plaintext: number[],
+    contentType: string,
+    fileName: string | null,
+    width: number,
+    height: number,
+    durationMs: number,
+    thumbnail: number[],
+    flags: number
+  ): Promise<AttachmentFfi> {
+    await new Promise((r) => setTimeout(r, 100));
+    return {
+      id: `mock-att-${Math.random().toString(36).slice(2, 10)}`,
+      url: `${MOCK_SERVER_URL}/attachment`,
+      contentType,
+      key: [],
+      digest: [],
+      sizeBytes: plaintext.length,
+      fileName,
+      width,
+      height,
+      durationMs,
+      blurhash: null,
+      thumbnail,
+      caption: null,
+      flags,
+      localPath: null,
+      downloadedAtMs: null,
+    };
+  }
+
+  async downloadAttachment(attachment: AttachmentFfi): Promise<number[]> {
+    // Mock has no blob store; hand back the inline thumbnail bytes so the UI
+    // can still render the staged/echoed image.
+    return attachment.thumbnail;
+  }
+
+  async openExternal(_url: string): Promise<void> {}
+
+  async fetchLinkPreview(url: string): Promise<LinkPreviewMetaFfi> {
+    return {
+      url,
+      title: "Mock Preview",
+      description: "A mock link preview for offline development.",
+      dateMs: 0,
+      imageBytes: [],
+      imageContentType: null,
+    };
   }
 }

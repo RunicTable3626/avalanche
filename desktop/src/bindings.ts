@@ -140,6 +140,39 @@ export const commands = {
 	getConversationTimer: (conversationId: string) => typedError<number | null, string>(__TAURI_INVOKE("get_conversation_timer", { conversationId })),
 	setConversationTimer: (recipientDid: string, expirySecs: number | null) => typedError<null, string>(__TAURI_INVOKE("set_conversation_timer", { recipientDid, expirySecs })),
 	deleteExpiredMessages: () => typedError<string[], string>(__TAURI_INVOKE("delete_expired_messages")),
+	/**
+	 *  Encrypt and upload an attachment blob, returning the pointer to send. Async +
+	 *  `spawn_blocking` because the upload does network I/O (mirrors `next_events`'s
+	 *  off-thread pattern so the WebView never freezes).
+	 */
+	uploadAttachment: (plaintext: number[], contentType: string, fileName: string | null, width: number, height: number, durationMs: number, thumbnail: number[], flags: number) => typedError<AttachmentFfi, string>(__TAURI_INVOKE("upload_attachment", { plaintext, contentType, fileName, width, height, durationMs, thumbnail, flags })),
+	/**
+	 *  Download, verify, and decrypt an attachment blob; returns the plaintext bytes.
+	 *  Caches the decrypted blob on disk and records the path via app-core's
+	 *  `set_attachment_downloaded`, so re-opening a transcript (or restarting) reads
+	 *  from disk instead of re-fetching + re-decrypting (mirrors iOS). Async +
+	 *  `spawn_blocking` (network + filesystem I/O).
+	 */
+	downloadAttachment: (attachment: AttachmentFfi) => typedError<number[], string>(__TAURI_INVOKE("download_attachment", { attachment })),
+	/**
+	 *  Send a message carrying attachments and/or link previews to a DM or group.
+	 *  One path for both targets (the `MessageTarget` fork lives in app-core). Async
+	 *  + `spawn_blocking` (network I/O).
+	 */
+	sendMessageWithAttachments: (target: MessageTarget, body: string, attachments: AttachmentFfi[], previews: LinkPreviewFfi[], sentAtMs: number) => typedError<null, string>(__TAURI_INVOKE("send_message_with_attachments", { target, body, attachments, previews, sentAtMs })),
+	/**
+	 *  Open a validated http(s) URL in the OS default browser. The WebView must never
+	 *  navigate to message URLs in-app (A2); link clicks and link-preview card taps
+	 *  route here. Non-web schemes are rejected.
+	 */
+	openExternal: (url: string) => typedError<null, string>(__TAURI_INVOKE("open_external", { url })),
+	/**
+	 *  Fetch a URL and scrape its OG/meta tags + og:image bytes (A4). Lives in Rust
+	 *  because the WebView's CSP forbids external fetches (`connect-src ipc:`).
+	 *  Size-capped, timed out, and http(s)-only. Returns a text-only card when no
+	 *  image is found or the image fetch fails — never errors on a missing image.
+	 */
+	fetchLinkPreview: (url: string) => typedError<LinkPreviewMetaFfi, string>(__TAURI_INVOKE("fetch_link_preview", { url })),
 };
 
 /* Types */
@@ -578,6 +611,22 @@ export type LinkPreviewFfi = {
 	/**  Article published date, unix millis; 0 = unknown. */
 	dateMs: number,
 	image: AttachmentFfi | null,
+};
+
+/**
+ *  Raw OG/meta scrape for a URL (A4). Desktop-specific (not in app-core) — the
+ *  frontend turns the og:image bytes into an encrypted `AttachmentFfi` via
+ *  `upload_attachment`, then assembles a `LinkPreviewFfi` for the send path
+ *  (mirrors iOS `AppState.fetchLinkPreview`). `image_bytes` is empty for a
+ *  text-only card.
+ */
+export type LinkPreviewMetaFfi = {
+	url: string,
+	title: string,
+	description: string,
+	dateMs: number,
+	imageBytes: number[],
+	imageContentType: string | null,
 };
 
 /**  A prior body of an edited message, for the edit-history sheet. */

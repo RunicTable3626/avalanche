@@ -222,6 +222,13 @@ export const commands = {
 	 *  gate.
 	 */
 	setAppActive: (active: boolean) => typedError<null, string>(__TAURI_INVOKE("set_app_active", { active })),
+	/**
+	 *  Opportunistically retry/validate connectivity now (the "Reconnect now"
+	 *  action on the offline banner — T72). Wakes the reconnect loop if it's backing
+	 *  off and probes an open socket's liveness. Sync, infallible, cheap. No-op
+	 *  before sign-in.
+	 */
+	reconnectNow: () => typedError<null, string>(__TAURI_INVOKE("reconnect_now")),
 };
 
 /* Types */

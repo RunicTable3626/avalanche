@@ -11,7 +11,7 @@ interface Props {
 }
 
 export default function DevSettingsView(props: Props = {}): JSX.Element {
-  const { store, logout, serverUrl, setServerUrl } = useApp();
+  const { store, logout, serverUrl, setServerUrl, closeToTray, setCloseToTray } = useApp();
   // Local draft of the server URL; committed (persisted) on Save.
   const [draftUrl, setDraftUrl] = createSignal(serverUrl());
   // useNavigate throws if rendered outside a Router — guard gracefully.
@@ -66,6 +66,25 @@ export default function DevSettingsView(props: Props = {}): JSX.Element {
             Save
           </button>
         </div>
+      </section>
+
+      <section class="dev-settings-section">
+        <h2>Window</h2>
+        <label class="dev-settings-toggle-row">
+          <div class="dev-settings-toggle-text">
+            <span class="dev-settings-toggle-label">Keep running when closed</span>
+            <span class="dev-settings-toggle-sub">
+              Closing the window hides it to the system tray so messages and
+              notifications keep arriving. Quit from the tray menu to exit fully.
+            </span>
+          </div>
+          <input
+            type="checkbox"
+            class="dev-settings-toggle"
+            checked={closeToTray()}
+            onChange={(e) => setCloseToTray(e.currentTarget.checked)}
+          />
+        </label>
       </section>
 
       <section class="dev-settings-section">

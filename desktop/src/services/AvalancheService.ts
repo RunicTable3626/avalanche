@@ -150,6 +150,8 @@ export interface AvalancheService {
   waitForConnectionStateChange(last: import("../bindings").ConnectionState): Promise<import("../bindings").ConnectionState>;
   // Foreground gating: window focus → keepalive + opportunistic reconnect (T77).
   setAppActive(active: boolean): Promise<void>;
+  // Manual "Reconnect now" — wake the reconnect loop / probe the socket (T72).
+  reconnectNow(): Promise<void>;
 
   // Groups
   createGroup(title: string, description: string, expirySeconds: number): Promise<import("../bindings").CreatedGroupFfi>;

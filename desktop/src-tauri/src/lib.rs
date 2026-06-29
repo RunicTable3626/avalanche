@@ -90,6 +90,34 @@ fn close_to_tray_enabled(app: &tauri::AppHandle) -> bool {
         .unwrap_or(true)
 }
 
+/// On the *first* hide-to-tray, fire a one-time OS notification so the user
+/// knows the app is still running and how to bring it back — otherwise a window
+/// that vanishes on close with no visible exit reads as a bug (Signal/Slack show
+/// the same hint). The `trayHintShown` flag persists in the same plugin-store
+/// file the close-to-tray toggle uses.
+fn maybe_show_first_hide_hint(app: &tauri::AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+    use tauri_plugin_store::StoreExt;
+    let Ok(store) = app.store("avalanche.json") else {
+        return;
+    };
+    let already = store
+        .get("trayHintShown")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+    let _ = app
+        .notification()
+        .builder()
+        .title("Avalanche is still running")
+        .body("The window closed to the system tray so messages keep arriving. Click the tray icon to reopen, or use its menu to Quit.")
+        .show();
+    store.set("trayHintShown", true);
+    let _ = store.save();
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -224,11 +252,10 @@ pub fn run() {
         // frontend (the deep-link plugin's on_open_url only fires for the
         // cold-start launch, not this second-instance path on Windows/Linux).
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            use tauri::{Emitter, Manager};
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            use tauri::Emitter;
+            // show() (not just unminimize) so a window hidden to the tray by
+            // close-to-tray actually reappears — a hidden window is not minimized.
+            show_main_window(app);
             if let Some(url) = argv.iter().find(|a| is_deep_link_arg(a)) {
                 eprintln!("[deep-link] second instance: {url}");
                 let _ = app.emit("avalanche-deeplink", url.clone());
@@ -249,6 +276,9 @@ pub fn run() {
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
                     eprintln!("[deep-link] on_open_url: {url}");
+                    // Reveal the window in case it was hidden to the tray — the
+                    // user followed a link and expects the app to surface.
+                    show_main_window(&handle);
                     let _ = handle.emit("avalanche-deeplink", url.to_string());
                 }
             });
@@ -307,6 +337,7 @@ pub fn run() {
                 if window.label() == "main" && close_to_tray_enabled(window.app_handle()) {
                     api.prevent_close();
                     let _ = window.hide();
+                    maybe_show_first_hide_hint(window.app_handle());
                 }
             }
         })

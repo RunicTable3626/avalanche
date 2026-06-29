@@ -19,8 +19,9 @@ export function isAllowedProjectUrl(raw: string): boolean {
   }
   if (parsed.protocol === "https:") return true;
   if (parsed.protocol === "http:") {
+    // URL.hostname returns IPv6 literals in bracketed form ("[::1]").
     const h = parsed.hostname;
-    return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+    return h === "localhost" || h === "127.0.0.1" || h === "[::1]";
   }
   return false;
 }

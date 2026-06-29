@@ -549,6 +549,10 @@ export class MockAvalancheService implements AvalancheService {
     return new Promise(() => {});
   }
 
+  async setAppActive(_active: boolean): Promise<void> {
+    // No connection to gate in mock mode.
+  }
+
   async createGroup(
     title: string,
     _description: string,

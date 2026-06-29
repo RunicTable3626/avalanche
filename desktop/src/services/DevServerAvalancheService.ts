@@ -282,6 +282,10 @@ export class DevServerAvalancheService implements AvalancheService {
     return ok(commands.waitForConnectionStateChange(last));
   }
 
+  async setAppActive(active: boolean): Promise<void> {
+    await ok(commands.setAppActive(active));
+  }
+
   // ── Groups ─────────────────────────────────────────────────────────
 
   async createGroup(title: string, description: string, expirySeconds: number): Promise<CreatedGroupFfi> {

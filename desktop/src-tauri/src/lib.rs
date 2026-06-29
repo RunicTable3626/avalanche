@@ -167,6 +167,9 @@ pub fn run() {
             link_create_pairing,
             link_accept_pairing,
             link_send_bundle_step,
+            // Foreground gating for the WS keepalive / opportunistic reconnect
+            // (Day-6 B2 / T77).
+            set_app_active,
         ]);
 
     // Codegen path (never compiled into the shipped app): write bindings.ts and
@@ -463,6 +466,26 @@ async fn link_send_bundle_step(state: tauri::State<'_, AppState>) -> Result<bool
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ── Foreground / connection (T77) ───────────────────────────────────────────────
+
+/// Tell the core whether the desktop window is foreground-active (focused).
+/// Gates the WS keepalive (foreground-only) and, on a transition to active,
+/// triggers an opportunistic reconnect + liveness probe so a socket that died
+/// while the window was hidden/blurred recovers promptly — the reconnect path
+/// resyncs durable storage via the core connection loop (no separate
+/// `sync_storage` call needed, matching iOS, which only drives `setAppActive`
+/// from `scenePhase`). Sync + infallible. No-op before sign-in (no core yet):
+/// focus events can fire on the onboarding screens, where there's nothing to
+/// gate.
+#[tauri::command]
+#[specta::specta]
+fn set_app_active(state: tauri::State<'_, AppState>, active: bool) -> Result<(), String> {
+    if let Ok(app) = get_app(&state) {
+        app.set_app_active(active);
+    }
+    Ok(())
 }
 
 // ── Core messaging ────────────────────────────────────────────────────────────

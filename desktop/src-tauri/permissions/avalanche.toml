@@ -97,4 +97,5 @@ commands.allow = [
   "link_create_pairing",
   "link_accept_pairing",
   "link_send_bundle_step",
+  "set_app_active",
 ]

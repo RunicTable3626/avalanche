@@ -3,7 +3,7 @@ import { useApp } from "../state/AppContext";
 import "./OfflineBanner.css";
 
 export default function OfflineBanner() {
-  const { store, aggregateConnectionState } = useApp();
+  const { store, aggregateConnectionState, reconnectNow } = useApp();
 
   // Wrap in createMemo so the component re-evaluates reactively when
   // accounts change or the connection state transitions.  Reading these
@@ -28,7 +28,14 @@ export default function OfflineBanner() {
 
   return (
     <Show when={bannerText()}>
-      {(text) => <div class="offline-banner">{text()}</div>}
+      {(text) => (
+        <div class="offline-banner">
+          <span>{text()}</span>
+          <button class="offline-banner-retry" onClick={() => reconnectNow()}>
+            Reconnect now
+          </button>
+        </div>
+      )}
     </Show>
   );
 }

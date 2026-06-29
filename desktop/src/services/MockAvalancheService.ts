@@ -553,6 +553,10 @@ export class MockAvalancheService implements AvalancheService {
     // No connection to gate in mock mode.
   }
 
+  async reconnectNow(): Promise<void> {
+    // No connection to reconnect in mock mode.
+  }
+
   async createGroup(
     title: string,
     _description: string,

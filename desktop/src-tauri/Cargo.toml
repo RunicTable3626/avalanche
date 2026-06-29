@@ -17,7 +17,7 @@ codegen = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-store = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-notification = "2"

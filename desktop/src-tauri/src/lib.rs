@@ -65,6 +65,31 @@ fn is_deep_link_arg(arg: &str) -> bool {
     arg.starts_with("avalanche://") || arg.contains("go.theavalanche.net")
 }
 
+/// Reveal + focus the main window (tray "Open" / left-click, deep-link wake).
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Whether closing the main window should hide it to the tray (keeping the WS +
+/// notifications alive) instead of quitting. Read from the same
+/// `tauri-plugin-store` file the frontend writes its `closeToTray` toggle to, so
+/// the setting survives restarts without a dedicated command/atomic. Defaults to
+/// `true` (close-to-tray on) — that is the whole point of the tray: messages and
+/// notifications keep arriving after the window is closed (mirrors Signal/Slack
+/// desktop). Users opt out via Settings → Developer.
+fn close_to_tray_enabled(app: &tauri::AppHandle) -> bool {
+    use tauri_plugin_store::StoreExt;
+    app.store("avalanche.json")
+        .ok()
+        .and_then(|store| store.get("closeToTray"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -170,6 +195,8 @@ pub fn run() {
             // Foreground gating for the WS keepalive / opportunistic reconnect
             // (Day-6 B2 / T77).
             set_app_active,
+            // Manual "Reconnect now" action on the offline banner (Day-6 B3 / T72).
+            reconnect_now,
         ]);
 
     // Codegen path (never compiled into the shipped app): write bindings.ts and
@@ -229,7 +256,58 @@ pub fn run() {
             // for dev on Windows/Linux where no installer has registered it. A
             // failure here is non-fatal (e.g. already registered).
             let _ = app.deep_link().register_all();
+
+            // System tray (T72). Lets the app keep running with its window
+            // closed so the WebSocket and notifications survive (see the
+            // CloseRequested handler below). Menu: Open (reveal window) / Quit
+            // (really exit); left-click reveals the window.
+            {
+                use tauri::menu::{Menu, MenuItem};
+                use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+                let open_i = MenuItem::with_id(app, "open", "Open Avalanche", true, None::<&str>)?;
+                let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&open_i, &quit_i])?;
+
+                let mut tray = TrayIconBuilder::with_id("main-tray")
+                    .tooltip("Avalanche")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "open" => show_main_window(app),
+                        // Real quit: bypasses the close-to-tray intercept.
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            show_main_window(tray.app_handle());
+                        }
+                    });
+                if let Some(icon) = app.default_window_icon() {
+                    tray = tray.icon(icon.clone());
+                }
+                tray.build(app)?;
+            }
+
             Ok(())
+        })
+        // Close-to-tray (T72): when enabled, the window's close button hides the
+        // window instead of exiting, so the core's WebSocket + notification
+        // delivery keep running. The tray "Quit" item (app.exit) is the real
+        // exit path. When disabled, close exits normally.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && close_to_tray_enabled(window.app_handle()) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .manage(AppState {
             app: Mutex::new(None),
@@ -484,6 +562,19 @@ async fn link_send_bundle_step(state: tauri::State<'_, AppState>) -> Result<bool
 fn set_app_active(state: tauri::State<'_, AppState>, active: bool) -> Result<(), String> {
     if let Ok(app) = get_app(&state) {
         app.set_app_active(active);
+    }
+    Ok(())
+}
+
+/// Opportunistically retry/validate connectivity now (the "Reconnect now"
+/// action on the offline banner — T72). Wakes the reconnect loop if it's backing
+/// off and probes an open socket's liveness. Sync, infallible, cheap. No-op
+/// before sign-in.
+#[tauri::command]
+#[specta::specta]
+fn reconnect_now(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    if let Ok(app) = get_app(&state) {
+        app.reconnect_now();
     }
     Ok(())
 }

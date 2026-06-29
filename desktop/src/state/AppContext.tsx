@@ -44,6 +44,10 @@ interface AppStore {
   connectionStates: Record<string, ConnectionState>;
   pendingInviteToken: string | null;
   serverUrl: string;
+  // Desktop-only (T72): close button hides the window to the tray instead of
+  // quitting, so the WS + notifications survive. Persisted; the Rust
+  // CloseRequested handler reads the same key from the plugin-store file.
+  closeToTray: boolean;
 }
 
 // ── Context value ─────────────────────────────────────────────────────────────
@@ -63,6 +67,10 @@ interface AppContextValue {
   logout: () => void;
   serverUrl: () => string;
   setServerUrl: (url: string) => void;
+  // Close-to-tray preference (T72) + manual reconnect (offline banner action).
+  closeToTray: () => boolean;
+  setCloseToTray: (on: boolean) => void;
+  reconnectNow: () => void;
   joinServer: (
     serverUrl: string,
     serverName: string,
@@ -275,6 +283,9 @@ export function AppProvider(props: { children: JSX.Element }) {
     connectionStates: {},
     pendingInviteToken: null,
     serverUrl: "http://localhost:3000",
+    // Default on: closing keeps the app alive in the tray so messages keep
+    // arriving (matches the Rust-side default in close_to_tray_enabled).
+    closeToTray: true,
   });
 
   const [service, setService] = createSignal<AvalancheService>(
@@ -415,6 +426,26 @@ export function AppProvider(props: { children: JSX.Element }) {
     void persistServerUrl(url);
   }
 
+  // Persist the close-to-tray toggle to the same plugin-store file the Rust
+  // CloseRequested handler reads (`close_to_tray_enabled`).
+  async function persistCloseToTray(on: boolean) {
+    try {
+      const s = await loadStore("avalanche.json");
+      await s.set("closeToTray", on);
+      await s.save();
+    } catch {}
+  }
+
+  function setCloseToTray(on: boolean) {
+    setStore("closeToTray", on);
+    void persistCloseToTray(on);
+  }
+
+  // Manual "Reconnect now" (offline banner). Best-effort — no-op when signed out.
+  function reconnectNow() {
+    void service().reconnectNow().catch(() => { /* signed out / unavailable */ });
+  }
+
   // ── Init: read persisted mode on mount ───────────────────────────────────
 
   void (async () => {
@@ -428,6 +459,10 @@ export function AppProvider(props: { children: JSX.Element }) {
       // with no UI to switch back.
       if (savedServerUrl != null) {
         setStore("serverUrl", savedServerUrl);
+      }
+      const savedCloseToTray = await s.get<boolean>("closeToTray");
+      if (savedCloseToTray != null) {
+        setStore("closeToTray", savedCloseToTray);
       }
     } catch {}
   })();
@@ -2358,6 +2393,9 @@ export function AppProvider(props: { children: JSX.Element }) {
     logout,
     serverUrl: () => store.serverUrl,
     setServerUrl,
+    closeToTray: () => store.closeToTray,
+    setCloseToTray,
+    reconnectNow,
     joinServer,
     sendMessage,
     sendGroupMessage,

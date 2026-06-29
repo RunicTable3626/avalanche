@@ -98,4 +98,5 @@ commands.allow = [
   "link_accept_pairing",
   "link_send_bundle_step",
   "set_app_active",
+  "reconnect_now",
 ]

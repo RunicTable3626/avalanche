@@ -50,3 +50,36 @@
 .dev-settings-url-save {
   padding: 0 18px;
 }
+
+.dev-settings-toggle-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  cursor: pointer;
+}
+
+.dev-settings-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dev-settings-toggle-label {
+  font-size: 14px;
+  color: var(--color-text);
+}
+
+.dev-settings-toggle-sub {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
+
+.dev-settings-toggle {
+  margin-top: 2px;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}

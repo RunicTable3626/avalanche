@@ -405,14 +405,22 @@ consumed via atomic `DELETE...RETURNING`. did:plc stub locally (full PLC sync = 
 
 ## 9. Push relay (`00`, `01`, `41`) — ✅
 
-iOS/Android: only APNs/FCM can wake a backgrounded app. App developer runs a **push relay**: homeservers
-send content-free wakeups to per-(user,server) **pseudonyms**; relay maps pseudonym→device token, fires an
-**empty** payload; app wakes and fetches itself. Apple/Google see only "app pinged"; relay sees pseudonym
-timing but no identity/content/cross-server linkage; homeservers never see the device token. Pseudonyms
-rotate. Protocol supports multiple relays from day one (swappable, not a privileged singleton). High-risk
-users can opt out → manual fetch. Avalanche relay = `https://relay.theavalanche.net`; servers point via
-`RELAY_URL`. Relay state = tiny SQLite (pseudonym→token, 7d TTL); ~$4/mo droplet, losing the DB just forces
-re-registration. One relay serves sandbox+production APNs, routed by client-supplied `environment`.
+iOS/Android: only APNs/FCM/a UnifiedPush distributor can wake a backgrounded app. App developer runs a
+**push relay**: homeservers send content-free wakeups to per-(user,server) **pseudonyms**; relay maps
+pseudonym→device token, fires an **empty** payload; app wakes and fetches itself. Apple/Google/distributor
+see only "app pinged"; relay sees pseudonym timing but no identity/content/cross-server linkage; homeservers
+never see the device token. Pseudonyms rotate. Protocol supports multiple relays from day one (swappable, not
+a privileged singleton). High-risk users can opt out → manual fetch. Avalanche relay =
+`https://relay.theavalanche.net`; servers point via `RELAY_URL`. Relay state = tiny SQLite (pseudonym→token,
+7d TTL); ~$4/mo droplet, losing the DB just forces re-registration. One relay serves sandbox+production APNs,
+routed by client-supplied `environment`. **All external transports route through the relay** (homeserver only
+ever wakes pseudonyms, never POSTs to a third party): relay dispatches by stored `platform` — `apns`→APNs,
+`fcm`→FCM HTTP v1 (service-account JWT→OAuth2, data-only high-priority), `unifiedpush`→SSRF-guarded HTTPS POST
+to the client's distributor endpoint URL (degoogled Android; URL stored as the "token"). Client picks the
+transport (Play Services→FCM, else distributor→UnifiedPush, else foreground WebSocket). **Decision:**
+UnifiedPush is relay-routed, *not* homeserver-direct (rejected: would give the homeserver outbound push +
+per-device endpoint storage, breaking the no-token invariant). Deferred: distributor picker, no-distributor
+foreground-service keepalive (`02`).
 
 ## 10. Projects framework (`20`–`24`, `23`) — testbot+adminbot ✅, framework 📐 Stage 6
 

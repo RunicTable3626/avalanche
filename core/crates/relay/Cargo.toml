@@ -22,7 +22,15 @@ tokio-rusqlite   = { workspace = true }
 # `ring` instead of the default openssl feature so the relay binary has
 # no C dependencies — clean musl static build for droplet deployment.
 a2               = { version = "0.10", default-features = false, features = ["ring"] }
+# FCM HTTP v1 needs an OAuth2 access token, minted by signing an RS256 JWT with
+# the service-account key. jsonwebtoken is ring-backed, matching a2's no-C-deps
+# stance for the musl static build.
+jsonwebtoken     = "9"
 tower_governor   = "0.7"
+
+[dev-dependencies]
+# Decode the JWT payload in tests to assert the signed claims.
+base64 = { workspace = true }
 
 [[example]]
 name = "send_test_push"

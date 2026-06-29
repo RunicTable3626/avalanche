@@ -528,7 +528,10 @@ class AppViewModel(
 
                 startMessagePolling()
                 if (_serviceMode.value != ServiceMode.MOCK) {
-                    PushManager.requestPermissionAndRegister(appViewModel = this@AppViewModel)
+                    PushManager.requestPermissionAndRegister(
+                        context = applicationContext,
+                        appViewModel = this@AppViewModel,
+                    )
                 }
             } else {
                 // Persisted entries existed (so we started on MAIN) but none
@@ -846,7 +849,10 @@ class AppViewModel(
         _isOnboarding.value = false
         startMessagePolling()
         if (_serviceMode.value != ServiceMode.MOCK) {
-            PushManager.requestPermissionAndRegister(appViewModel = this)
+            PushManager.requestPermissionAndRegister(
+                context = applicationContext,
+                appViewModel = this,
+            )
         }
     }
 

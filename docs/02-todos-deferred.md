@@ -68,3 +68,8 @@ See `docs/14-bitchat-fallback.md` for the full design. BLE mesh transport as a f
 - [ ] Verify relay logs contain only pseudonyms + timestamps
 - [ ] Pseudonym rotation grace period test
 - [ ] APNs/FCM sandbox integration test
+
+### UnifiedPush follow-ups (degoogled Android)
+- [ ] No-distributor keepalive: persistent foreground-service WebSocket for degoogled phones with no UnifiedPush distributor installed (today such devices get push only while the app is foregrounded). Needs a foreground-service notification + lifecycle/battery design.
+- [ ] Distributor picker UI: when multiple UnifiedPush distributors are installed and none is saved, the app currently registers none (auto-picks only when exactly one is present). Add a settings picker / first-run prompt.
+- [ ] Consider UnifiedPush.unregister() on logout (in addition to the relay-side pseudonym deregistration) so the distributor drops the endpoint promptly.

@@ -15,6 +15,10 @@ jna = "5.19.1"
 googleServices = "4.4.2"
 firebaseBom = "33.7.0"
 jsoup = "1.18.3"
+# UnifiedPush connector for degoogled Android (docs/15). 3.x API: PushService
+# (a bound service, not a BroadcastReceiver) + UnifiedPush.register() + typed
+# PushEndpoint/PushMessage.
+unifiedpush = "3.3.3"
 
 [libraries]
 jsoup = { group = "org.jsoup", name = "jsoup", version.ref = "jsoup" }
@@ -42,6 +46,7 @@ zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embe
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
 firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
+unifiedpush-connector = { group = "org.unifiedpush.android", name = "connector", version.ref = "unifiedpush" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

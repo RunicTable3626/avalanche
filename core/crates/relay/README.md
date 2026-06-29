@@ -1,18 +1,26 @@
 # actnet push relay
 
-Standalone HTTP service that mediates between homeservers and APNs/FCM.
-Homeservers never see device push tokens — they POST wakeup requests
-addressed to opaque per-(user, server) pseudonyms. The relay maps
-pseudonyms to device tokens and fires content-free silent pushes.
+Standalone HTTP service that mediates between homeservers and APNs / FCM /
+UnifiedPush distributors. Homeservers never see device push tokens — they POST
+wakeup requests addressed to opaque per-(user, server) pseudonyms. The relay
+maps pseudonyms to device tokens and fires content-free silent pushes,
+dispatching by the `platform` stored at registration:
+
+- `apns` — APNs token-based push (`a2`).
+- `fcm` — FCM HTTP v1 (service-account JWT → OAuth2; data-only, high priority).
+- `unifiedpush` — the `device_token` is the distributor endpoint URL; the relay
+  POSTs a content-free body to it (SSRF-guarded: https only, global hosts only).
 
 ## Endpoints
 
 Client-facing (called by `app-core` when a device registers / rotates):
 
 - `POST /v1/register`   `{ pseudonym, device_token, platform, environment }`
+  - `platform` is `"apns"`, `"fcm"`, or `"unifiedpush"`. For `unifiedpush`,
+    `device_token` carries the distributor endpoint URL.
   - `environment` is `"sandbox"` (debug iOS builds) or `"production"`
-    (TestFlight / App Store). The relay routes to the matching APNs
-    endpoint at wakeup time.
+    (TestFlight / App Store). Used only for APNs routing; ignored for
+    `fcm`/`unifiedpush`.
 - `POST /v1/unregister` `{ pseudonym }` — marks rotated, kept 7d
 
 Homeserver-facing:
@@ -60,6 +68,10 @@ server→relay→pseudonym-lookup chain without a `.p8` to hand.
 | `APNS_KEY_ID` | _(required if key set)_ | 10-char key ID |
 | `APNS_TEAM_ID` | _(required if key set)_ | 10-char team ID |
 | `APNS_BUNDLE_ID` | _(required if key set)_ | App bundle ID |
+| `FCM_SA_PATH` | _(unset)_ | Path to FCM service-account JSON. If unset, FCM is disabled. |
+| `FCM_PROJECT_ID` | _(JSON `project_id`)_ | Override the FCM project; defaults to the service account's own. |
+
+UnifiedPush needs no config — those wakeups are plain outbound HTTPS POSTs.
 
 A single relay instance handles both sandbox and production tokens. The
 client passes `environment` ("sandbox" or "production") at registration

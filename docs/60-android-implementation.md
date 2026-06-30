@@ -5,9 +5,8 @@ apps and the remaining gaps. See `mobile/CLAUDE.md` for the parity rule and work
 
 **Status legend:** `[x]` implemented · `[~]` partial / stubbed · `[ ]` not started
 
-The app is essentially at file-for-file parity with iOS. The one missing source
-file is the passkey ceremony (`PasskeyManager`); the remaining gaps are listed
-under [Known gaps](#known-gaps).
+The app is at file-for-file parity with iOS. The remaining gaps are listed under
+[Known gaps](#known-gaps).
 
 ---
 
@@ -103,7 +102,7 @@ mobile/android/app/src/main/kotlin/
 | `MockActnetService.swift` | `MockActnetService.kt` | `[x]` (cannot fabricate `PreparedAccount` — see gaps) |
 | `DevServerActnetService.swift` | `DevServerActnetService.kt` | `[x]` |
 | `PublicServerInfo.swift` | `PublicServerInfo.kt` | `[x]` |
-| `PasskeyManager.swift` | — (Credential Manager) | `[ ]` **missing** |
+| `PasskeyManager.swift` | `PasskeyManager.kt` (Credential Manager + WebAuthn PRF) | `[x]` (needs asset-links hosting — see gaps) |
 | UniFFI `AppCore` / `AppCoreProtocol` | UniFFI-generated `AppCore` (`Generated/`, via JNA) | `[x]` |
 
 ### Onboarding
@@ -116,8 +115,8 @@ mobile/android/app/src/main/kotlin/
 | `IdentityPickerView.swift` | `IdentityPickerView.kt` | `[x]` |
 | `JoiningServerView.swift` | `JoiningServerView.kt` | `[x]` (existing-account join path is functional) |
 | `NewAccountView.swift` | `NewAccountView.kt` | `[x]` (avatar photo picker stubbed) |
-| `PasskeyExplainerView.swift` | `PasskeyExplainerView.kt` | `[~]` UI done; passkey ceremony stubbed |
-| `RecoveryExplainerView.swift` | `RecoveryExplainerView.kt` | `[~]` UI done; Credential Manager call stubbed |
+| `PasskeyExplainerView.swift` | `PasskeyExplainerView.kt` | `[x]` passkey ceremony wired via Credential Manager |
+| `RecoveryExplainerView.swift` | `RecoveryExplainerView.kt` | `[x]` passkey + phrase recovery wired |
 | `RecoveryConsoleView.swift` | `RecoveryConsoleView.kt` | `[~]` passkey-with-DID path only; PLC homeserver resolution stubbed |
 | `RecoveryPhraseSetupView.swift` | `RecoveryPhraseSetupView.kt` | `[x]` |
 | `LinkNewDeviceView.swift` | `LinkNewDeviceView.kt` | `[x]` device linking, new-device side (docs/04 §4) |
@@ -219,11 +218,23 @@ mobile/android/app/src/main/kotlin/
 
 Highest-impact first:
 
-1. **Passkey ceremony (Credential Manager).** No `PasskeyManager` equivalent.
-   `PasskeyExplainerView` / `RecoveryExplainerView` stub the `androidx.credentials`
-   create/get with the PRF extension. This **dead-ends the new-account onboarding
-   path** (nav is wired through to the passkey step, but "Create Passkey" does
-   nothing) and blocks passkey-based recovery.
+1. **Passkey asset-links hosting (deploy step).** The passkey ceremony is
+   implemented (`PasskeyManager.kt`, Credential Manager + WebAuthn PRF, wired into
+   `PasskeyExplainerView` / `RecoveryExplainerView`). For the OS to associate the
+   app with the relying party `theavalanche.net`, a Digital Asset Links file must
+   be published at `https://theavalanche.net/.well-known/assetlinks.json` with
+   relation `delegate_permission/common.get_login_creds`, listing
+   `net.theavalanche.app` and the app's signing SHA-256 fingerprints. The file
+   lives at `web/static/.well-known/assetlinks.json` (the Hugo source for
+   theavalanche.net) with the real fingerprints already filled in (reused from
+   the App Links file at `go.theavalanche.net/public/.well-known/assetlinks.json`);
+   it just needs the site redeployed (`npm run deploy` from `web/`) before
+   passkeys work end-to-end. This is the Android analog of iOS Associated Domains
+   `webcredentials:theavalanche.net`. Until the file is live at theavalanche.net,
+   the create/get calls fail association at the OS layer. Also note: the
+   `play-services-auth` provider requires Google Play Services; degoogled devices
+   need a framework credential provider (e.g. 1Password) that supports the PRF
+   extension.
 2. **PLC homeserver resolution.** `resolveHomeserverFromPlc(did)` in
    `RecoveryConsoleView` is stubbed, so phrase-based recovery can't find a DID's
    homeserver. Passkey recovery (DID embedded) is the only path, and it needs #1.

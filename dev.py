@@ -46,6 +46,12 @@ PROJECTS = [
         "dist": "packages/testbot/dist/index.js",
         "bind_env": "TESTBOT_BIND_ADDR",
         "log_env": "TESTBOT_LOG",
+        # Register as an OAuth login client (docs/25) so the "Sign in with
+        # Avalanche" demo at <url>/login works. The redirect_uri is derived from
+        # the phone-reachable project url below; public_url_env tells the service
+        # that same url so its redirect_uri matches byte-for-byte.
+        "oauth_client_id": "testbot",
+        "public_url_env": "TESTBOT_PUBLIC_URL",
     },
 ]
 
@@ -295,11 +301,19 @@ def main():
     for project in PROJECTS:
         port = next_port
         next_port += 1
-        projects_json.append({
+        url = f"{scheme}://{host}:{port}"
+        entry = {
             "name": project["name"],
-            "url": f"{scheme}://{host}:{port}",
+            "url": url,
             "description": project["description"],
-        })
+        }
+        # OAuth login client (docs/25): register client_id + the /login
+        # redirect_uri (phone-reachable) so "Sign in with Avalanche" works.
+        if project.get("oauth_client_id"):
+            entry["client_id"] = project["oauth_client_id"]
+            entry["redirect_uris"] = [f"{url}/login"]
+            entry["official"] = True
+        projects_json.append(entry)
         project_launches.append((project, port))
 
     # Free any port left bound by an orphaned service from a previous dev run
@@ -341,19 +355,24 @@ def main():
 
     for project, port in project_launches:
         print(f"  {project['name']} -> {host}:{port}")
+        proc_env = {
+            **os.environ,
+            project["bind_env"]: f"0.0.0.0:{port}",
+            "HOMESERVER_URL": os.environ.get("HOMESERVER_URL", "http://localhost:3000"),
+            project["log_env"]: os.environ.get(project["log_env"], "info"),
+            # Present the bootstrap secret so the bot can register against
+            # the closed-registration dev server.
+            "REGISTRATION_SHARED_SECRET": DEV_SHARED_SECRET,
+        }
+        # Tell an OAuth-login project its phone-reachable base URL so the
+        # redirect_uri it builds matches the one registered above (docs/25).
+        if project.get("public_url_env"):
+            proc_env[project["public_url_env"]] = f"{scheme}://{host}:{port}"
         processes.append(subprocess.Popen(
             node_cmd([project["dist"]]),
             cwd=NODE_DIR,
             **_POPEN_KW,
-            env={
-                **os.environ,
-                project["bind_env"]: f"0.0.0.0:{port}",
-                "HOMESERVER_URL": os.environ.get("HOMESERVER_URL", "http://localhost:3000"),
-                project["log_env"]: os.environ.get(project["log_env"], "info"),
-                # Present the bootstrap secret so the bot can register against
-                # the closed-registration dev server.
-                "REGISTRATION_SHARED_SECRET": DEV_SHARED_SECRET,
-            },
+            env=proc_env,
         ))
 
     # Adminbot — auto-registers as did:local:adminbot on first launch (matches

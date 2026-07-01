@@ -526,6 +526,8 @@ export class MockAvalancheService implements AvalancheService {
         name: "Testbot",
         url: "http://localhost:3001",
         description: "Chat with an AI bot",
+        clientId: "testbot",
+        official: false,
       },
     ];
   }

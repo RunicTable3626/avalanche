@@ -119,6 +119,7 @@ HOMESERVER_URL=$SERVER_URL
 REGISTRATION_SHARED_SECRET=$REGISTRATION_SHARED_SECRET
 TESTBOT_BIND_ADDR=127.0.0.1:3001
 TESTBOT_BASE_PATH=/p/testbot/
+TESTBOT_PUBLIC_URL=${SERVER_URL%/}/p/testbot
 TESTBOT_LOG=info
 EOF
       ;;
@@ -138,6 +139,17 @@ project_web_meta() {
   esac
 }
 
+# OAuth login client id for a Project that supports "Sign in with Avalanche"
+# (docs/25); empty for Projects that don't. When set, regenerate_projects adds
+# client_id + the <url>/login redirect_uri + official flag to the PROJECTS entry
+# so the homeserver recognizes it as an OAuth client.
+project_oauth_client() {
+  case "$1" in
+    testbot) echo "testbot" ;;
+    *) echo "" ;;
+  esac
+}
+
 # Regenerate the managed PROJECTS directory + Caddy routes from the web Projects
 # installed in current/. Server host only (needs avalanche.env for SERVER_URL
 # and a Caddyfile that imports the snippet). Callers reload caddy + restart
@@ -146,7 +158,7 @@ project_web_meta() {
 regenerate_projects() {
   [ -f "$ETC/avalanche.env" ] || return 0   # not a server host
   local server_url snippet="/etc/caddy/avalanche-projects.caddy"
-  local c meta port name desc entries=() json
+  local c meta port name desc entries=() json oauth_cid oauth_fields
   server_url="$(grep '^SERVER_URL=' "$ETC/avalanche.env" | cut -d= -f2-)"
   server_url="${server_url%/}"
   : > "$snippet"
@@ -155,7 +167,15 @@ regenerate_projects() {
     meta="$(project_web_meta "$c")"
     [ -n "$meta" ] || continue
     IFS='|' read -r port name desc <<< "$meta"
-    entries+=("{\"name\":\"$name\",\"url\":\"$server_url/p/$c/\",\"description\":\"$desc\"}")
+    # OAuth login client (docs/25): register client_id + the /login redirect_uri
+    # (the HTTPS URL Caddy serves this Project at) so "Sign in with Avalanche"
+    # works. redirect_uri matches the page's location.origin+pathname.
+    oauth_cid="$(project_oauth_client "$c")"
+    oauth_fields=""
+    if [ -n "$oauth_cid" ]; then
+      oauth_fields=",\"client_id\":\"$oauth_cid\",\"redirect_uris\":[\"$server_url/p/$c/login\"],\"official\":true"
+    fi
+    entries+=("{\"name\":\"$name\",\"url\":\"$server_url/p/$c/\",\"description\":\"$desc\"$oauth_fields}")
     cat >> "$snippet" <<EOF
 handle_path /p/$c/* {
     reverse_proxy 127.0.0.1:$port

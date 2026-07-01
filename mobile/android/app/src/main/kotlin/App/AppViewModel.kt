@@ -1519,6 +1519,10 @@ class AppViewModel(
             }
         }
         _unreadCounts.update { it + (conversationId to 0) }
+        // The conversation is fully read: cancel its delivered notifications so
+        // the launcher drops the app-icon badge (Android derives the badge from
+        // active notifications; reading in-app doesn't dismiss them otherwise).
+        NotificationPresenter.cancelNotifications(context = applicationContext, conversationId = conversationId)
         NotificationPresenter.updateBadge(context = applicationContext, appViewModel = this)
 
         val core = cores[accountId] ?: return
@@ -1563,6 +1567,13 @@ class AppViewModel(
         if (!changed) return
 
         _messagesByConversation.update { it + (conversationId to updatedMsgs) }
+        // If nothing remains unread in this conversation, clear its delivered
+        // notifications so the launcher drops the app-icon badge (see
+        // markAllMessagesRead / NotificationPresenter.cancelNotifications).
+        val stillUnread = updatedMsgs.any { it.readAtMs == null && it.senderAccountId != accountId }
+        if (!stillUnread) {
+            NotificationPresenter.cancelNotifications(context = applicationContext, conversationId = conversationId)
+        }
         NotificationPresenter.updateBadge(context = applicationContext, appViewModel = this)
 
         val core = cores[accountId] ?: return

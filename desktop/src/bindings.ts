@@ -712,6 +712,14 @@ export type ProjectInfoFfi = {
 	name: string,
 	url: string,
 	description: string,
+	/**
+	 *  OAuth login client id (docs/25), if this Project supports login. Lets
+	 *  the client resolve a login request's `client_id` to this Project's
+	 *  name/official flag for the consent screen.
+	 */
+	clientId: string | null,
+	/**  Server-vouched official flag (docs/54), shown as the verified badge. */
+	official: boolean,
 };
 
 /**

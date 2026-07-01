@@ -132,12 +132,40 @@ object NotificationPresenter {
         // are derived automatically by the launcher from active notifications, and
         // numeric badges are launcher-specific (e.g. ShortcutBadger). We therefore
         // keep explicit badge management out of the core and let the launcher derive
-        // the dot from our notifications. The unread total is computed here for
-        // logging / future use (e.g. if a launcher-specific badge is added later).
+        // the dot from our notifications. Because the badge is tied to *active*
+        // notifications, clearing it on read means cancelling the delivered
+        // notifications for the conversation — see [cancelNotifications], called
+        // from the read paths. The unread total is computed here for logging /
+        // future use (e.g. if a launcher-specific numeric badge is added later).
         val total = appViewModel.conversations.value.sumOf { conv ->
             appViewModel.unreadCount(conv)
         }
         AppLog.info("NotificationPresenter", "unread badge total: $total")
+    }
+
+    /**
+     * Cancel any delivered notifications for a conversation.
+     *
+     * The launcher derives the app-icon badge from active notifications, and
+     * [present] sets `setAutoCancel(true)` which only fires when the user *taps*
+     * the notification. Reading a message inside the app therefore leaves its
+     * notification active and the icon badged. Call this from the read paths so
+     * opening/reading a conversation clears its notifications (and thus the
+     * badge). Notifications are grouped by conversation id (see [present]), so we
+     * cancel every active notification whose group matches.
+     *
+     * iOS gets this for free: its badge is a number set via `setBadgeCount`
+     * (NotificationPresenter.swift), recomputed to 0 on read.
+     */
+    fun cancelNotifications(context: Context, conversationId: String) {
+        val nm = NotificationManagerCompat.from(context)
+        try {
+            nm.activeNotifications
+                .filter { it.notification.group == conversationId }
+                .forEach { nm.cancel(it.tag, it.id) }
+        } catch (e: Exception) {
+            AppLog.warn("NotificationPresenter", "cancelNotifications failed: ${e.message}")
+        }
     }
 
     /** Returns true if a sound should play for this conversation (throttled to once per 3 s). */

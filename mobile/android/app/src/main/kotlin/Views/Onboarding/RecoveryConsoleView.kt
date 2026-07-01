@@ -45,6 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.app_core.resolveHomeserverFromPlc
 
 // Recovery console view shown during passkey/phrase-based account recovery.
 // Mirrors mobile/ios/Actnet/Sources/Views/Onboarding/RecoveryConsoleView.swift.
@@ -154,9 +155,9 @@ fun RecoveryConsoleView(
         log("Resolving DID from PLC directory...")
         val resolved: String = try {
             withContext(Dispatchers.IO) {
-                // TODO(opus): implement resolveHomeserverFromPlc(did) — mirrors
-                // iOS resolveHomeserverFromPlc(did:) which does an HTTP GET to
-                // https://plc.directory/<did> and parses the serviceEndpoint.
+                // Rust FFI (uniffi.app_core): fetches https://plc.directory/<did>
+                // and returns the atproto PDS serviceEndpoint. Mirrors iOS
+                // RecoveryConsoleView's resolveHomeserverFromPlc(did:).
                 resolveHomeserverFromPlc(did = did)
             }
         } catch (e: Exception) {
@@ -281,17 +282,6 @@ private fun lineColor(line: String): Color = when {
     line.startsWith("[!]") -> LocalAvalancheColors.current.error
     line.startsWith("[ok]") -> LocalAvalancheColors.current.brand
     else -> LocalAvalancheColors.current.ink
-}
-
-// Stub for the PLC directory HTTP lookup.
-// TODO(opus): implement fully — iOS uses resolveHomeserverFromPlc(did:) from
-// IosHelpers.swift which fetches https://plc.directory/<did>, parses the JSON
-// response, and returns the `serviceEndpoint` URL for the atproto PDS service.
-// The Android equivalent should do the same via OkHttp or java.net.URL on
-// Dispatchers.IO (already on IO when called from performRecovery).
-private fun resolveHomeserverFromPlc(did: String): String {
-    // TODO(opus): implement PLC directory HTTP GET and JSON parsing.
-    throw UnsupportedOperationException("resolveHomeserverFromPlc not yet implemented on Android")
 }
 
 @Preview(showBackground = true)

@@ -56,6 +56,10 @@ XCODE_PROJ_FILE := mobile/ios/Actnet/Actnet.xcodeproj/project.pbxproj
 KOTLIN_BINDING := mobile/android/Generated/uniffi/app_core/app_core.kt
 ANDROID_JNILIBS := mobile/android/app/src/main/jniLibs
 ANDROID_SO_STAMP := $(ANDROID_JNILIBS)/arm64-v8a/libapp_core.so
+# Gradle APK outputs, copied into dist/ by the android* targets (mirrors how the
+# iOS archive/ipa land in dist/).
+ANDROID_DEBUG_APK := mobile/android/app/build/outputs/apk/debug/app-debug.apk
+ANDROID_RELEASE_APK := mobile/android/app/build/outputs/apk/release/app-release.apk
 ANDROID_ABIS := arm64-v8a x86_64
 # minSdk in app/build.gradle.kts — the native API level to compile against.
 ANDROID_API := 26
@@ -92,7 +96,7 @@ APP_CORE_TS_SOURCES := $(shell find node/packages/app-core/src -name '*.ts' 2>/d
 APP_CORE_NATIVE := node/packages/app-core/native/index.d.ts
 APP_CORE_DIST := node/packages/app-core/dist/index.js
 
-.PHONY: test test-server test-core test-e2e check clippy fmt ci db-up db-down db-reset migrate ios xcode archive ipa bindings android android-release android-bindings dev relay relay-release server-release dev-all node node-debug node-app-core node-adminbot node-adminbot-build node-testbot node-testbot-build
+.PHONY: test test-server test-core test-e2e check clippy fmt ci db-up db-down db-reset migrate ios xcode archive ipa bindings android android-release android-minify-test android-bindings dev relay relay-release server-release dev-all node node-debug node-app-core node-adminbot node-adminbot-build node-testbot node-testbot-build
 
 # ----------------------------------------------------------------------------
 # Node bindings (napi-rs)
@@ -415,6 +419,9 @@ android: android-bindings
 	cd mobile/android && JAVA_HOME="$(ANDROID_JAVA_HOME)" ANDROID_HOME="$(ANDROID_HOME)" ./gradlew assembleDebug \
 		-PMARKETING_VERSION=$(MARKETING_VERSION) \
 		-PCURRENT_PROJECT_VERSION=$(CURRENT_PROJECT_VERSION)
+	@mkdir -p dist
+	@cp $(ANDROID_DEBUG_APK) dist/avalanche-debug.apk
+	@ls -lh dist/avalanche-debug.apk
 
 # Build the signed, distributable release APK (arm64-v8a only). Signing material
 # is pulled from 1Password into a RAM disk + env vars at build time and torn down
@@ -427,6 +434,26 @@ android-release: android-bindings
 		MARKETING_VERSION="$(MARKETING_VERSION)" \
 		CURRENT_PROJECT_VERSION="$(CURRENT_PROJECT_VERSION)" \
 		mobile/android/release-sign.sh
+	@mkdir -p dist
+	@cp $(ANDROID_RELEASE_APK) dist/avalanche-release.apk
+	@ls -lh dist/avalanche-release.apk
+
+# Minified (R8 + resource-shrunk) release APK with the stripped .so, but signed
+# with the DEBUG keystore (-PdebugSignRelease). Because it's debug-signed with the
+# same applicationId, it installs straight over a `make android` debug build with
+# no signature-mismatch reinstall — so you can test the shrunk build (and verify
+# the R8 keep rules don't break the UniFFI/JNA native boundary at runtime) without
+# losing app data/login. NOT for distribution — use `make android-release` for that.
+# Output: dist/avalanche-minify-test.apk
+android-minify-test: android-bindings
+	cd mobile/android && JAVA_HOME="$(ANDROID_JAVA_HOME)" ANDROID_HOME="$(ANDROID_HOME)" ./gradlew assembleRelease \
+		-PdebugSignRelease \
+		-PMARKETING_VERSION=$(MARKETING_VERSION) \
+		-PCURRENT_PROJECT_VERSION=$(CURRENT_PROJECT_VERSION)
+	@mkdir -p dist
+	@cp $(ANDROID_RELEASE_APK) dist/avalanche-minify-test.apk
+	@ls -lh dist/avalanche-minify-test.apk
+	@echo "Debug-signed minified APK — installs over your debug build: dist/avalanche-minify-test.apk"
 
 android-bindings: $(KOTLIN_BINDING) $(ANDROID_SO_STAMP)
 

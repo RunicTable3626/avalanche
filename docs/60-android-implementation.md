@@ -5,9 +5,8 @@ apps and the remaining gaps. See `mobile/CLAUDE.md` for the parity rule and work
 
 **Status legend:** `[x]` implemented · `[~]` partial / stubbed · `[ ]` not started
 
-The app is essentially at file-for-file parity with iOS. The one missing source
-file is the passkey ceremony (`PasskeyManager`); the remaining gaps are listed
-under [Known gaps](#known-gaps).
+The app is at file-for-file parity with iOS. The remaining gaps are listed under
+[Known gaps](#known-gaps).
 
 ---
 
@@ -103,7 +102,7 @@ mobile/android/app/src/main/kotlin/
 | `MockActnetService.swift` | `MockActnetService.kt` | `[x]` (cannot fabricate `PreparedAccount` — see gaps) |
 | `DevServerActnetService.swift` | `DevServerActnetService.kt` | `[x]` |
 | `PublicServerInfo.swift` | `PublicServerInfo.kt` | `[x]` |
-| `PasskeyManager.swift` | — (Credential Manager) | `[ ]` **missing** |
+| `PasskeyManager.swift` | `PasskeyManager.kt` (Credential Manager + WebAuthn PRF) | `[x]` (asset-links live; see Passkeys notes) |
 | UniFFI `AppCore` / `AppCoreProtocol` | UniFFI-generated `AppCore` (`Generated/`, via JNA) | `[x]` |
 
 ### Onboarding
@@ -116,9 +115,9 @@ mobile/android/app/src/main/kotlin/
 | `IdentityPickerView.swift` | `IdentityPickerView.kt` | `[x]` |
 | `JoiningServerView.swift` | `JoiningServerView.kt` | `[x]` (existing-account join path is functional) |
 | `NewAccountView.swift` | `NewAccountView.kt` | `[x]` (avatar photo picker stubbed) |
-| `PasskeyExplainerView.swift` | `PasskeyExplainerView.kt` | `[~]` UI done; passkey ceremony stubbed |
-| `RecoveryExplainerView.swift` | `RecoveryExplainerView.kt` | `[~]` UI done; Credential Manager call stubbed |
-| `RecoveryConsoleView.swift` | `RecoveryConsoleView.kt` | `[~]` passkey-with-DID path only; PLC homeserver resolution stubbed |
+| `PasskeyExplainerView.swift` | `PasskeyExplainerView.kt` | `[x]` passkey ceremony wired via Credential Manager |
+| `RecoveryExplainerView.swift` | `RecoveryExplainerView.kt` | `[x]` passkey + phrase recovery wired |
+| `RecoveryConsoleView.swift` | `RecoveryConsoleView.kt` | `[x]` PLC homeserver resolution wired via `resolveHomeserverFromPlc` FFI |
 | `RecoveryPhraseSetupView.swift` | `RecoveryPhraseSetupView.kt` | `[x]` |
 | `LinkNewDeviceView.swift` | `LinkNewDeviceView.kt` | `[x]` device linking, new-device side (docs/04 §4) |
 
@@ -219,25 +218,39 @@ mobile/android/app/src/main/kotlin/
 
 Highest-impact first:
 
-1. **Passkey ceremony (Credential Manager).** No `PasskeyManager` equivalent.
-   `PasskeyExplainerView` / `RecoveryExplainerView` stub the `androidx.credentials`
-   create/get with the PRF extension. This **dead-ends the new-account onboarding
-   path** (nav is wired through to the passkey step, but "Create Passkey" does
-   nothing) and blocks passkey-based recovery.
-2. **PLC homeserver resolution.** `resolveHomeserverFromPlc(did)` in
-   `RecoveryConsoleView` is stubbed, so phrase-based recovery can't find a DID's
-   homeserver. Passkey recovery (DID embedded) is the only path, and it needs #1.
-3. **`hasRecoveryKey` banner check.** Hardcoded `false` in `ChatsView`; needs a new
+1. **`hasRecoveryKey` banner check.** Hardcoded `false` in `ChatsView`; needs a new
    Rust FFI method (full cross-platform cycle).
-4. **Avatar photo picker.** `NewAccountView` has a stub where iOS lets the user pick
+2. **Avatar photo picker.** `NewAccountView` has a stub where iOS lets the user pick
    an avatar image. Avatars display fine; selection is missing.
-5. **Push: runtime-untested + no cold-process sync.** FCM is wired but never
+3. **Push: runtime-untested + no cold-process sync.** FCM is wired but never
    exercised on a device. A wakeup delivered to a killed process defers to the next
    app launch rather than syncing headlessly (`onMessageReceived` only drains when
    an `AppViewModel` is live).
-6. **Mock `PreparedAccount`.** The mock service can't fabricate a `PreparedAccount`
+4. **Mock `PreparedAccount`.** The mock service can't fabricate a `PreparedAccount`
    (UniFFI native-pointer object), so two-stage-creation previews/tests can't use
    the mock; they need the live service.
+
+### Passkeys (resolved) — operational notes
+
+Passkey create + recover work end-to-end on-device (`PasskeyManager.kt`, Credential
+Manager + WebAuthn PRF, wired into `PasskeyExplainerView` / `RecoveryExplainerView`).
+The Digital Asset Links file is live at
+`https://theavalanche.net/.well-known/assetlinks.json` (source:
+`web/static/.well-known/assetlinks.json`), declaring both
+`delegate_permission/common.get_login_creds` (passkeys) and
+`delegate_permission/common.handle_all_urls`, with the app's signing SHA-256
+fingerprints. This is the Android analog of iOS Associated Domains
+`webcredentials:theavalanche.net`. Two things to keep in mind:
+
+- **Cloudflare must not cache `/.well-known/*`.** A stale/negative edge-cached
+  copy of `assetlinks.json` makes GMS fail RP-ID validation (`50152 RP ID cannot
+  be validated`) even when the origin is correct. Purge on change, and prefer a
+  Cache Rule that bypasses cache for `theavalanche.net/.well-known/*` (also
+  protects the iOS AASA file). GMS also caches validation results, so a device
+  that failed once may need its cache/re-auth cleared.
+- **Degoogled devices:** the `play-services-auth` provider needs Google Play
+  Services; without it a framework credential provider (e.g. 1Password) that
+  supports the PRF extension is required.
 
 ## Build status
 

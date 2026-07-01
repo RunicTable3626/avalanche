@@ -5,12 +5,12 @@ description: "Download and install the Avalanche Android app directly."
 
 Avalanche isn't on the Google Play Store yet, so on Android you install it directly — this is called "side-loading."
 
-<p><a class="btn btn-primary" href="https://github.com/lincolnq/avalanche/releases/download/v0.3.1/app-release.apk" rel="noopener">Download APK (v0.3.1)</a></p>
+<p><a class="btn btn-primary" href="https://github.com/lincolnq/avalanche/releases/download/v0.3.2/avalanche-release.apk" rel="noopener">Download APK (v0.3.2)</a></p>
 
 ## Install it
 
 1. Tap the download link above **on your Android device**.
-2. Open the downloaded `app-release.apk` file.
+2. Open the downloaded `avalanche-release.apk` file.
 3. Android will warn that it's from an unknown source — when prompted, allow installs from your browser or files app.
 4. Tap **Install**, then open Avalanche.
 

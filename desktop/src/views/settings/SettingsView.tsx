@@ -1,6 +1,6 @@
-import { createSignal, Match, Show, Switch } from "solid-js";
+import { createSignal, For, Match, Show, Switch } from "solid-js";
 import { useNavigate } from "@solidjs/router";
-import { FiArrowLeft, FiUser, FiUsers, FiSlash, FiSmartphone, FiTool, FiChevronRight } from "solid-icons/fi";
+import { FiArrowLeft, FiUser, FiUsers, FiSlash, FiTool, FiChevronRight } from "solid-icons/fi";
 import { useApp } from "../../state/AppContext";
 import AccountAvatar from "../../components/AccountAvatar";
 import AccountsView from "./AccountsView";
@@ -17,7 +17,7 @@ type Screen =
   | { name: "accounts" }
   | { name: "identity"; account: Account }
   | { name: "server"; account: Account; server: ServerInfo }
-  | { name: "linkDevice" }
+  | { name: "linkDevice"; account: Account }
   | { name: "dev" };
 
 /**
@@ -37,12 +37,14 @@ export default function SettingsView() {
   const push = (s: Screen) => setStack((prev) => [...prev, s]);
   const pop = () => setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
 
-  const soleAccount = () => store.accounts[0] as Account | undefined;
+  const accounts = () => store.accounts as Account[];
 
   const identityScreen = () =>
     current().name === "identity" ? (current() as Extract<Screen, { name: "identity" }>) : null;
   const serverScreen = () =>
     current().name === "server" ? (current() as Extract<Screen, { name: "server" }>) : null;
+  const linkDeviceScreen = () =>
+    current().name === "linkDevice" ? (current() as Extract<Screen, { name: "linkDevice" }>) : null;
 
   return (
     <Switch>
@@ -56,28 +58,26 @@ export default function SettingsView() {
           </header>
 
           <div class="settings-hub-body scrollbar-thin">
-            <Show when={soleAccount()}>
+            {/* One profile row per signed-in identity (shared-inbox model — no
+                single "active" account). Each opens its identity detail, where
+                Link a device / Leave / Delete live, per-account. */}
+            <For each={accounts()}>
               {(account) => (
-                <button class="settings-profile-row" onClick={() => push({ name: "identity", account: account() })}>
-                  <AccountAvatar name={account().displayName} did={account().id} />
+                <button class="settings-profile-row" onClick={() => push({ name: "identity", account })}>
+                  <AccountAvatar name={account.displayName} did={account.id} />
                   <div class="settings-profile-info">
-                    <span class="settings-profile-name">{account().displayName}</span>
+                    <span class="settings-profile-name">{account.displayName}</span>
                     <span class="settings-profile-sub">View profile &amp; identity</span>
                   </div>
                   <FiChevronRight size={18} class="settings-row-chevron" />
                 </button>
               )}
-            </Show>
+            </For>
 
             <div class="settings-group">
               <button class="settings-row" onClick={() => push({ name: "accounts" })}>
                 <FiUsers size={18} /><span>Accounts</span><FiChevronRight size={16} class="settings-row-chevron" />
               </button>
-              <Show when={soleAccount()}>
-                <button class="settings-row" onClick={() => push({ name: "linkDevice" })}>
-                  <FiSmartphone size={18} /><span>Link a device</span><FiChevronRight size={16} class="settings-row-chevron" />
-                </button>
-              </Show>
               <button class="settings-row" onClick={() => setShowBlocked(true)}>
                 <FiSlash size={18} /><span>Blocked Contacts</span><FiChevronRight size={16} class="settings-row-chevron" />
               </button>
@@ -86,7 +86,7 @@ export default function SettingsView() {
               </button>
             </div>
 
-            <Show when={!soleAccount()}>
+            <Show when={accounts().length === 0}>
               <p class="settings-empty"><FiUser size={14} /> No account signed in.</p>
             </Show>
           </div>
@@ -106,15 +106,21 @@ export default function SettingsView() {
       </Match>
 
       <Match when={identityScreen()}>
-        {(s) => <IdentityDetailView account={s().account} onBack={pop} />}
+        {(s) => (
+          <IdentityDetailView
+            account={s().account}
+            onBack={pop}
+            onLinkDevice={() => push({ name: "linkDevice", account: s().account })}
+          />
+        )}
       </Match>
 
       <Match when={serverScreen()}>
         {(s) => <ServerDetailView account={s().account} server={s().server} onBack={pop} />}
       </Match>
 
-      <Match when={current().name === "linkDevice"}>
-        <LinkDeviceView onBack={pop} />
+      <Match when={linkDeviceScreen()}>
+        {(s) => <LinkDeviceView accountId={s().account.id} onBack={pop} />}
       </Match>
 
       <Match when={current().name === "dev"}>

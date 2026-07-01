@@ -6,6 +6,8 @@ import "./LinkPreviewCard.css";
 
 interface Props {
   preview: LinkPreviewFfi;
+  // The owning conversation's account — the og:image decrypts with its keys.
+  accountId: string;
   /** Compose-staging variant shows a dismiss (×) affordance via `onDismiss`. */
   onDismiss?: () => void;
 }
@@ -29,7 +31,7 @@ export default function LinkPreviewCard(props: Props) {
     const image = props.preview.image;
     if (image) {
       void app
-        .downloadAttachment(image)
+        .downloadAttachment(props.accountId, image)
         .then((bytes) => {
           if (bytes.length === 0) return;
           const url = URL.createObjectURL(

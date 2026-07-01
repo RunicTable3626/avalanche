@@ -13,6 +13,7 @@ export enum ServiceMode {
 export type {
   AccountInfoFfi,
   AccountResult,
+  AttachmentFfi,
   ConnectionState,
   ContactRowFfi,
   ConversationSummaryFfi,
@@ -27,6 +28,8 @@ export type {
   IncomingEvent,
   InviteInfo,
   JoinResultFfi,
+  LinkPreviewFfi,
+  LinkPreviewMetaFfi,
   MessageRevisionFfi,
   MessageTarget,
   ProjectInfoFfi,
@@ -64,9 +67,30 @@ export interface AvalancheService {
     displayName: string
   ): Promise<import("../bindings").AccountResult>;
 
+  // Device linking (T71). New-device side (account-less) drives
+  // create/accept → poll deviceLinkAwaitStep until it returns the account;
+  // existing-device side drives create/accept → poll linkSendBundleStep.
+  deviceLinkCreatePairing(mailboxServer: string | null): Promise<string>;
+  deviceLinkAcceptPairing(code: string): Promise<void>;
+  deviceLinkAwaitStep(
+    dbPath: string,
+    dbKey: string
+  ): Promise<import("../bindings").AccountResult | null>;
+  deviceLinkReset(): Promise<void>;
+  linkCreatePairing(mailboxServer: string | null): Promise<string>;
+  linkAcceptPairing(code: string): Promise<void>;
+  linkSendBundleStep(): Promise<boolean>;
+
   // Core messaging
   sendDm(recipientDid: string, plaintext: number[], sentAtMs: number): Promise<void>;
   sendGroupMessage(groupId: string, plaintext: number[], sentAtMs: number): Promise<void>;
+  sendMessageWithAttachments(
+    target: import("../bindings").MessageTarget,
+    body: string,
+    attachments: import("../bindings").AttachmentFfi[],
+    previews: import("../bindings").LinkPreviewFfi[],
+    sentAtMs: number
+  ): Promise<void>;
   nextEvents(): Promise<import("../bindings").IncomingEvent[]>;
   saveMessage(msg: import("../bindings").StoredMessageFfi): Promise<void>;
   loadConversations(): Promise<import("../bindings").ConversationSummaryFfi[]>;
@@ -88,6 +112,8 @@ export interface AvalancheService {
   recoveryPhraseToSeed(phrase: string): Promise<number[]>;
   deriveDidFromPasskey(prfOutput: number[], signupServerUrl: string): Promise<string>;
   contactDisplayName(did: string): Promise<string>;
+  // Batch local-only name resolution to warm the cache on load (T78).
+  cachedDisplayNames(dids: string[]): Promise<Record<string, string>>;
   getAccountInfo(did: string): Promise<import("../bindings").AccountInfoFfi>;
   refreshContactProfile(did: string): Promise<boolean>;
   listContacts(): Promise<import("../bindings").ContactRowFfi[]>;
@@ -124,6 +150,10 @@ export interface AvalancheService {
   // Connection state
   connectionState(): Promise<import("../bindings").ConnectionState>;
   waitForConnectionStateChange(last: import("../bindings").ConnectionState): Promise<import("../bindings").ConnectionState>;
+  // Foreground gating: window focus → keepalive + opportunistic reconnect (T77).
+  setAppActive(active: boolean): Promise<void>;
+  // Manual "Reconnect now" — wake the reconnect loop / probe the socket (T72).
+  reconnectNow(): Promise<void>;
 
   // Groups
   createGroup(title: string, description: string, expirySeconds: number): Promise<import("../bindings").CreatedGroupFfi>;
@@ -174,4 +204,19 @@ export interface AvalancheService {
   ): Promise<void>;
   loadReactions(conversationId: string): Promise<import("../bindings").ReactionFfi[]>;
   loadMessageRevisions(conversationId: string, author: string, sentAtMs: number): Promise<import("../bindings").MessageRevisionFfi[]>;
+
+  // Attachments / link previews / external links
+  uploadAttachment(
+    plaintext: number[],
+    contentType: string,
+    fileName: string | null,
+    width: number,
+    height: number,
+    durationMs: number,
+    thumbnail: number[],
+    flags: number
+  ): Promise<import("../bindings").AttachmentFfi>;
+  downloadAttachment(attachment: import("../bindings").AttachmentFfi): Promise<number[]>;
+  openExternal(url: string): Promise<void>;
+  fetchLinkPreview(url: string): Promise<import("../bindings").LinkPreviewMetaFfi>;
 }

@@ -3,13 +3,31 @@ import { disappearingLabel } from "../components/DisappearingMessagesPicker";
 // Structured metadata app-core stores on a group system row (groups.rs
 // persist_group_event). `event` is the kind_code integer, which also equals the
 // message's `kind` field.
-interface GroupEventMeta {
+export interface GroupEventMeta {
   event: number;
   actor_did: string;
   target_did: string;
   target_emi: string;
   expiry_seconds: number;
   new_title: string;
+}
+
+/**
+ * Parse the JSON metadata stored on a group system row into `GroupEventMeta`,
+ * or `null` if absent/unparseable. The single source of truth for this shape —
+ * both the timeline/preview renderer (`groupEventText`) and the display-name
+ * warm pass (`AppContext.displayNameDidsToWarm`) read it through here so the
+ * field names stay defined once.
+ */
+export function parseGroupEventMeta(
+  metadata: string | undefined
+): GroupEventMeta | null {
+  if (!metadata) return null;
+  try {
+    return JSON.parse(metadata) as GroupEventMeta;
+  } catch {
+    return null;
+  }
 }
 
 function eventName(
@@ -38,13 +56,8 @@ export function groupEventText(
   accountId: string,
   resolveName: (did: string) => string
 ): string {
-  if (!metadata) return fallbackBody;
-  let m: GroupEventMeta;
-  try {
-    m = JSON.parse(metadata) as GroupEventMeta;
-  } catch {
-    return fallbackBody;
-  }
+  const m = parseGroupEventMeta(metadata);
+  if (!m) return fallbackBody;
   const actor = eventName(m.actor_did, accountId, resolveName, true);
   const target = eventName(m.target_did, accountId, resolveName, false);
   switch (m.event) {

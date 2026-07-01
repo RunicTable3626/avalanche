@@ -16,6 +16,10 @@ import type {
   InviteInfo,
   JoinResultFfi,
   DeliveryStatusUpdate,
+  AttachmentFfi,
+  LinkPreviewFfi,
+  LinkPreviewMetaFfi,
+  MessageTarget,
 } from "./AvalancheService";
 
 const MOCK_SERVER_URL = "https://mock.avalancheapp.net";
@@ -348,6 +352,40 @@ export class MockAvalancheService implements AvalancheService {
     return { did, displayName };
   }
 
+  // ── Device linking (T71) — no real handshake in mock mode; these stubs let
+  // the linking UI be walked end-to-end. The new-device poll completes on the
+  // first step (returns a fresh mock account); the existing-device poll reports
+  // done immediately.
+
+  async deviceLinkCreatePairing(_mailboxServer: string | null): Promise<string> {
+    return "av1.mock-pairing-code";
+  }
+
+  async deviceLinkAcceptPairing(_code: string): Promise<void> {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  async deviceLinkAwaitStep(_dbPath: string, _dbKey: string): Promise<AccountResult | null> {
+    await new Promise((r) => setTimeout(r, 800));
+    this.mockDid = makeMockDid();
+    return { did: this.mockDid, displayName: "Linked Device" };
+  }
+
+  async deviceLinkReset(): Promise<void> {}
+
+  async linkCreatePairing(_mailboxServer: string | null): Promise<string> {
+    return "av1.mock-pairing-code";
+  }
+
+  async linkAcceptPairing(_code: string): Promise<void> {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  async linkSendBundleStep(): Promise<boolean> {
+    await new Promise((r) => setTimeout(r, 800));
+    return true;
+  }
+
   async sendDm(recipientDid: string, plaintext: number[], sentAtMs: number): Promise<void> {
     await new Promise((r) => setTimeout(r, 100));
     void sentAtMs;
@@ -445,6 +483,14 @@ export class MockAvalancheService implements AvalancheService {
     if (did === "did:plc:organizer") return "Jamie (Organizer)";
     return "";
   }
+  async cachedDisplayNames(dids: string[]): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    for (const did of dids) {
+      const name = await this.contactDisplayName(did);
+      if (name) out[did] = name;
+    }
+    return out;
+  }
   async getAccountInfo(did: string): Promise<AccountInfoFfi> {
     return { did, displayName: null, isBot: false };
   }
@@ -509,6 +555,14 @@ export class MockAvalancheService implements AvalancheService {
   ): Promise<ConnectionState> {
     // Never changes in mock mode — park forever.
     return new Promise(() => {});
+  }
+
+  async setAppActive(_active: boolean): Promise<void> {
+    // No connection to gate in mock mode.
+  }
+
+  async reconnectNow(): Promise<void> {
+    // No connection to reconnect in mock mode.
   }
 
   async createGroup(
@@ -607,5 +661,93 @@ export class MockAvalancheService implements AvalancheService {
     _sentAtMs: number
   ): Promise<MessageRevisionFfi[]> {
     return [];
+  }
+
+  // ── Attachments / link previews / external links ───────────────────
+
+  async sendMessageWithAttachments(
+    target: MessageTarget,
+    body: string,
+    attachments: AttachmentFfi[],
+    previews: LinkPreviewFfi[],
+    _sentAtMs: number
+  ): Promise<void> {
+    await new Promise((r) => setTimeout(r, 100));
+    const plaintext = Array.from(new TextEncoder().encode(body));
+    const isDm = target.type === "dm";
+    const convId = isDm
+      ? `dm-${this.mockDid}-${target.recipient_did}`
+      : `group-${target.group_id}`;
+    const senderDid = isDm ? target.recipient_did : "did:plc:organizer";
+    const groupId = isDm ? null : target.group_id;
+    void convId;
+    setTimeout(() => {
+      this.pushEvent({
+        type: "message",
+        msg: {
+          serverId: 0,
+          senderDid,
+          senderDeviceId: 1,
+          plaintext,
+          sentAtMs: Date.now(),
+          groupId,
+          expireTimerSecs: 0,
+          profileKey: null,
+          isRequest: false,
+          attachments,
+          previews,
+        },
+      });
+    }, 1000);
+  }
+
+  async uploadAttachment(
+    plaintext: number[],
+    contentType: string,
+    fileName: string | null,
+    width: number,
+    height: number,
+    durationMs: number,
+    thumbnail: number[],
+    flags: number
+  ): Promise<AttachmentFfi> {
+    await new Promise((r) => setTimeout(r, 100));
+    return {
+      id: `mock-att-${Math.random().toString(36).slice(2, 10)}`,
+      url: `${MOCK_SERVER_URL}/attachment`,
+      contentType,
+      key: [],
+      digest: [],
+      sizeBytes: plaintext.length,
+      fileName,
+      width,
+      height,
+      durationMs,
+      blurhash: null,
+      thumbnail,
+      caption: null,
+      flags,
+      localPath: null,
+      downloadedAtMs: null,
+    };
+  }
+
+  async downloadAttachment(attachment: AttachmentFfi): Promise<number[]> {
+    // Mock has no blob store; hand back the inline thumbnail bytes so the UI
+    // can still render the staged/echoed image.
+    return attachment.thumbnail;
+  }
+
+  async openExternal(_url: string): Promise<void> {}
+
+  async fetchLinkPreview(url: string): Promise<LinkPreviewMetaFfi> {
+    return {
+      url,
+      title: "Mock Preview",
+      description: "A mock link preview for offline development.",
+      dateMs: 0,
+      imageBytes: [],
+      imageContentType: null,
+    };
   }
 }

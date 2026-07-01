@@ -56,6 +56,13 @@ export const commands = {
 	 */
 	deriveDidFromPasskey: (prfOutput: number[], signupServerUrl: string) => typedError<string, string>(__TAURI_INVOKE("derive_did_from_passkey", { prfOutput, signupServerUrl })),
 	contactDisplayName: (did: string) => typedError<string, string>(__TAURI_INVOKE("contact_display_name", { did })),
+	/**
+	 *  Batch-resolve display names from local storage only (no network) for a set
+	 *  of DIDs — used to warm the name cache on conversation load so chat-list rows
+	 *  render real names immediately instead of flashing raw DIDs (T78). Returns
+	 *  only DIDs with a non-empty cached name.
+	 */
+	cachedDisplayNames: (dids: string[]) => typedError<{ [key in string]: string }, string>(__TAURI_INVOKE("cached_display_names", { dids })),
 	getAccountInfo: (did: string) => typedError<AccountInfoFfi, string>(__TAURI_INVOKE("get_account_info", { did })),
 	refreshContactProfile: (did: string) => typedError<boolean, string>(__TAURI_INVOKE("refresh_contact_profile", { did })),
 	listContacts: () => typedError<ContactRowFfi[], string>(__TAURI_INVOKE("list_contacts")),
@@ -140,6 +147,95 @@ export const commands = {
 	getConversationTimer: (conversationId: string) => typedError<number | null, string>(__TAURI_INVOKE("get_conversation_timer", { conversationId })),
 	setConversationTimer: (recipientDid: string, expirySecs: number | null) => typedError<null, string>(__TAURI_INVOKE("set_conversation_timer", { recipientDid, expirySecs })),
 	deleteExpiredMessages: () => typedError<string[], string>(__TAURI_INVOKE("delete_expired_messages")),
+	/**
+	 *  Encrypt and upload an attachment blob, returning the pointer to send. Async +
+	 *  `spawn_blocking` because the upload does network I/O (mirrors `next_events`'s
+	 *  off-thread pattern so the WebView never freezes).
+	 */
+	uploadAttachment: (plaintext: number[], contentType: string, fileName: string | null, width: number, height: number, durationMs: number, thumbnail: number[], flags: number) => typedError<AttachmentFfi, string>(__TAURI_INVOKE("upload_attachment", { plaintext, contentType, fileName, width, height, durationMs, thumbnail, flags })),
+	/**
+	 *  Download, verify, and decrypt an attachment blob; returns the plaintext bytes.
+	 *  Caches the decrypted blob on disk and records the path via app-core's
+	 *  `set_attachment_downloaded`, so re-opening a transcript (or restarting) reads
+	 *  from disk instead of re-fetching + re-decrypting (mirrors iOS). Async +
+	 *  `spawn_blocking` (network + filesystem I/O).
+	 */
+	downloadAttachment: (attachment: AttachmentFfi) => typedError<number[], string>(__TAURI_INVOKE("download_attachment", { attachment })),
+	/**
+	 *  Send a message carrying attachments and/or link previews to a DM or group.
+	 *  One path for both targets (the `MessageTarget` fork lives in app-core). Async
+	 *  + `spawn_blocking` (network I/O).
+	 */
+	sendMessageWithAttachments: (target: MessageTarget, body: string, attachments: AttachmentFfi[], previews: LinkPreviewFfi[], sentAtMs: number) => typedError<null, string>(__TAURI_INVOKE("send_message_with_attachments", { target, body, attachments, previews, sentAtMs })),
+	/**
+	 *  Open a validated http(s) URL in the OS default browser. The WebView must never
+	 *  navigate to message URLs in-app (A2); link clicks and link-preview card taps
+	 *  route here. Non-web schemes are rejected.
+	 */
+	openExternal: (url: string) => typedError<null, string>(__TAURI_INVOKE("open_external", { url })),
+	/**
+	 *  Fetch a URL and scrape its OG/meta tags + og:image bytes (A4). Lives in Rust
+	 *  because the WebView's CSP forbids external fetches (`connect-src ipc:`).
+	 *  Size-capped, timed out, and http(s)-only. Returns a text-only card when no
+	 *  image is found or the image fetch fails — never errors on a missing image.
+	 */
+	fetchLinkPreview: (url: string) => typedError<LinkPreviewMetaFfi, string>(__TAURI_INVOKE("fetch_link_preview", { url })),
+	/**
+	 *  New device: generate this device's pairing code (show mode). Creates the
+	 *  handshake handle and stores it for the subsequent `device_link_await_step`.
+	 */
+	deviceLinkCreatePairing: (mailboxServer: string | null) => typedError<string, string>(__TAURI_INVOKE("device_link_create_pairing", { mailboxServer })),
+	/**
+	 *  New device: accept (paste) the existing device's pairing code (scan mode).
+	 *  Stores the handshake handle for the subsequent `device_link_await_step`.
+	 */
+	deviceLinkAcceptPairing: (code: string) => typedError<null, string>(__TAURI_INVOKE("device_link_accept_pairing", { code })),
+	/**
+	 *  New device: one non-blocking step toward completing the link. Returns the
+	 *  linked account (and installs it as the active account in `AppState`) once the
+	 *  bundle has arrived; `None` while still waiting. Requires a prior
+	 *  `device_link_create_pairing` / `device_link_accept_pairing`.
+	 */
+	deviceLinkAwaitStep: (dbPath: string, dbKey: string) => typedError<{
+	did: string,
+	displayName: string,
+} | null, string>(__TAURI_INVOKE("device_link_await_step", { dbPath, dbKey })),
+	/**  New device: abandon an in-progress pairing (cancel / view teardown). */
+	deviceLinkReset: () => typedError<null, string>(__TAURI_INVOKE("device_link_reset")),
+	/**
+	 *  Existing device: generate this device's pairing code for a new device to
+	 *  enter (show mode). Follow with `link_send_bundle_step` polling.
+	 */
+	linkCreatePairing: (mailboxServer: string | null) => typedError<string, string>(__TAURI_INVOKE("link_create_pairing", { mailboxServer })),
+	/**
+	 *  Existing device: accept (paste) the new device's pairing code (scan mode).
+	 *  Follow with `link_send_bundle_step` polling.
+	 */
+	linkAcceptPairing: (code: string) => typedError<null, string>(__TAURI_INVOKE("link_accept_pairing", { code })),
+	/**
+	 *  Existing device: one non-blocking step of sealing + sending the provisioning
+	 *  bundle. Returns true when done; the TS layer polls this.
+	 */
+	linkSendBundleStep: () => typedError<boolean, string>(__TAURI_INVOKE("link_send_bundle_step")),
+	/**
+	 *  Tell the core whether the desktop window is foreground-active (focused).
+	 *  Gates the WS keepalive (foreground-only) and, on a transition to active,
+	 *  triggers an opportunistic reconnect + liveness probe so a socket that died
+	 *  while the window was hidden/blurred recovers promptly — the reconnect path
+	 *  resyncs durable storage via the core connection loop (no separate
+	 *  `sync_storage` call needed, matching iOS, which only drives `setAppActive`
+	 *  from `scenePhase`). Sync + infallible. No-op before sign-in (no core yet):
+	 *  focus events can fire on the onboarding screens, where there's nothing to
+	 *  gate.
+	 */
+	setAppActive: (active: boolean) => typedError<null, string>(__TAURI_INVOKE("set_app_active", { active })),
+	/**
+	 *  Opportunistically retry/validate connectivity now (the "Reconnect now"
+	 *  action on the offline banner — T72). Wakes the reconnect loop if it's backing
+	 *  off and probes an open socket's liveness. Sync, infallible, cheap. No-op
+	 *  before sign-in.
+	 */
+	reconnectNow: () => typedError<null, string>(__TAURI_INVOKE("reconnect_now")),
 };
 
 /* Types */
@@ -578,6 +674,22 @@ export type LinkPreviewFfi = {
 	/**  Article published date, unix millis; 0 = unknown. */
 	dateMs: number,
 	image: AttachmentFfi | null,
+};
+
+/**
+ *  Raw OG/meta scrape for a URL (A4). Desktop-specific (not in app-core) — the
+ *  frontend turns the og:image bytes into an encrypted `AttachmentFfi` via
+ *  `upload_attachment`, then assembles a `LinkPreviewFfi` for the send path
+ *  (mirrors iOS `AppState.fetchLinkPreview`). `image_bytes` is empty for a
+ *  text-only card.
+ */
+export type LinkPreviewMetaFfi = {
+	url: string,
+	title: string,
+	description: string,
+	dateMs: number,
+	imageBytes: number[],
+	imageContentType: string | null,
 };
 
 /**  A prior body of an edited message, for the edit-history sheet. */

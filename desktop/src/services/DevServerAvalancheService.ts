@@ -56,6 +56,36 @@ export class DevServerAvalancheService implements AvalancheService {
     return ok(commands.recoverFromPhrase(phrase, serverUrl, did, dbPath, dbKey, displayName));
   }
 
+  // ── Device linking (T71) ───────────────────────────────────────────
+
+  async deviceLinkCreatePairing(mailboxServer: string | null): Promise<string> {
+    return ok(commands.deviceLinkCreatePairing(mailboxServer));
+  }
+
+  async deviceLinkAcceptPairing(code: string): Promise<void> {
+    await ok(commands.deviceLinkAcceptPairing(code));
+  }
+
+  async deviceLinkAwaitStep(dbPath: string, dbKey: string): Promise<AccountResult | null> {
+    return ok(commands.deviceLinkAwaitStep(dbPath, dbKey));
+  }
+
+  async deviceLinkReset(): Promise<void> {
+    await ok(commands.deviceLinkReset());
+  }
+
+  async linkCreatePairing(mailboxServer: string | null): Promise<string> {
+    return ok(commands.linkCreatePairing(mailboxServer));
+  }
+
+  async linkAcceptPairing(code: string): Promise<void> {
+    await ok(commands.linkAcceptPairing(code));
+  }
+
+  async linkSendBundleStep(): Promise<boolean> {
+    return ok(commands.linkSendBundleStep());
+  }
+
   // ── Core messaging ─────────────────────────────────────────────────
 
   async sendDm(recipientDid: string, plaintext: number[], sentAtMs: number): Promise<void> {
@@ -142,6 +172,10 @@ export class DevServerAvalancheService implements AvalancheService {
 
   async contactDisplayName(did: string): Promise<string> {
     return ok(commands.contactDisplayName(did));
+  }
+
+  async cachedDisplayNames(dids: string[]): Promise<Record<string, string>> {
+    return ok(commands.cachedDisplayNames(dids));
   }
 
   async getAccountInfo(did: string): Promise<import("../bindings").AccountInfoFfi> {
@@ -250,6 +284,14 @@ export class DevServerAvalancheService implements AvalancheService {
 
   async waitForConnectionStateChange(last: ConnectionState): Promise<ConnectionState> {
     return ok(commands.waitForConnectionStateChange(last));
+  }
+
+  async setAppActive(active: boolean): Promise<void> {
+    await ok(commands.setAppActive(active));
+  }
+
+  async reconnectNow(): Promise<void> {
+    await ok(commands.reconnectNow());
   }
 
   // ── Groups ─────────────────────────────────────────────────────────
@@ -372,5 +414,44 @@ export class DevServerAvalancheService implements AvalancheService {
 
   async loadMessageRevisions(conversationId: string, author: string, sentAtMs: number): Promise<import("../bindings").MessageRevisionFfi[]> {
     return ok(commands.loadMessageRevisions(conversationId, author, sentAtMs));
+  }
+
+  // ── Attachments / link previews / external links ───────────────────
+
+  async uploadAttachment(
+    plaintext: number[],
+    contentType: string,
+    fileName: string | null,
+    width: number,
+    height: number,
+    durationMs: number,
+    thumbnail: number[],
+    flags: number,
+  ): Promise<import("../bindings").AttachmentFfi> {
+    return ok(
+      commands.uploadAttachment(plaintext, contentType, fileName, width, height, durationMs, thumbnail, flags),
+    );
+  }
+
+  async downloadAttachment(attachment: import("../bindings").AttachmentFfi): Promise<number[]> {
+    return ok(commands.downloadAttachment(attachment));
+  }
+
+  async sendMessageWithAttachments(
+    target: import("../bindings").MessageTarget,
+    body: string,
+    attachments: import("../bindings").AttachmentFfi[],
+    previews: import("../bindings").LinkPreviewFfi[],
+    sentAtMs: number,
+  ): Promise<void> {
+    await ok(commands.sendMessageWithAttachments(target, body, attachments, previews, sentAtMs));
+  }
+
+  async openExternal(url: string): Promise<void> {
+    await ok(commands.openExternal(url));
+  }
+
+  async fetchLinkPreview(url: string): Promise<import("../bindings").LinkPreviewMetaFfi> {
+    return ok(commands.fetchLinkPreview(url));
   }
 }

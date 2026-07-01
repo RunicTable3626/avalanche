@@ -29,14 +29,44 @@
   white-space: pre-wrap;
 }
 .mine .bubble {
-  background: var(--color-sidebar);
-  color: var(--color-bg);
+  background: var(--color-bubble-out);
+  color: var(--color-bubble-out-text);
   border-bottom-right-radius: 4px;
 }
 .theirs .bubble {
-  background: rgba(107, 62, 80, 0.12);
+  background: var(--color-bubble-in);
   color: var(--color-text);
   border-bottom-left-radius: 4px;
+}
+
+/* Clickable links inside a bubble. Inherit the bubble's text color so links
+   stay legible on both the plum (mine) and sand (theirs) backgrounds. */
+.bubble-link {
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* Attachment thumbnails / file chips stacked above the text bubble. */
+.attachment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.mine .attachment-list {
+  align-items: flex-end;
+}
+
+/* Link-preview cards rendered below the text bubble. */
+.preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.mine .preview-list {
+  align-items: flex-end;
 }
 
 .deleted-tombstone {

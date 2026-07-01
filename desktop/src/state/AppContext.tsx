@@ -16,9 +16,10 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import type { Account, Conversation, InviteInfo, ServerInfo } from "../models";
-import { displayHost } from "../lib/format";
+import { displayHost, attachmentPlaceholder } from "../lib/format";
+import { parseGroupEventMeta } from "../lib/groupEvents";
 import { DeliveryStatus, type Message } from "../models/Message";
-import { ServiceMode, type AvalancheService, type ConnectionState, type StoredMessageFfi, type ConversationSummaryFfi, type IncomingEvent, type ReactionFfi, type MessageRevisionFfi, type MessageTarget, type JoinResultFfi, type ContactRowFfi } from "../services/AvalancheService";
+import { ServiceMode, type AvalancheService, type ConnectionState, type StoredMessageFfi, type ConversationSummaryFfi, type IncomingEvent, type ReactionFfi, type MessageRevisionFfi, type MessageTarget, type JoinResultFfi, type ContactRowFfi, type AttachmentFfi, type LinkPreviewFfi, type LinkPreviewMetaFfi } from "../services/AvalancheService";
 import { MockAvalancheService } from "../services/MockAvalancheService";
 import { DevServerAvalancheService } from "../services/DevServerAvalancheService";
 
@@ -44,6 +45,10 @@ interface AppStore {
   connectionStates: Record<string, ConnectionState>;
   pendingInviteToken: string | null;
   serverUrl: string;
+  // Desktop-only (T72): close button hides the window to the tray instead of
+  // quitting, so the WS + notifications survive. Persisted; the Rust
+  // CloseRequested handler reads the same key from the plugin-store file.
+  closeToTray: boolean;
 }
 
 // ── Context value ─────────────────────────────────────────────────────────────
@@ -63,6 +68,10 @@ interface AppContextValue {
   logout: () => void;
   serverUrl: () => string;
   setServerUrl: (url: string) => void;
+  // Close-to-tray preference (T72) + manual reconnect (offline banner action).
+  closeToTray: () => boolean;
+  setCloseToTray: (on: boolean) => void;
+  reconnectNow: () => void;
   joinServer: (
     serverUrl: string,
     serverName: string,
@@ -75,6 +84,25 @@ interface AppContextValue {
     senderAccountId: string
   ) => Promise<void>;
   sendGroupMessage: (conversation: Conversation, text: string) => Promise<void>;
+  sendMessageWithAttachments: (
+    conversation: Conversation,
+    text: string,
+    attachments: AttachmentFfi[],
+    previews: LinkPreviewFfi[]
+  ) => Promise<void>;
+  uploadAttachment: (
+    plaintext: number[],
+    contentType: string,
+    fileName: string | null,
+    width: number,
+    height: number,
+    durationMs: number,
+    thumbnail: number[],
+    flags: number
+  ) => Promise<AttachmentFfi>;
+  downloadAttachment: (attachment: AttachmentFfi) => Promise<number[]>;
+  fetchLinkPreview: (url: string) => Promise<LinkPreviewMetaFfi>;
+  openExternal: (url: string) => Promise<void>;
   loadConversationsFromStore: () => Promise<void>;
   loadMessagesFromStore: (conversationId: string, accountId: string) => void;
   markAllMessagesRead: (conversationId: string, accountId: string) => void;
@@ -137,6 +165,19 @@ interface AppContextValue {
   generateRecoveryPhrase: () => Promise<string>;
   recoverFromPhrase: (phrase: string, serverUrl: string, displayName: string) => Promise<void>;
 
+  // Device linking (T71). New-device side (onboarding, account-less):
+  // deviceLinkShowCode (show mode) or deviceLinkEnterCode (paste mode), then
+  // deviceLinkComplete polls until the account arrives (then persists + enters).
+  // Existing-device side (settings, signed in): linkShowCode or linkEnterCode,
+  // then linkSendBundle polls until the bundle is delivered.
+  deviceLinkShowCode: () => Promise<string>;
+  deviceLinkEnterCode: (code: string) => Promise<void>;
+  deviceLinkComplete: () => Promise<void>;
+  deviceLinkCancel: () => Promise<void>;
+  linkShowCode: () => Promise<string>;
+  linkEnterCode: (code: string) => Promise<void>;
+  linkSendBundle: () => Promise<void>;
+
   // Deep links — route a pasted/opened link (conversation/<did>, i/<token>)
   isDeepLink: (raw: string) => boolean;
   handleDeepLink: (raw: string) => void;
@@ -148,6 +189,13 @@ function makeService(mode: ServiceMode): AvalancheService {
   return mode === ServiceMode.Mock
     ? new MockAvalancheService()
     : new DevServerAvalancheService();
+}
+
+// A conversation summary is a group iff it carries a group title or its id uses
+// the `group-` prefix (DM ids are `dm-<account>-<peer>`). Single source of truth
+// for the group/DM split, used by both the name-warm pass and the row builder.
+function isGroupSummary(s: ConversationSummaryFfi): boolean {
+  return s.groupTitle !== null || s.conversationId.startsWith("group-");
 }
 
 function messageFromFfi(m: StoredMessageFfi): Message {
@@ -168,6 +216,8 @@ function messageFromFfi(m: StoredMessageFfi): Message {
     metadata: m.metadata ?? undefined,
     expireTimerSecs: m.expireTimerSecs,
     expireAtMs: m.expireAtMs ?? undefined,
+    attachments: m.attachments,
+    previews: m.previews,
   };
 }
 
@@ -190,6 +240,8 @@ function buildStoredMessage(opts: {
   kind?: number;
   metadata?: string | null;
   expireTimerSecs: number;
+  attachments?: AttachmentFfi[];
+  previews?: LinkPreviewFfi[];
 }): StoredMessageFfi {
   return {
     id: opts.id,
@@ -206,8 +258,8 @@ function buildStoredMessage(opts: {
     metadata: opts.metadata ?? null,
     expireTimerSecs: opts.expireTimerSecs,
     expireAtMs: null,
-    attachments: [],
-    previews: [],
+    attachments: opts.attachments ?? [],
+    previews: opts.previews ?? [],
   };
 }
 
@@ -239,6 +291,9 @@ export function AppProvider(props: { children: JSX.Element }) {
     connectionStates: {},
     pendingInviteToken: null,
     serverUrl: "http://localhost:3000",
+    // Default on: closing keeps the app alive in the tray so messages keep
+    // arriving (matches the Rust-side default in close_to_tray_enabled).
+    closeToTray: true,
   });
 
   const [service, setService] = createSignal<AvalancheService>(
@@ -379,6 +434,26 @@ export function AppProvider(props: { children: JSX.Element }) {
     void persistServerUrl(url);
   }
 
+  // Persist the close-to-tray toggle to the same plugin-store file the Rust
+  // CloseRequested handler reads (`close_to_tray_enabled`).
+  async function persistCloseToTray(on: boolean) {
+    try {
+      const s = await loadStore("avalanche.json");
+      await s.set("closeToTray", on);
+      await s.save();
+    } catch {}
+  }
+
+  function setCloseToTray(on: boolean) {
+    setStore("closeToTray", on);
+    void persistCloseToTray(on);
+  }
+
+  // Manual "Reconnect now" (offline banner). Best-effort — no-op when signed out.
+  function reconnectNow() {
+    void service().reconnectNow().catch(() => { /* signed out / unavailable */ });
+  }
+
   // ── Init: read persisted mode on mount ───────────────────────────────────
 
   void (async () => {
@@ -393,6 +468,10 @@ export function AppProvider(props: { children: JSX.Element }) {
       if (savedServerUrl != null) {
         setStore("serverUrl", savedServerUrl);
       }
+      const savedCloseToTray = await s.get<boolean>("closeToTray");
+      if (savedCloseToTray != null) {
+        setStore("closeToTray", savedCloseToTray);
+      }
     } catch {}
   })();
 
@@ -405,6 +484,32 @@ export function AppProvider(props: { children: JSX.Element }) {
     .then((un) => { deeplinkUnlisten = un; })
     .catch(() => { /* Tauri event API unavailable (browser/test) */ });
   onCleanup(() => deeplinkUnlisten?.());
+
+  // ── Foreground hook ───────────────────────────────────────────────────────
+  // On window focus, tell the core the app is active (T77). This wakes the
+  // reconnect loop and probes a possibly-dead socket — so after the machine
+  // resumes from sleep or a network change, a stale connection (and any
+  // messages sent/read on another linked device meanwhile) recovers promptly
+  // via the reconnect + storage resync, without a restart.
+  //
+  // We deliberately do NOT deactivate on blur, unlike iOS's scenePhase gating.
+  // Desktop has no OS suspension and no push fallback, and close-to-tray
+  // explicitly promises that messages/notifications keep arriving while the
+  // window is hidden — so the keepalive (and its dead-socket detection) must
+  // stay on whenever the process is running. The core defaults to active, so
+  // never calling `setAppActive(false)` keeps the connection alive for the
+  // app's lifetime; focus is purely an opportunistic reconnect trigger.
+  // No-op before sign-in: the command short-circuits when there's no account.
+  let focusUnlisten: (() => void) | undefined;
+  getCurrentWindow()
+    .onFocusChanged(({ payload: focused }) => {
+      if (focused) {
+        void service().setAppActive(true).catch(() => { /* offline / signed out */ });
+      }
+    })
+    .then((un) => { focusUnlisten = un; })
+    .catch(() => { /* Tauri window API unavailable (browser/test) */ });
+  onCleanup(() => focusUnlisten?.());
 
   // ── Account lifecycle ─────────────────────────────────────────────────────
 
@@ -515,6 +620,94 @@ export function AppProvider(props: { children: JSX.Element }) {
     });
 
     enterApp();
+  }
+
+  // ── Device linking (T71) ────────────────────────────────────────────────────
+  // Poll cadence mirrors iOS AppState (1s interval, 180s deadline). The TS layer
+  // drives the loop so it stays cancellable, per docs/04 §4.2 (no long-lived,
+  // uncancellable FFI call).
+  const LINK_POLL_MS = 1000;
+  const LINK_TIMEOUT_MS = 180_000;
+
+  // New device, show mode: generate this device's pairing code to display.
+  async function deviceLinkShowCode(): Promise<string> {
+    return service().deviceLinkCreatePairing(null);
+  }
+
+  // New device, paste mode: accept the existing device's pairing code.
+  async function deviceLinkEnterCode(code: string): Promise<void> {
+    await service().deviceLinkAcceptPairing(code);
+  }
+
+  // New device: poll until the provisioning bundle arrives, then install the
+  // linked account and enter the app — the same completion as createAccount
+  // (account row + persisted record + enterApp). The home server is learned
+  // from the bundle (homeServer()), not from user input.
+  async function deviceLinkComplete(): Promise<void> {
+    const dbPath = `account-${Math.random().toString(36).slice(2, 10)}.db`;
+    const deadline = Date.now() + LINK_TIMEOUT_MS;
+    for (;;) {
+      const result = await service().deviceLinkAwaitStep(dbPath, "dev-placeholder-key");
+      if (result) {
+        const serverUrl = await service().homeServer();
+        const serverInfo: ServerInfo = {
+          id: serverUrl,
+          name: serverUrl,
+          url: serverUrl,
+          displayHost: displayHost(serverUrl, serverUrl),
+        };
+        const account: Account = {
+          id: result.did,
+          displayName: result.displayName,
+          avatarData: null,
+          servers: [serverInfo],
+        };
+        if (!store.accounts.some((a) => a.id === result.did)) {
+          setStore("accounts", (prev) => [...prev, account]);
+        }
+        await addPersistedAccount({
+          did: result.did,
+          displayName: account.displayName,
+          dbPath,
+          servers: [{ id: serverUrl, name: serverUrl, url: serverUrl }],
+        });
+        enterApp();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        await service().deviceLinkReset().catch(() => {});
+        throw new Error("Device link timed out. Please try again.");
+      }
+      await new Promise((r) => setTimeout(r, LINK_POLL_MS));
+    }
+  }
+
+  // New device: abandon an in-progress pairing (view teardown / cancel).
+  async function deviceLinkCancel(): Promise<void> {
+    await service().deviceLinkReset().catch(() => {});
+  }
+
+  // Existing device, show mode: generate this device's pairing code to display.
+  async function linkShowCode(): Promise<string> {
+    return service().linkCreatePairing(null);
+  }
+
+  // Existing device, paste mode: accept the new device's pairing code.
+  async function linkEnterCode(code: string): Promise<void> {
+    await service().linkAcceptPairing(code);
+  }
+
+  // Existing device: poll until the provisioning bundle has been sealed + sent.
+  async function linkSendBundle(): Promise<void> {
+    const deadline = Date.now() + LINK_TIMEOUT_MS;
+    for (;;) {
+      const done = await service().linkSendBundleStep();
+      if (done) return;
+      if (Date.now() >= deadline) {
+        throw new Error("Device link timed out. Please try again.");
+      }
+      await new Promise((r) => setTimeout(r, LINK_POLL_MS));
+    }
   }
 
   function resetSession() {
@@ -781,6 +974,34 @@ export function AppProvider(props: { children: JSX.Element }) {
 
   // ── Messaging ─────────────────────────────────────────────────────────────
 
+  // DIDs whose display names should be warmed from local storage before the
+  // chat list renders (T78, mirrors iOS displayNameDidsToWarm): DM peers, group
+  // last-message senders, and the actor/target of a group system-event preview.
+  function displayNameDidsToWarm(
+    summaries: ConversationSummaryFfi[],
+    accountId: string
+  ): string[] {
+    const dids = new Set<string>();
+    for (const s of summaries) {
+      if (isGroupSummary(s)) {
+        const last = s.lastMessage;
+        if (!last) continue;
+        if (last.senderDid) dids.add(last.senderDid);
+        if (last.kind > 0) {
+          // System-event previews resolve actor/target DIDs (e.g. "Alice made
+          // Bob an admin"), so warm those too.
+          const m = parseGroupEventMeta(last.metadata ?? undefined);
+          if (m?.actor_did) dids.add(m.actor_did);
+          if (m?.target_did) dids.add(m.target_did);
+        }
+      } else {
+        const recipientDid = recipientDidFromConvId(s.conversationId, accountId);
+        if (recipientDid) dids.add(recipientDid);
+      }
+    }
+    return Array.from(dids);
+  }
+
   async function loadConversationsFromStore() {
     if (loadedConversations.value) return;
     loadedConversations.value = true;
@@ -796,8 +1017,26 @@ export function AppProvider(props: { children: JSX.Element }) {
     }
     const serverUrl = getServerUrl(accountId);
 
+    // Warm the display-name cache from local storage (no network) for every DID
+    // these rows will render — DM peers, plus group last-message senders and
+    // system-event actor/target DIDs — before building titles below. Otherwise
+    // DM rows fall back to the raw DID until the async resolver runs, a visible
+    // flash on cold launch. One bulk FFI call (T78, mirrors iOS
+    // displayNameDidsToWarm + cachedDisplayNames).
+    const warmDids = displayNameDidsToWarm(summaries, accountId);
+    if (warmDids.length) {
+      try {
+        const names = await service().cachedDisplayNames(warmDids);
+        for (const [did, name] of Object.entries(names)) {
+          if (name) setDisplayNameCache(did, name);
+        }
+      } catch {
+        // Local-only warm; a failure just means rows resolve via the async path.
+      }
+    }
+
     const convs: Conversation[] = summaries.map((s) => {
-      const isGroup = s.groupTitle !== null || s.conversationId.startsWith("group-");
+      const isGroup = isGroupSummary(s);
       const groupId = s.conversationId.startsWith("group-")
         ? s.conversationId.slice("group-".length)
         : undefined;
@@ -809,6 +1048,15 @@ export function AppProvider(props: { children: JSX.Element }) {
           ? s.groupTitle ?? "Group"
           : displayNameCache[recipientDid ?? ""] ?? recipientDid ?? s.conversationId;
 
+      // Caption-less attachment messages have an empty body — preview them as
+      // "Photo"/"Attachment" using the summary's attachment content type (iOS
+      // chat-list parity).
+      const lastBody = s.lastMessage?.body ?? "";
+      const lastPreview =
+        lastBody.trim().length === 0 && s.lastMessageAttachmentContentType
+          ? attachmentPlaceholder(s.lastMessageAttachmentContentType)
+          : s.lastMessage?.body ?? undefined;
+
       return {
         id: s.conversationId,
         title,
@@ -816,7 +1064,7 @@ export function AppProvider(props: { children: JSX.Element }) {
         serverUrl,
         recipientDid,
         groupId,
-        lastMessage: s.lastMessage?.body ?? undefined,
+        lastMessage: lastPreview,
         lastMessageDate: s.lastMessage?.sentAtMs ?? undefined,
         lastMessageKind: s.lastMessage?.kind ?? 0,
         lastMessageMetadata: s.lastMessage?.metadata ?? undefined,
@@ -824,6 +1072,8 @@ export function AppProvider(props: { children: JSX.Element }) {
         isGroup,
         isRequest: s.isRequest,
         isBlocked: s.isBlocked,
+        // Authoritative unread seed from core (excludes own + expired). (A5)
+        unreadCount: s.unreadCount,
       };
     });
 
@@ -905,7 +1155,9 @@ export function AppProvider(props: { children: JSX.Element }) {
     senderAccountId: string,
     expireTimerSecs: number,
     transportFn: (sentAtMs: number) => Promise<void>,
-    errorMessage: string
+    errorMessage: string,
+    attachments?: AttachmentFfi[],
+    previews?: LinkPreviewFfi[]
   ) {
     const messageId = crypto.randomUUID();
     const sentAtMs = Date.now();
@@ -925,6 +1177,8 @@ export function AppProvider(props: { children: JSX.Element }) {
       // the wire envelope carries, so app-core's reaper expires it too. Without
       // this the sender's own messages never disappear (docs/03 §5).
       expireTimerSecs,
+      attachments,
+      previews,
     };
 
     setStore("messagesByConversation", conversationId, (prev) => [
@@ -934,9 +1188,14 @@ export function AppProvider(props: { children: JSX.Element }) {
 
     // Update conversation preview. Clear any stale group system-event fields so
     // ConversationRow renders this new message, not a prior "X joined" line.
+    // Attachment-only sends (empty body) preview as "Photo"/"Attachment" (iOS parity).
+    const previewText =
+      text.trim().length > 0
+        ? text
+        : attachmentPlaceholder(attachments?.[0]?.contentType);
     const convIdx = store.conversations.findIndex((c) => c.id === conversationId);
     if (convIdx >= 0) {
-      setStore("conversations", convIdx, "lastMessage", text);
+      setStore("conversations", convIdx, "lastMessage", previewText);
       setStore("conversations", convIdx, "lastMessageDate", sentAtMs);
       setStore("conversations", convIdx, "lastMessageKind", 0);
       setStore("conversations", convIdx, "lastMessageMetadata", undefined);
@@ -957,6 +1216,8 @@ export function AppProvider(props: { children: JSX.Element }) {
           readAtMs: sentAtMs,
           deliveryStatus: status,
           expireTimerSecs,
+          attachments,
+          previews,
         })
       );
 
@@ -1024,7 +1285,78 @@ export function AppProvider(props: { children: JSX.Element }) {
     );
   }
 
+  // Send a message carrying attachments and/or link previews to either a DM or a
+  // group — one path for both targets (mirrors iOS sendWithAttachments). Routes
+  // through sendOptimistic so the local row, persistence, and delivery states
+  // behave identically to a plain send. The body may be empty (attachment-only).
+  async function sendMessageWithAttachments(
+    conversation: Conversation,
+    text: string,
+    attachments: AttachmentFfi[],
+    previews: LinkPreviewFfi[]
+  ) {
+    const target = messageTargetFor(conversation);
+    const timer =
+      target.type === "group"
+        ? (await service().groupExpirySeconds(target.group_id).catch(() => 0)) ?? 0
+        : (await service().getConversationTimer(target.recipient_did).catch(() => null)) ?? 0;
+    await sendOptimistic(
+      conversation.id,
+      text,
+      conversation.accountId,
+      timer,
+      (sentAtMs) =>
+        service().sendMessageWithAttachments(target, text, attachments, previews, sentAtMs),
+      "Send failed",
+      attachments,
+      previews
+    );
+  }
+
+  // ── Attachments / link previews / external links (thin service pass-throughs,
+  // kept on the context so views never reach the service directly and Mock mode
+  // keeps working) ─────────────────────────────────────────────────────────────
+  function uploadAttachment(
+    plaintext: number[],
+    contentType: string,
+    fileName: string | null,
+    width: number,
+    height: number,
+    durationMs: number,
+    thumbnail: number[],
+    flags: number
+  ): Promise<AttachmentFfi> {
+    return service().uploadAttachment(
+      plaintext,
+      contentType,
+      fileName,
+      width,
+      height,
+      durationMs,
+      thumbnail,
+      flags
+    );
+  }
+
+  function downloadAttachment(attachment: AttachmentFfi): Promise<number[]> {
+    return service().downloadAttachment(attachment);
+  }
+
+  function fetchLinkPreview(url: string): Promise<LinkPreviewMetaFfi> {
+    return service().fetchLinkPreview(url);
+  }
+
+  function openExternal(url: string): Promise<void> {
+    return service().openExternal(url);
+  }
+
   function markAllMessagesRead(conversationId: string, accountId: string) {
+    // Optimistically clear the seeded unread badge on open (A5). Also flips the
+    // reactive dep so the chat-list badge re-renders as the transcript loads.
+    const ci = store.conversations.findIndex((c) => c.id === conversationId);
+    if (ci >= 0 && store.conversations[ci].unreadCount) {
+      setStore("conversations", ci, "unreadCount", 0);
+    }
     const msgs = store.messagesByConversation[conversationId];
     if (!msgs) return;
     const now = Date.now();
@@ -1519,10 +1851,20 @@ export function AppProvider(props: { children: JSX.Element }) {
   }
 
   function unreadCount(conversation: Conversation): number {
-    const msgs = store.messagesByConversation[conversation.id] ?? [];
-    return msgs.filter(
-      (m) => m.readAtMs === undefined && m.senderAccountId !== conversation.accountId
-    ).length;
+    // Read messagesByConversation unconditionally so this accessor always tracks
+    // it reactively — otherwise a conversation opened with 0 unread never
+    // establishes the dependency and its badge goes stale when a later message
+    // arrives. Once the transcript is loaded, per-message read state is
+    // authoritative (and reflects optimistic clears); before that, use the count
+    // seeded from ConversationSummaryFfi.unreadCount (core excludes own +
+    // expired). Mirrors iOS unreadCount(for:).
+    const msgs = store.messagesByConversation[conversation.id];
+    if (loadedMessages.has(conversation.id)) {
+      return (msgs ?? []).filter(
+        (m) => m.readAtMs === undefined && m.senderAccountId !== conversation.accountId
+      ).length;
+    }
+    return conversation.unreadCount ?? 0;
   }
 
   function displayName(did: string, accountId: string): string {
@@ -1674,6 +2016,17 @@ export function AppProvider(props: { children: JSX.Element }) {
           needsConversationReload = true;
           break;
         }
+        case "conversationUpdated": {
+          // A `SyncSent`/`SyncRead` transcript from another of my own linked
+          // devices changed exactly this conversation's stored content (a
+          // message I sent, an edit/delete/reaction I made, or read-state I
+          // cleared). Re-read just this timeline so it surfaces live, then
+          // refresh the chat-list preview. Mirrors iOS `conversationUpdated`.
+          const cu = ev as Extract<IncomingEvent, { type: "conversationUpdated" }>;
+          reloadMessagesIfLoaded(cu.conversation_id);
+          needsConversationReload = true;
+          break;
+        }
         case "groupInvite":
         case "storageSynced":
           needsConversationReload = true;
@@ -1743,11 +2096,29 @@ export function AppProvider(props: { children: JSX.Element }) {
       isDeleted: false,
       kind: 0,
       expireTimerSecs: m.expireTimerSecs,
+      attachments: m.attachments,
+      previews: m.previews,
     };
     setStore("messagesByConversation", conversationId, (prev) => [
       ...(prev ?? []),
       msg,
     ]);
+    // Chat-list preview: real text, else "Photo"/"Attachment" for an
+    // attachment-only message (iOS parity).
+    const previewSource =
+      body.trim().length > 0
+        ? body
+        : attachmentPlaceholder(m.attachments[0]?.contentType);
+    const previewText =
+      previewSource.length > 100 ? previewSource.slice(0, 100) + "…" : previewSource;
+    // Seed/bump the unread badge for conversations whose transcript isn't loaded
+    // (the loaded case is counted from per-message read state). (A5)
+    if (!loadedMessages.has(conversationId)) {
+      const ci = store.conversations.findIndex((c) => c.id === conversationId);
+      if (ci >= 0) {
+        setStore("conversations", ci, "unreadCount", (n) => (n ?? 0) + 1);
+      }
+    }
     // Fire a native notification for the inbound message (suppressed when the
     // user is already viewing this conversation in a focused window).
     void maybeNotify(conversationId, m.senderDid, body);
@@ -1768,6 +2139,8 @@ export function AppProvider(props: { children: JSX.Element }) {
           readAtMs: null,
           deliveryStatus: msg.deliveryStatus,
           expireTimerSecs: m.expireTimerSecs,
+          attachments: m.attachments,
+          previews: m.previews,
         })
       )
       .catch((err: unknown) => {
@@ -1777,7 +2150,6 @@ export function AppProvider(props: { children: JSX.Element }) {
     // Update conversation preview, or create the conversation in-memory.
     const convIdx = store.conversations.findIndex((c) => c.id === conversationId);
     if (convIdx >= 0) {
-      const previewText = body.length > 100 ? body.slice(0, 100) + "…" : body;
       setStore("conversations", convIdx, "lastMessage", previewText);
       setStore(
         "conversations",
@@ -1806,12 +2178,14 @@ export function AppProvider(props: { children: JSX.Element }) {
         serverUrl,
         recipientDid: isGroup ? undefined : m.senderDid,
         groupId: m.groupId ?? undefined,
-        lastMessage: body.length > 100 ? body.slice(0, 100) + "…" : body,
+        lastMessage: previewText,
         lastMessageDate: m.sentAtMs ?? Date.now(),
         lastMessageKind: 0,
         isGroup,
         isRequest,
         isBlocked: false,
+        // First message in a brand-new (unopened) conversation → 1 unread. (A5)
+        unreadCount: 1,
       };
       pendingConversations.add(conversationId);
       setStore("conversations", (prev) => [newConv, ...prev]);
@@ -2083,9 +2457,17 @@ export function AppProvider(props: { children: JSX.Element }) {
     logout,
     serverUrl: () => store.serverUrl,
     setServerUrl,
+    closeToTray: () => store.closeToTray,
+    setCloseToTray,
+    reconnectNow,
     joinServer,
     sendMessage,
     sendGroupMessage,
+    sendMessageWithAttachments,
+    uploadAttachment,
+    downloadAttachment,
+    fetchLinkPreview,
+    openExternal,
     loadConversationsFromStore,
     loadMessagesFromStore,
     markAllMessagesRead,
@@ -2124,6 +2506,13 @@ export function AppProvider(props: { children: JSX.Element }) {
     hasRecovery,
     generateRecoveryPhrase,
     recoverFromPhrase,
+    deviceLinkShowCode,
+    deviceLinkEnterCode,
+    deviceLinkComplete,
+    deviceLinkCancel,
+    linkShowCode,
+    linkEnterCode,
+    linkSendBundle,
     isDeepLink,
     handleDeepLink,
   };

@@ -9,7 +9,9 @@ import { FiMoreHorizontal } from "solid-icons/fi";
 import { useApp } from "../state/AppContext";
 import type { Conversation, Message } from "../models";
 import { DeliveryStatus } from "../models/Message";
-import { formatTime } from "../lib/format";
+import { formatTime, linkify } from "../lib/format";
+import AttachmentView from "./AttachmentView";
+import LinkPreviewCard from "./LinkPreviewCard";
 import "./MessageBubble.css";
 
 const DELIVERY_ICON_SIZE = 14;
@@ -31,6 +33,10 @@ export default function MessageBubble(props: Props) {
   const deleted = () => props.message.isDeleted;
   const myDid = () => props.conversation.accountId;
   const canEdit = () => props.mine && !deleted();
+  const attachments = () => props.message.attachments ?? [];
+  const previews = () => props.message.previews ?? [];
+  // Omit the empty text bubble for an attachment-only message (iOS parity).
+  const showBubble = () => props.message.body.length > 0 || attachments().length === 0;
 
   // Reaction clusters grouped by emoji, preserving first-appearance order.
   const clusters = () => {
@@ -82,9 +88,40 @@ export default function MessageBubble(props: Props) {
           <div class="deleted-tombstone">This message was deleted</div>
         ) : (
           <>
-            <div class="bubble" onContextMenu={openMenu}>
-              {props.message.body}
-            </div>
+            <Show when={attachments().length > 0}>
+              <div class="attachment-list" onContextMenu={openMenu}>
+                <For each={attachments()}>
+                  {(a) => <AttachmentView attachment={a} />}
+                </For>
+              </div>
+            </Show>
+            <Show when={showBubble()}>
+              <div class="bubble" onContextMenu={openMenu}>
+                <For each={linkify(props.message.body)}>
+                  {(seg) => (
+                    <Show when={seg.href} fallback={seg.text}>
+                      <a
+                        class="bubble-link"
+                        href={seg.href}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void app.openExternal(seg.href!);
+                        }}
+                      >
+                        {seg.text}
+                      </a>
+                    </Show>
+                  )}
+                </For>
+              </div>
+            </Show>
+            <Show when={previews().length > 0}>
+              <div class="preview-list" onContextMenu={openMenu}>
+                <For each={previews()}>
+                  {(p) => <LinkPreviewCard preview={p} />}
+                </For>
+              </div>
+            </Show>
             <button
               class="bubble-menu-btn"
               aria-label="Message actions"

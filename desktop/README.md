@@ -40,7 +40,3 @@ make dev-invite       # prints an invite link — paste it on the onboarding scr
 ## Testbot AI
 
 The testbot echoes by default. To get real AI responses, add credentials to `.env` at the repo root (any Anthropic-compatible endpoint works). Restart `make dev-all` after editing.
-
-## Mock mode
-
-Click the ⚙ gear in the sidebar and select **Mock** — seeded in-memory data, no server needed.

@@ -50,6 +50,14 @@ val appVersionCode: Int =
 val releaseStoreFile: String? = System.getenv("RELEASE_KEYSTORE_FILE")
 val hasReleaseSigning: Boolean = releaseStoreFile != null && file(releaseStoreFile).exists()
 
+// `-PdebugSignRelease`: sign the (minified) release build with the auto-generated
+// debug keystore instead of the release key. The point is local testing of the
+// R8/shrunk build — a debug-signed release APK installs *over* a `make android`
+// debug install (same key, same applicationId) with no signature-mismatch
+// reinstall, so app data/login survive. NOT for distribution. See
+// `make android-minify-test`.
+val debugSignRelease: Boolean = project.hasProperty("debugSignRelease")
+
 android {
     namespace = "net.theavalanche.app"
     // API 37 (major). The upgraded AndroidX libs (compose-bom 2026.06, core-ktx
@@ -103,15 +111,25 @@ android {
             ndk {
                 abiFilters += "arm64-v8a"
             }
-            optimization {
-                enable = false
-            }
-            // Sign with the release key when configured; otherwise leave unsigned
-            // (a debug-only checkout can't and shouldn't produce a signed release).
-            signingConfig = if (hasReleaseSigning) {
-                signingConfigs.getByName("release")
-            } else {
-                null
+            // R8 code shrinking + resource shrinking. The big win is stripping the
+            // ~thousands of unused material-icons-extended classes and dead
+            // AndroidX/Compose paths from the (otherwise unshrunk) dex. Keep rules
+            // for JNA/UniFFI/serialization live in proguard-rules.pro — without them
+            // the reflective native-binding layer would be stripped and crash.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // Sign with the debug key when `-PdebugSignRelease` is set (local
+            // R8-build testing), else the release key when configured, else leave
+            // unsigned (a debug-only checkout can't and shouldn't produce a signed
+            // release).
+            signingConfig = when {
+                debugSignRelease -> signingConfigs.getByName("debug")
+                hasReleaseSigning -> signingConfigs.getByName("release")
+                else -> null
             }
         }
     }

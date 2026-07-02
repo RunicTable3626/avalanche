@@ -19,11 +19,10 @@ import type { Account, Conversation, InviteInfo, ServerInfo } from "../models";
 import { displayHost, attachmentPlaceholder } from "../lib/format";
 import { parseGroupEventMeta } from "../lib/groupEvents";
 import { DeliveryStatus, type Message } from "../models/Message";
-import { ServiceMode, type AvalancheService, type ConnectionState, type ConversationSummaryFfi, type IncomingEvent, type ReactionFfi, type MessageRevisionFfi, type MessageTarget, type JoinResultFfi, type ContactRowFfi, type AttachmentFfi, type LinkPreviewFfi, type LinkPreviewMetaFfi } from "../services/AvalancheService";
-import { DevServerAvalancheService } from "../services/DevServerAvalancheService";
+import { ServiceMode, type ConnectionState, type ConversationSummaryFfi, type IncomingEvent, type ReactionFfi, type MessageRevisionFfi, type MessageTarget, type JoinResultFfi, type ContactRowFfi, type AttachmentFfi, type LinkPreviewFfi, type LinkPreviewMetaFfi } from "../services/AvalancheService";
 import type { AppContextValue, AppStore, PersistedAccount, SessionGuards } from "./types";
+import { createServices } from "./createServices";
 import {
-  makeService,
   isGroupSummary,
   messageFromFfi,
   buildStoredMessage,
@@ -57,53 +56,10 @@ export function AppProvider(props: { children: JSX.Element }) {
     closeToTray: true,
   });
 
-  // One AvalancheService per signed-in account, keyed by accountId — the desktop
-  // analog of iOS/Android's `cores` map (all identities share one inbox; there
-  // is no "active" account). `serviceFor(accountId)` resolves the per-account
-  // service: a DevServer instance binds its accountId into every Tauri command;
-  // a Mock instance holds that account's own seeded state. Account-less factory
-  // and pure calls (createAccount, validateInvite, recoveryPhraseToSeed, …) use
-  // `onboardingService()`.
-  const services = new Map<string, AvalancheService>();
-  // The service for the account currently being added (createAccount / login /
-  // recover / device-link). For Mock it accumulates that account's seeded state
-  // and becomes the account's service on success (then we rotate a fresh one for
-  // the next add); for DevServer it's an unbound instance used only for the
-  // account-less calls above. Per-instance, never a module global
-  // (desktop/CLAUDE.md "Mock/dev services hold per-instance state").
-  let onboardingSvc: AvalancheService = makeService(store.serviceMode);
-
-  function onboardingService(): AvalancheService {
-    return onboardingSvc;
-  }
-
-  function serviceFor(accountId: string): AvalancheService {
-    const existing = services.get(accountId);
-    if (existing) return existing;
-    // DevServer is stateless per account — bind lazily so a restored account
-    // resolves even before registerAccountService runs. For Mock, a missing
-    // entry means it was never registered (the seeded state lives in the
-    // instance), so fall back to the onboarding instance keyed under this id.
-    if (store.serviceMode === ServiceMode.DevServer) {
-      const bound = new DevServerAvalancheService(accountId);
-      services.set(accountId, bound);
-      return bound;
-    }
-    services.set(accountId, onboardingSvc);
-    return onboardingSvc;
-  }
-
-  // Register the just-created/restored account's service. Mock: the onboarding
-  // instance carries the seeded state, so it becomes this account's service and
-  // we rotate a fresh one for the next add. DevServer: bind a fresh instance.
-  function registerAccountService(accountId: string) {
-    if (store.serviceMode === ServiceMode.Mock) {
-      services.set(accountId, onboardingSvc);
-      onboardingSvc = makeService(ServiceMode.Mock);
-    } else {
-      services.set(accountId, new DevServerAvalancheService(accountId));
-    }
-  }
+  // Per-account service resolution (see createServices.ts). Destructured so the
+  // hot call sites (`serviceFor(...)`, `onboardingService()`) read unchanged.
+  const services = createServices({ store });
+  const { onboardingService, serviceFor, registerAccountService } = services;
 
   // Selected conversation — lifted into context so compose/group/join flows
   // can programmatically open a conversation. ChatsView mirrors this signal.
@@ -534,10 +490,9 @@ export function AppProvider(props: { children: JSX.Element }) {
     for (const account of store.accounts) {
       serviceFor(account.id).clearSession().catch(() => {});
     }
-    services.clear();
-    // Fresh onboarding service so mock state (storedMessages, pendingEvents,
-    // mockDid) can't bleed into the next session — never a module global.
-    onboardingSvc = makeService(store.serviceMode);
+    // Drop every account's service and rotate a fresh onboarding service so
+    // mock state can't bleed into the next session (see createServices.resetAll).
+    services.resetAll();
     // Block restoreAccounts from re-entering while we clear persisted state.
     // Otherwise SplashView.onMount fires restoreAccounts before persistAccounts([])
     // completes, finding stale accounts and auto-signing-in — undoing the logout.
@@ -616,7 +571,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     stopPollingFor(accountId);
     // Drop the backend core (no-op if delete_identity already removed it).
     await serviceFor(accountId).clearSession().catch(() => {});
-    services.delete(accountId);
+    services.remove(accountId);
     setStore(
       produce((s) => {
         s.accounts = s.accounts.filter((a) => a.id !== accountId);

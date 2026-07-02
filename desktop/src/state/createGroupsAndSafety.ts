@@ -1,16 +1,16 @@
 import type { SetStoreFunction } from "solid-js/store";
 import type { Conversation } from "../models";
 import type {
-  AvalancheService,
   JoinResultFfi,
   ContactRowFfi,
 } from "../services/AvalancheService";
+import type { Services } from "./createServices";
 import type { AppContextValue, AppStore, SessionGuards } from "./types";
 
 export interface GroupsAndSafetyDeps {
   store: AppStore;
   setStore: SetStoreFunction<AppStore>;
-  serviceFor: (accountId: string) => AvalancheService;
+  serviceFor: Services["serviceFor"];
   guards: SessionGuards;
   reloadConversations: () => Promise<void>;
   findOrCreateGroupConversation: (

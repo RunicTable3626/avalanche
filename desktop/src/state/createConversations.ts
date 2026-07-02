@@ -3,7 +3,6 @@ import type { Conversation } from "../models";
 import { attachmentPlaceholder } from "../lib/format";
 import { parseGroupEventMeta } from "../lib/groupEvents";
 import type {
-  AvalancheService,
   ConversationSummaryFfi,
 } from "../services/AvalancheService";
 import {
@@ -13,12 +12,13 @@ import {
   decodeInviteToken,
   trimSlashes,
 } from "./helpers";
+import type { Services } from "./createServices";
 import type { AppContextValue, AppStore, SessionGuards } from "./types";
 
 export interface ConversationsDeps {
   store: AppStore;
   setStore: SetStoreFunction<AppStore>;
-  serviceFor: (accountId: string) => AvalancheService;
+  serviceFor: Services["serviceFor"];
   guards: SessionGuards;
   setSelectedConversationId: (id: string | null) => void;
 }

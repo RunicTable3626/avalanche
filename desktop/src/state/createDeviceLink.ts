@@ -1,15 +1,15 @@
 import type { SetStoreFunction } from "solid-js/store";
 import type { Account, ServerInfo } from "../models";
 import { displayHost } from "../lib/format";
-import type { AvalancheService } from "../services/AvalancheService";
+import type { Services } from "./createServices";
 import type { AppContextValue, AppStore, PersistedAccount } from "./types";
 
 export interface DeviceLinkDeps {
   store: AppStore;
   setStore: SetStoreFunction<AppStore>;
-  onboardingService: () => AvalancheService;
-  serviceFor: (accountId: string) => AvalancheService;
-  registerAccountService: (accountId: string) => void;
+  onboardingService: Services["onboardingService"];
+  serviceFor: Services["serviceFor"];
+  registerAccountService: Services["registerAccountService"];
   enterApp: () => void;
   addPersistedAccount: (pa: PersistedAccount) => Promise<void>;
 }

@@ -3,7 +3,6 @@ import type { Conversation } from "../models";
 import { DeliveryStatus, type Message } from "../models/Message";
 import { attachmentPlaceholder } from "../lib/format";
 import type {
-  AvalancheService,
   ReactionFfi,
   MessageRevisionFfi,
   MessageTarget,
@@ -12,13 +11,14 @@ import type {
   LinkPreviewMetaFfi,
 } from "../services/AvalancheService";
 import { messageFromFfi, buildStoredMessage } from "./helpers";
+import type { Services } from "./createServices";
 import type { AppContextValue, AppStore, SessionGuards } from "./types";
 
 export interface MessagingDeps {
   store: AppStore;
   setStore: SetStoreFunction<AppStore>;
-  serviceFor: (accountId: string) => AvalancheService;
-  onboardingService: () => AvalancheService;
+  serviceFor: Services["serviceFor"];
+  onboardingService: Services["onboardingService"];
   guards: SessionGuards;
   accountIdForConversation: (conversationId: string) => string | null;
 }

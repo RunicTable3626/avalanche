@@ -88,20 +88,6 @@ export function buildStoredMessage(opts: {
   };
 }
 
-// Delivery-status progression rank: sending(0) → sent(1) → delivered(2) → read(3).
-// `failed` gets -1 so a failure only applies from a non-terminal state and is
-// never treated as "more advanced" than read. Used by applyDeliveryStatusUpdates
-// to ensure receipts only ever move a message forward.
-export function deliveryRank(s: DeliveryStatus): number {
-  switch (s) {
-    case DeliveryStatus.sending:   return 0;
-    case DeliveryStatus.sent:      return 1;
-    case DeliveryStatus.delivered: return 2;
-    case DeliveryStatus.read:      return 3;
-    case DeliveryStatus.failed:    return -1;
-  }
-}
-
 export function recipientDidFromConvId(
   convId: string,
   accountId: string

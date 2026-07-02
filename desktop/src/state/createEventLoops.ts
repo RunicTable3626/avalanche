@@ -10,17 +10,18 @@ import type { Conversation } from "../models";
 import { attachmentPlaceholder } from "../lib/format";
 import { DeliveryStatus, type Message } from "../models/Message";
 import type {
-  AvalancheService,
   ConnectionState,
   IncomingEvent,
 } from "../services/AvalancheService";
-import { buildStoredMessage, deliveryRank } from "./helpers";
+import { deliveryRank } from "../lib/format";
+import { buildStoredMessage } from "./helpers";
+import type { Services } from "./createServices";
 import type { AppContextValue, AppStore, SessionGuards } from "./types";
 
 export interface EventLoopsDeps {
   store: AppStore;
   setStore: SetStoreFunction<AppStore>;
-  serviceFor: (accountId: string) => AvalancheService;
+  serviceFor: Services["serviceFor"];
   guards: SessionGuards;
   reloadConversations: () => Promise<void>;
   getServerUrl: (accountId: string) => string;

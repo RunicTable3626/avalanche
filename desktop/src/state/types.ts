@@ -46,6 +46,31 @@ export interface AppStore {
   closeToTray: boolean;
 }
 
+// ── Session guards ────────────────────────────────────────────────────────────
+
+// Cross-concern load-once / lifecycle guard collections, deliberately
+// non-reactive (never read in a tracking scope for rendering). Owned by the
+// provider composition root and passed by reference into each state module;
+// resetSession clears them all. Kept in one named object so every cross-module
+// mutation is greppable as `guards.`.
+export interface SessionGuards {
+  // True once the merged conversation list has been loaded this session.
+  loadedConversations: { value: boolean };
+  // Conversation ids whose message timelines have been loaded.
+  loadedMessages: Set<string>;
+  // Conversation ids whose reactions have been loaded.
+  loadedReactions: Set<string>;
+  // Conversation ids created in-memory (e.g. an incoming DM in a brand-new
+  // thread) that aren't yet backed by a row in the local DB.
+  // loadConversationsFromStore preserves only these across a reload, NOT
+  // arbitrary DB-absent entries, which would resurrect conversations the DB
+  // intentionally dropped. The incoming-message handler persists the received
+  // message (so the conversation appears in the DB summaries on the next
+  // reload), and this set bridges the brief gap until that reload runs; the
+  // drop-on-DB-appearance path then hands it back to normal lifecycle.
+  pendingConversations: Set<string>;
+}
+
 // ── Context value ─────────────────────────────────────────────────────────────
 
 export interface AppContextValue {

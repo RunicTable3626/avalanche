@@ -21,7 +21,7 @@ import { parseGroupEventMeta } from "../lib/groupEvents";
 import { DeliveryStatus, type Message } from "../models/Message";
 import { ServiceMode, type AvalancheService, type ConnectionState, type ConversationSummaryFfi, type IncomingEvent, type ReactionFfi, type MessageRevisionFfi, type MessageTarget, type JoinResultFfi, type ContactRowFfi, type AttachmentFfi, type LinkPreviewFfi, type LinkPreviewMetaFfi } from "../services/AvalancheService";
 import { DevServerAvalancheService } from "../services/DevServerAvalancheService";
-import type { AppContextValue, AppStore, PersistedAccount } from "./types";
+import type { AppContextValue, AppStore, PersistedAccount, SessionGuards } from "./types";
 import {
   makeService,
   isGroupSummary,
@@ -129,25 +129,20 @@ export function AppProvider(props: { children: JSX.Element }) {
   const [isBotCache, setIsBotCache] = createStore<Record<string, boolean>>({});
   const isBotPending: Set<string> = new Set();
 
-  // Load-once guards
-  const loadedConversations = { value: false };
-  const loadedMessages: Set<string> = new Set();
+  // Load-once / lifecycle guards shared across the state modules (see the
+  // SessionGuards doc in ./types.ts).
+  const guards: SessionGuards = {
+    loadedConversations: { value: false },
+    loadedMessages: new Set(),
+    loadedReactions: new Set(),
+    pendingConversations: new Set(),
+  };
   // Coalesces forced conversation reloads (the inbound-event handlers plus
   // safety/group actions) so their store reconciles don't interleave. A reload
   // requested while one is in flight queues exactly one follow-up rather than
   // launching a second interleaving load.
   let reloadInFlight: Promise<void> | null = null;
   let reloadQueued = false;
-  const loadedReactions: Set<string> = new Set();
-  // Conversation ids created in-memory (e.g. an incoming DM in a brand-new
-  // thread) that aren't yet backed by a row in the local DB.
-  // loadConversationsFromStore preserves only these across a reload, NOT
-  // arbitrary DB-absent entries, which would resurrect conversations the DB
-  // intentionally dropped. The incoming-message handler persists the received
-  // message (so the conversation appears in the DB summaries on the next
-  // reload), and this set bridges the brief gap until that reload runs; the
-  // drop-on-DB-appearance path below then hands it back to normal lifecycle.
-  const pendingConversations: Set<string> = new Set();
 
   // Event + connection loop lifecycle, one of each per account (mirrors iOS
   // eventTasks/stateTasks and Android eventJobs/stateJobs). A loop runs while its
@@ -321,7 +316,7 @@ export function AppProvider(props: { children: JSX.Element }) {
   // the onboarding flag.  All three paths (createAccount, restoreAccounts,
   // joinServer) must call this — never inline the steps individually.
   function enterApp() {
-    loadedConversations.value = false;
+    guards.loadedConversations.value = false;
     void loadConversationsFromStore();
     // Idempotent per account: existing loops are not restarted; a newly added
     // account's loops start here. This is what makes "sign in another account"
@@ -559,10 +554,10 @@ export function AppProvider(props: { children: JSX.Element }) {
       })
     );
     setSelectedConversationId(null);
-    loadedConversations.value = false;
-    loadedMessages.clear();
-    loadedReactions.clear();
-    pendingConversations.clear();
+    guards.loadedConversations.value = false;
+    guards.loadedMessages.clear();
+    guards.loadedReactions.clear();
+    guards.pendingConversations.clear();
     // Reset the reactive display-name cache so components get a reactive
     // update on logout/mode-switch.
     setDisplayNameCache(reconcile({}));
@@ -806,13 +801,13 @@ export function AppProvider(props: { children: JSX.Element }) {
   }
 
   async function loadConversationsFromStore() {
-    if (loadedConversations.value) return;
-    loadedConversations.value = true;
+    if (guards.loadedConversations.value) return;
+    guards.loadedConversations.value = true;
 
     if (store.accounts.length === 0) {
       // No account signed in — reset the guard so a later load (once an account
       // enters) isn't permanently suppressed.
-      loadedConversations.value = false;
+      guards.loadedConversations.value = false;
       setStore("conversations", []);
       return;
     }
@@ -905,11 +900,11 @@ export function AppProvider(props: { children: JSX.Element }) {
     const dbIds = new Set(all.map((c) => c.id));
     // A pending conversation that now appears in the DB is fully persisted —
     // stop tracking it so it follows normal DB-driven lifecycle from here on.
-    for (const id of dbIds) pendingConversations.delete(id);
+    for (const id of dbIds) guards.pendingConversations.delete(id);
     // Preserve only still-unpersisted in-memory conversations. Other DB-absent
     // entries (e.g. a group the DB dropped after leaving) are intentionally let go.
     const preserved = store.conversations.filter(
-      (c) => !dbIds.has(c.id) && pendingConversations.has(c.id)
+      (c) => !dbIds.has(c.id) && guards.pendingConversations.has(c.id)
     );
     const merged = [...all, ...preserved].sort(
       (a, b) => (b.lastMessageDate ?? 0) - (a.lastMessageDate ?? 0)
@@ -927,7 +922,7 @@ export function AppProvider(props: { children: JSX.Element }) {
       reloadQueued = true;
       return reloadInFlight;
     }
-    loadedConversations.value = false;
+    guards.loadedConversations.value = false;
     reloadInFlight = loadConversationsFromStore().finally(() => {
       reloadInFlight = null;
       if (reloadQueued) {
@@ -945,7 +940,7 @@ export function AppProvider(props: { children: JSX.Element }) {
   // from the reload was deliberately deleted (expired by the disappearing-
   // messages reaper, docs/03 §5, or tombstoned), so it must leave the UI too.
   function reloadMessagesIfLoaded(cid: string) {
-    if (!loadedMessages.has(cid)) return;
+    if (!guards.loadedMessages.has(cid)) return;
     const accountId = accountIdForConversation(cid);
     if (accountId === null) return;
     void serviceFor(accountId)
@@ -959,8 +954,8 @@ export function AppProvider(props: { children: JSX.Element }) {
   }
 
   function loadMessagesFromStore(conversationId: string, accountId: string) {
-    if (loadedMessages.has(conversationId)) return;
-    loadedMessages.add(conversationId);
+    if (guards.loadedMessages.has(conversationId)) return;
+    guards.loadedMessages.add(conversationId);
 
     void serviceFor(accountId)
       .loadMessages(conversationId)
@@ -972,7 +967,7 @@ export function AppProvider(props: { children: JSX.Element }) {
       })
       .catch((err) => {
         console.warn("loadMessages failed for", conversationId, err);
-        loadedMessages.delete(conversationId);
+        guards.loadedMessages.delete(conversationId);
       });
   }
 
@@ -1270,8 +1265,8 @@ export function AppProvider(props: { children: JSX.Element }) {
     // Track as pending so a reload (e.g. a storageSynced event firing before
     // the first message persists) doesn't drop this freshly-opened, selected
     // conversation — loadConversationsFromStore only preserves DB-absent
-    // conversations that are in pendingConversations.
-    pendingConversations.add(convId);
+    // conversations that are in guards.pendingConversations.
+    guards.pendingConversations.add(convId);
     setStore("conversations", (prev) => [...prev, conv]);
     return conv;
   }
@@ -1297,7 +1292,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     };
     // See findOrCreateDMConversation — a just-created group isn't in the DB
     // summaries yet, so preserve it across reloads until its state syncs.
-    pendingConversations.add(convId);
+    guards.pendingConversations.add(convId);
     setStore("conversations", (prev) => [...prev, conv]);
     return conv;
   }
@@ -1323,10 +1318,10 @@ export function AppProvider(props: { children: JSX.Element }) {
   }
 
   function loadReactions(conversationId: string) {
-    if (loadedReactions.has(conversationId)) return;
+    if (guards.loadedReactions.has(conversationId)) return;
     const accountId = accountIdForConversation(conversationId);
     if (accountId === null) return;
-    loadedReactions.add(conversationId);
+    guards.loadedReactions.add(conversationId);
     void serviceFor(accountId)
       .loadReactions(conversationId)
       .then((rows) => {
@@ -1334,7 +1329,7 @@ export function AppProvider(props: { children: JSX.Element }) {
       })
       .catch((err: unknown) => {
         console.warn("loadReactions failed for", conversationId, err);
-        loadedReactions.delete(conversationId);
+        guards.loadedReactions.delete(conversationId);
       });
   }
 
@@ -1630,7 +1625,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     // it if app-core stops returning the left group.
     const idx = store.conversations.findIndex((c) => c.id === conversation.id);
     if (idx >= 0) setStore("conversations", idx, "hasLeft", true);
-    pendingConversations.add(conversation.id);
+    guards.pendingConversations.add(conversation.id);
   }
 
   // ── Track D: message requests / blocking / timers ──────────────────────────
@@ -1727,7 +1722,7 @@ export function AppProvider(props: { children: JSX.Element }) {
     // seeded from ConversationSummaryFfi.unreadCount (core excludes own +
     // expired). Mirrors iOS unreadCount(for:).
     const msgs = store.messagesByConversation[conversation.id];
-    if (loadedMessages.has(conversation.id)) {
+    if (guards.loadedMessages.has(conversation.id)) {
       return (msgs ?? []).filter(
         (m) => m.readAtMs === undefined && m.senderAccountId !== conversation.accountId
       ).length;
@@ -1979,7 +1974,7 @@ export function AppProvider(props: { children: JSX.Element }) {
       previewSource.length > 100 ? previewSource.slice(0, 100) + "…" : previewSource;
     // Seed/bump the unread badge for conversations whose transcript isn't loaded
     // (the loaded case is counted from per-message read state). (A5)
-    if (!loadedMessages.has(conversationId)) {
+    if (!guards.loadedMessages.has(conversationId)) {
       const ci = store.conversations.findIndex((c) => c.id === conversationId);
       if (ci >= 0) {
         setStore("conversations", ci, "unreadCount", (n) => (n ?? 0) + 1);
@@ -2053,7 +2048,7 @@ export function AppProvider(props: { children: JSX.Element }) {
         // First message in a brand-new (unopened) conversation → 1 unread. (A5)
         unreadCount: 1,
       };
-      pendingConversations.add(conversationId);
+      guards.pendingConversations.add(conversationId);
       setStore("conversations", (prev) => [newConv, ...prev]);
       if (isRequest) {
         void serviceFor(accountId)
